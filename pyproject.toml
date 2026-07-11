@@ -1,0 +1,31 @@
+[project]
+name = "moa"
+version = "0.1.0"
+description = "Mudae Optimization Assistant"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "rich",
+    "textual",
+    "typer",
+    "pydantic",
+    "sqlalchemy",
+    "aiosqlite",
+    "rapidfuzz",
+    "orjson",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "black",
+]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
