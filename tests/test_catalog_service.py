@@ -144,3 +144,27 @@ def test_import_mmy_page_keeps_unresolved_names_without_losing_key_data(tmp_path
     refreshed_entries = service.harem_keys("Lake Arrowhead 2025", "ernieuuu")
     assert refreshed_entries[1].character is not None
     assert refreshed_entries[1].character.series == "Go-Toubun no Hanayome"
+
+
+def test_import_mmyk_page_persists_current_harem_kakera_values(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    page_text = (
+        "Megumin · :silverkey:  (5) 1,505 ka\n"
+        "Albedo · :goldkey:  (7) 1,453 ka\n"
+        "Page 1 / 6"
+    )
+
+    service.import_harem_key_page(
+        MudaeTextParser().parse_harem_key_page(page_text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        page_text,
+        "clipboard",
+    )
+
+    entries = service.harem_keys("Lake Arrowhead 2025", "ernieuuu")
+    assert [(entry.character_name, entry.kakera_value) for entry in entries] == [
+        ("Megumin", 1505),
+        ("Albedo", 1453),
+    ]

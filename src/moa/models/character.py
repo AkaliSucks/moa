@@ -42,16 +42,18 @@ class RollObservation(MOAModel):
 
 
 class HaremKeyEntry(MOAModel):
-    """One keyed character displayed by Mudae's `$mmy=` harem view."""
+    """One keyed character displayed by a Mudae keyed-harem view."""
 
     name: str
     key_type: str
     key_count: int
+    kakera_value: int | None = None
 
 
 class HaremKeyPage(MOAModel):
-    """A single parsed page from Mudae's `$mmy=` keyed-harem view."""
+    """A single parsed page from a Mudae keyed-harem view."""
 
     page_number: int | None
     page_count: int | None
     entries: tuple[HaremKeyEntry, ...]
+    total_harem_value: int | None = None

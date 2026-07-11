@@ -237,7 +237,7 @@ def parse_mm(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Parse one copied Mudae `$mmy=` keyed-harem page."""
+    """Parse one copied Mudae `$mmy=`/`$mmyk=` keyed-harem page."""
     try:
         page = MudaeTextParser().parse_harem_key_page(_read_message_source(path, clipboard))
     except MudaeParseError as error:
@@ -254,9 +254,17 @@ def parse_mm(
     table.add_column("Character", style="green")
     table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Kakera", justify="right", style="magenta")
     for entry in page.entries:
-        table.add_row(entry.name, entry.key_type.title(), str(entry.key_count))
+        table.add_row(
+            entry.name,
+            entry.key_type.title(),
+            str(entry.key_count),
+            _format_optional_number(entry.kakera_value),
+        )
     console.print(table)
+    if page.total_harem_value is not None:
+        console.print(f"[bold]Total harem value:[/bold] {page.total_harem_value:,} Kakera")
 
 
 @import_app.command("top")
@@ -310,7 +318,7 @@ def import_mm(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Parse and persist one `$mmy=` page for a server/account harem."""
+    """Parse and persist one `$mmy=` or `$mmyk=` page for a server/account harem."""
     raw_message = _read_message_source(path, clipboard)
     try:
         page = MudaeTextParser().parse_harem_key_page(raw_message)
@@ -413,6 +421,7 @@ def catalog_harem(
     table.add_column("Character", style="green")
     table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Kakera", justify="right", style="magenta")
     table.add_column("Catalog link")
     table.add_column("Observed (UTC)")
     for entry in entries:
@@ -420,10 +429,46 @@ def catalog_harem(
             entry.character_name,
             entry.key_type.title(),
             str(entry.key_count),
+            _format_optional_number(entry.kakera_value),
             "Resolved" if entry.character else "Needs $im",
             entry.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
+
+
+@catalog_app.command("keyfarm")
+def catalog_keyfarm(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to shortlist."),
+    limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of entries to display."),
+) -> None:
+    """Show the highest-value imported keyed characters for a future key-farm plan."""
+    entries = CatalogService().harem_keys(server, account)
+    valued_entries = [entry for entry in entries if entry.kakera_value is not None][:limit]
+    if not valued_entries:
+        console.print(
+            "[yellow]No harem Kakera values imported yet. Copy a `$mmyk=` page and run "
+            "`moa import mm`.[/yellow]"
+        )
+        raise typer.Exit()
+
+    table = Table(title=f"{account} - current key-farm shortlist")
+    table.add_column("Character", style="green")
+    table.add_column("Kakera", justify="right", style="magenta")
+    table.add_column("Key type")
+    table.add_column("Keys", justify="right", style="cyan")
+    for entry in valued_entries:
+        table.add_row(
+            entry.character_name,
+            _format_optional_number(entry.kakera_value),
+            entry.key_type.title(),
+            str(entry.key_count),
+        )
+    console.print(table)
+    console.print(
+        "[dim]Ordered by the current Mudae values you imported. This is a factual shortlist, "
+        "not yet an expected-value recommendation.[/dim]"
+    )
 
 
 @catalog_app.command("imports")

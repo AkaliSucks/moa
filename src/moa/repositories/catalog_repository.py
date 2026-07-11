@@ -372,8 +372,8 @@ class CatalogRepository:
                     """
                     INSERT INTO harem_key_observations (
                         account_context_id, character_id, character_name, normalized_character_name,
-                        key_type, key_count, observed_at, import_event_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        key_type, key_count, kakera_value, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -382,6 +382,7 @@ class CatalogRepository:
                         normalized_name,
                         entry.key_type,
                         entry.key_count,
+                        entry.kakera_value,
                         observed_at.isoformat(),
                         import_event_id,
                     ),
@@ -405,6 +406,7 @@ class CatalogRepository:
                     harem_key_observations.character_name,
                     harem_key_observations.key_type,
                     harem_key_observations.key_count,
+                    harem_key_observations.kakera_value,
                     harem_key_observations.observed_at,
                     characters.id AS character_id,
                     characters.name,
@@ -433,7 +435,8 @@ class CatalogRepository:
                     )
                 WHERE server_contexts.normalized_name = ?
                   AND account_contexts.normalized_name = ?
-                ORDER BY harem_key_observations.key_count DESC,
+                ORDER BY harem_key_observations.kakera_value DESC NULLS LAST,
+                         harem_key_observations.key_count DESC,
                          harem_key_observations.character_name COLLATE NOCASE
                 """,
                 (self._normalize(server_name), self._normalize(account_name)),
@@ -455,6 +458,7 @@ class CatalogRepository:
                 ),
                 key_type=row["key_type"],
                 key_count=row["key_count"],
+                kakera_value=row["kakera_value"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
@@ -557,11 +561,18 @@ class CatalogRepository:
                     normalized_character_name TEXT NOT NULL,
                     key_type TEXT NOT NULL,
                     key_count INTEGER NOT NULL,
+                    kakera_value INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
                 """
             )
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(harem_key_observations)").fetchall()
+            }
+            if "kakera_value" not in columns:
+                connection.execute("ALTER TABLE harem_key_observations ADD COLUMN kakera_value INTEGER")
 
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)

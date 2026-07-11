@@ -159,6 +159,22 @@ def test_parse_keyed_harem_page_from_mmy_output() -> None:
     assert page.entries[-1].name == "Nezuko Kamado"
 
 
+def test_parse_value_sorted_keyed_harem_page_from_mmyk_output() -> None:
+    page = MudaeTextParser().parse_harem_key_page(
+        "ernieuuu's harem\n"
+        "Total value: 63,610:kakera:\n"
+        "Megumin · :silverkey:  (5) 1,505 ka\n"
+        "Saber · :silverkey:  (5) 1,476 ka\n"
+        "Albedo · :goldkey:  (7) 1,453 ka\n"
+        "Page 1 / 6"
+    )
+
+    assert page.total_harem_value == 63610
+    assert page.entries[0].name == "Megumin"
+    assert page.entries[0].kakera_value == 1505
+    assert page.entries[2].key_type == "gold"
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

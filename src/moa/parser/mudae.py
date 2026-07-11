@@ -39,8 +39,11 @@ class MudaeTextParser:
     _KAKERA = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
     _HAREM_KEY_ENTRY = re.compile(
         r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
-        r"\((?P<key_count>\d+)\)$",
+        r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
+    )
+    _TOTAL_HAREM_VALUE = re.compile(
+        r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
     )
     _GENDER = re.compile(r"\s+:(?P<gender>female|male):\s*$", re.IGNORECASE)
 
@@ -138,9 +141,13 @@ class MudaeTextParser:
         )
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:
-        """Parse one copied `$mmy=` page into keyed-harem observations."""
+        """Parse one copied keyed-harem page, with optional current Kakera values."""
         lines = self._lines(text)
         page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
+        total = next(
+            (self._TOTAL_HAREM_VALUE.match(line) for line in lines if self._TOTAL_HAREM_VALUE.match(line)),
+            None,
+        )
         entries: list[HaremKeyEntry] = []
 
         for line in lines:
@@ -152,6 +159,11 @@ class MudaeTextParser:
                     name=entry.group("name").strip(),
                     key_type=entry.group("key_type").lower(),
                     key_count=int(entry.group("key_count")),
+                    kakera_value=(
+                        self._number(entry.group("kakera_value"))
+                        if entry.group("kakera_value")
+                        else None
+                    ),
                 )
             )
 
@@ -162,6 +174,7 @@ class MudaeTextParser:
             page_number=int(page.group("page")) if page else None,
             page_count=int(page.group("pages")) if page else None,
             entries=tuple(entries),
+            total_harem_value=self._number(total.group("value")) if total else None,
         )
 
     def _first_number(self, lines: list[str], pattern: re.Pattern[str]) -> int | None:

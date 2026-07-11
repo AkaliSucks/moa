@@ -97,4 +97,5 @@ class HaremKeyObservation(MOAModel):
     character: CatalogCharacter | None
     key_type: str
     key_count: int
+    kakera_value: int | None
     observed_at: datetime
