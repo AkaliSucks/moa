@@ -254,6 +254,28 @@ def import_top(
     )
 
 
+@import_app.command("im")
+def import_im(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the server this $im came from."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $im response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$im` response with its server-specific Kakera value."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        details = MudaeTextParser().parse_character_details(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_character_details(details, server, raw_message, source)
+    console.print(
+        f"[green]Imported {details.name} for {result.server_name}.[/green] "
+        f"Recorded [cyan]{_format_optional_number(details.kakera_value)} Kakera[/cyan]."
+    )
+
+
 @catalog_app.command("top")
 def catalog_top(
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of characters to display."),
@@ -283,6 +305,82 @@ def catalog_top(
             ranked_character.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
+
+
+@catalog_app.command("show")
+def catalog_show(
+    name: str,
+    series: str = typer.Option(..., "--series", "-s", help="Character's Mudae series name."),
+) -> None:
+    """Show global ranks and latest server-specific observations for one character."""
+    profile = CatalogService().get_profile(name, series)
+    if profile is None:
+        console.print("[yellow]Character not found in the local catalog.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"[bold cyan]{profile.character.name}[/bold cyan] - {profile.character.series}")
+    console.print(f"[bold]Gender:[/bold] {profile.character.gender or '-'}")
+    console.print(f"[bold]Roulette:[/bold] {profile.character.roulette or '-'}")
+    console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(profile.claim_rank)}")
+    console.print(f"[bold]Like rank:[/bold] {_format_optional_rank(profile.like_rank)}")
+
+    if not profile.server_observations:
+        console.print("[yellow]No server-specific observations imported yet.[/yellow]")
+        return
+
+    table = Table(title="Latest server observations")
+    table.add_column("Server", style="green")
+    table.add_column("Kakera value", justify="right", style="cyan")
+    table.add_column("Observed (UTC)")
+    for observation in profile.server_observations:
+        table.add_row(
+            observation.server_name,
+            _format_optional_number(observation.kakera_value),
+            observation.observed_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
+
+
+@catalog_app.command("imports")
+def catalog_imports(
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of imports to display."),
+) -> None:
+    """Show recent raw Mudae imports and their server labels."""
+    service = CatalogService()
+    try:
+        imports = service.recent_imports(limit)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    if not imports:
+        console.print("[yellow]No imports recorded yet.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title="Recent Mudae imports")
+    table.add_column("ID", justify="right", style="cyan")
+    table.add_column("Kind")
+    table.add_column("Server", style="green")
+    table.add_column("Source")
+    table.add_column("Observed (UTC)")
+    for import_event in imports:
+        table.add_row(
+            str(import_event.id),
+            import_event.kind,
+            import_event.server_name or "-",
+            import_event.source,
+            import_event.observed_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
+
+
+@catalog_app.command("delete-import")
+def catalog_delete_import(import_event_id: int) -> None:
+    """Delete one mistaken import while preserving all other catalog data."""
+    if not CatalogService().delete_import_event(import_event_id):
+        console.print("[red]Import event not found.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Deleted import event {import_event_id}.[/green]")
 
 
 @tower_app.command("list")

@@ -26,6 +26,11 @@ timestamped claim-rank snapshot, and archives the exact copied message in the
 local SQLite database. The database is intentionally local and ignored by Git:
 it is personal account data, not packaged reference knowledge.
 
+`moa import im --server <label> --clipboard` enriches the canonical character
+with observed gender and roulette metadata, records the current global ranks,
+and stores the displayed Kakera value under that explicit server label. Kakera
+value is never treated as a universal character property.
+
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does

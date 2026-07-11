@@ -38,6 +38,15 @@ bunny
 Image
 """
 
+CURRENT_CHARACTER_DETAILS = (
+    "Mai Sakurajima\n"
+    "Seishun Buta Yarou\n"
+    "Animanga roulette \u00b7 1,385 Kakera \u00b7 Keys (6)\n"
+    "Claim Rank: #9\n"
+    "Like Rank: #19\n"
+    "Bunny Girl Senpai (+4)\n"
+)
+
 
 ROLL = """Airi Jinguuji
 Mob kara Hajimaru Tansaku Eiyuutan
@@ -77,6 +86,18 @@ def test_parse_character_details_from_copied_im_output() -> None:
     assert character.gender == "female"
     assert character.roulette == "animanga"
     assert character.kakera_value == 929
+    assert character.claim_rank == 9
+    assert character.like_rank == 19
+
+
+def test_parse_current_im_layout_with_visual_kakera_and_key_icons() -> None:
+    character = MudaeTextParser().parse_character_details(CURRENT_CHARACTER_DETAILS)
+
+    assert character.name == "Mai Sakurajima"
+    assert character.series == "Seishun Buta Yarou"
+    assert character.gender is None
+    assert character.roulette == "animanga"
+    assert character.kakera_value == 1385
     assert character.claim_rank == 9
     assert character.like_rank == 19
 

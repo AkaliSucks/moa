@@ -27,7 +27,8 @@ class MudaeTextParser:
     )
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = re.compile(
-        r"^(?P<roulette>.+?)\s+roulette\s+·\s+(?P<value>[\d,]+):kakera:$",
+        r"^(?P<roulette>.+?)\s+roulette(?:\s*[\u00b7\u2022]\s*|\s+)"
+        r"(?P<value>[\d,]+)(?:\D.*)?$",
         re.IGNORECASE,
     )
     _CLAIM_RANK = re.compile(r"^Claim Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
