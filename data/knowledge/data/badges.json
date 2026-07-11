@@ -1,0 +1,44 @@
+[
+  {"id": "BRONZE", "name": "Bronze", "default_base_value": 1000, "levels": [
+    {"level": 1, "effects": ["+1 wishlist slot"]},
+    {"level": 2, "effects": ["+1 wishlist slot"]},
+    {"level": 3, "effects": ["+1 wishlist slot"]},
+    {"level": 4, "effects": ["+1 wishlist slot", "+500 Kakera when claiming your own character WISH"]}
+  ]},
+  {"id": "SILVER", "name": "Silver", "default_base_value": 2000, "levels": [
+    {"level": 1, "effects": ["+25% character WISH spawn chance"]},
+    {"level": 2, "effects": ["+25% character WISH spawn chance"]},
+    {"level": 3, "effects": ["+25% character WISH spawn chance"]},
+    {"level": 4, "effects": ["+25% character WISH spawn chance", "+200 Kakera when someone else claims your character WISH"]}
+  ]},
+  {"id": "GOLD", "name": "Gold", "default_base_value": 3000, "levels": [
+    {"level": 1, "effects": ["-10% Kakera reaction power cost"]},
+    {"level": 2, "effects": ["-10% Kakera reaction power cost"]},
+    {"level": 3, "effects": ["-10% Kakera reaction power cost"]},
+    {"level": 4, "effects": ["-10% Kakera reaction power cost", "$dailykakera fully restores Kakera reaction power"]}
+  ]},
+  {"id": "SAPPHIRE", "name": "Sapphire", "default_base_value": 5000, "levels": [
+    {"level": 1, "effects": ["+1 permanent roll"], "prerequisites": ["BRONZE_I + SILVER_I + GOLD_I OR any two badges IV"]},
+    {"level": 2, "effects": ["+1 permanent roll"]},
+    {"level": 3, "effects": ["+1 permanent roll"]},
+    {"level": 4, "effects": ["+1 permanent roll", "Blue Kakera becomes Yellow Kakera for your rolls"]}
+  ]},
+  {"id": "RUBY", "name": "Ruby", "default_base_value": 7000, "levels": [
+    {"level": 1, "effects": ["+2 wishlist slots"], "prerequisites": ["BRONZE_II + SILVER_II + GOLD_II OR any two badges IV"]},
+    {"level": 2, "effects": ["+50% character WISH spawn chance"]},
+    {"level": 3, "effects": ["-20% Kakera reaction power cost"]},
+    {"level": 4, "effects": ["+2 permanent rolls", "-25% cost for all other badge levels"]}
+  ]},
+  {"id": "EMERALD", "name": "Emerald", "default_base_value": 9000, "levels": [
+    {"level": 1, "effects": ["Unlock $resetclaimtimer every 50 hours"], "prerequisites": ["BRONZE_III + SILVER_III + GOLD_III OR any two badges IV"]},
+    {"level": 2, "effects": ["$resetclaimtimer cooldown -10 hours"]},
+    {"level": 3, "effects": ["$resetclaimtimer cooldown -10 hours"]},
+    {"level": 4, "effects": ["$resetclaimtimer cooldown -10 hours", "Claiming a character grants its Kakera value"]}
+  ]},
+  {"id": "DIAMOND", "name": "Diamond", "default_base_value": 12000, "levels": [
+    {"level": 1, "effects": ["+1 $ouroharvest ($oh) per day"]},
+    {"level": 2, "effects": ["+1 $ouroharvest ($oh) per day"]},
+    {"level": 3, "effects": ["+1 $ouroharvest ($oh) per day"]},
+    {"level": 4, "effects": ["+1 $ouroharvest ($oh) per day", "+1 $ourochest ($oc) per day"]}
+  ]}
+]

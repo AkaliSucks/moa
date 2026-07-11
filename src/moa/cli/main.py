@@ -2,18 +2,70 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from moa.services.badge_service import BadgeService
 from moa.services.tower_service import TowerService
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 tower_app = typer.Typer(help="Tower commands")
+badge_app = typer.Typer(help="Kakera Badge commands")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
+app.add_typer(badge_app, name="badge")
 
 
 @app.command()
 def version():
     console.print("[cyan]MOA[/cyan] v0.1.0")
+
+
+@badge_app.command("list")
+def list_badges() -> None:
+    """List the seven Kakera Badge definitions."""
+    table = Table(title="Kakera Badges")
+    table.add_column("Badge", style="green")
+    table.add_column("Default base value", justify="right", style="cyan")
+    table.add_column("Level IV highlight")
+
+    for badge in BadgeService().all():
+        table.add_row(
+            badge.name,
+            f"{badge.default_base_value:,}",
+            badge.levels[-1].effects[-1],
+        )
+
+    console.print(table)
+
+
+@badge_app.command("cost")
+def badge_cost(
+    badge_id: str,
+    level: int,
+    base_value: int = typer.Option(
+        ..., "--base-value", "-b", help="Server-configured base badge value."
+    ),
+    ruby_iv_active: bool = typer.Option(
+        False, "--ruby-iv", help="Apply Ruby IV's 25% discount."
+    ),
+) -> None:
+    """Calculate one badge-level purchase cost for a server configuration."""
+    service = BadgeService()
+    try:
+        cost = service.cost_for_level(
+            badge_id,
+            level,
+            base_value,
+            ruby_iv_active=ruby_iv_active,
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    discount_label = " with Ruby IV" if ruby_iv_active else ""
+    console.print(
+        f"[green]{badge_id.strip().upper()} {level}[/green] costs "
+        f"[cyan]{cost:,} Kakera[/cyan]{discount_label}."
+    )
 
 
 @tower_app.command("list")
