@@ -55,6 +55,25 @@ Claims: #55,003
 Image
 """
 
+HAREM_KEY_PAGE = """Albedo · :goldkey:  (7)
+Mai Sakurajima · :goldkey:  (6)
+Miku Nakano · :goldkey:  (6)
+Ishtar · :goldkey:  (6)
+Saber · :silverkey:  (5)
+Megumin · :silverkey:  (5)
+Power · :silverkey:  (5)
+Emilia · :silverkey:  (5)
+Xenovia Quarta · :silverkey:  (5)
+Cosmo (CSM) · :silverkey:  (5)
+Zero Two · :silverkey:  (4)
+Rem · :silverkey:  (4)
+Nami · :silverkey:  (4)
+Mikasa Ackerman · :silverkey:  (4)
+Nezuko Kamado · :silverkey:  (4)
+Image
+Page 1 / 6
+"""
+
 
 def test_parse_top_page_from_copied_mudae_output() -> None:
     page = MudaeTextParser().parse_top_page(TOP_PAGE)
@@ -102,6 +121,23 @@ def test_parse_current_im_layout_with_visual_kakera_and_key_icons() -> None:
     assert character.like_rank == 19
 
 
+def test_parse_im_layout_without_the_word_roulette() -> None:
+    character = MudaeTextParser().parse_character_details(
+        "Ishtar\n"
+        "Fate/Grand Order\n"
+        "Game & Animanga \u00b7 624 Kakera \u00b7 Key (6)\n"
+        "Claim Rank: #150\n"
+        "Like Rank: #215\n"
+    )
+
+    assert character.name == "Ishtar"
+    assert character.series == "Fate/Grand Order"
+    assert character.roulette == "game & animanga"
+    assert character.kakera_value == 624
+    assert character.claim_rank == 150
+    assert character.like_rank == 215
+
+
 def test_parse_roll_from_copied_mudae_output() -> None:
     roll = MudaeTextParser().parse_roll(ROLL)
 
@@ -109,6 +145,18 @@ def test_parse_roll_from_copied_mudae_output() -> None:
     assert roll.series == "Mob kara Hajimaru Tansaku Eiyuutan"
     assert roll.claim_rank == 55003
     assert roll.kakera_value == 27
+
+
+def test_parse_keyed_harem_page_from_mmy_output() -> None:
+    page = MudaeTextParser().parse_harem_key_page(HAREM_KEY_PAGE)
+
+    assert page.page_number == 1
+    assert page.page_count == 6
+    assert len(page.entries) == 15
+    assert page.entries[0].name == "Albedo"
+    assert page.entries[0].key_type == "gold"
+    assert page.entries[0].key_count == 7
+    assert page.entries[-1].name == "Nezuko Kamado"
 
 
 def test_parse_top_page_rejects_unrecognized_text() -> None:

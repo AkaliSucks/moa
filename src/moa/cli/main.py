@@ -232,6 +232,33 @@ def parse_roll(
     console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
 
 
+@parse_app.command("mm")
+def parse_mm(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$mmy=` keyed-harem page."""
+    try:
+        page = MudaeTextParser().parse_harem_key_page(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    page_label = (
+        f"Page {page.page_number}/{page.page_count}"
+        if page.page_number is not None and page.page_count is not None
+        else "Partial import"
+    )
+    console.print(f"[bold cyan]Keyed harem - {page_label}[/bold cyan]")
+    table = Table()
+    table.add_column("Character", style="green")
+    table.add_column("Key type")
+    table.add_column("Keys", justify="right", style="cyan")
+    for entry in page.entries:
+        table.add_row(entry.name, entry.key_type.title(), str(entry.key_count))
+    console.print(table)
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -273,6 +300,36 @@ def import_im(
     console.print(
         f"[green]Imported {details.name} for {result.server_name}.[/green] "
         f"Recorded [cyan]{_format_optional_number(details.kakera_value)} Kakera[/cyan]."
+    )
+
+
+@import_app.command("mm")
+def import_mm(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$mmy=` page for a server/account harem."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        page = MudaeTextParser().parse_harem_key_page(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_harem_key_page(
+        page,
+        server,
+        account,
+        raw_message,
+        source,
+    )
+    console.print(
+        f"[green]Imported {result.entries_imported} keyed harem entries for "
+        f"{result.account_name}.[/green] "
+        f"[cyan]{result.entries_linked}[/cyan] linked to the current catalog."
     )
 
 
@@ -337,6 +394,34 @@ def catalog_show(
             observation.server_name,
             _format_optional_number(observation.kakera_value),
             observation.observed_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
+
+
+@catalog_app.command("harem")
+def catalog_harem(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to show."),
+) -> None:
+    """Show the latest keyed-harem observations for one server/account pair."""
+    entries = CatalogService().harem_keys(server, account)
+    if not entries:
+        console.print("[yellow]No keyed harem entries imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title=f"{account} - keyed harem")
+    table.add_column("Character", style="green")
+    table.add_column("Key type")
+    table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Catalog link")
+    table.add_column("Observed (UTC)")
+    for entry in entries:
+        table.add_row(
+            entry.character_name,
+            entry.key_type.title(),
+            str(entry.key_count),
+            "Resolved" if entry.character else "Needs $im",
+            entry.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
 

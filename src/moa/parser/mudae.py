@@ -8,6 +8,8 @@ import re
 
 from moa.models.character import (
     CharacterDetails,
+    HaremKeyEntry,
+    HaremKeyPage,
     RankedCharacter,
     RollObservation,
     TopPage,
@@ -27,7 +29,7 @@ class MudaeTextParser:
     )
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = re.compile(
-        r"^(?P<roulette>.+?)\s+roulette(?:\s*[\u00b7\u2022]\s*|\s+)"
+        r"^(?P<roulette>.+?)(?:\s+roulette)?(?:\s*[\u00b7\u2022]\s*|\s+)"
         r"(?P<value>[\d,]+)(?:\D.*)?$",
         re.IGNORECASE,
     )
@@ -35,6 +37,11 @@ class MudaeTextParser:
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _KAKERA = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _HAREM_KEY_ENTRY = re.compile(
+        r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
+        r"\((?P<key_count>\d+)\)$",
+        re.IGNORECASE,
+    )
     _GENDER = re.compile(r"\s+:(?P<gender>female|male):\s*$", re.IGNORECASE)
 
     @staticmethod
@@ -128,6 +135,33 @@ class MudaeTextParser:
             series=lines[claims_index - 1],
             claim_rank=self._number(claims_line.group("rank")),
             kakera_value=self._number(kakera.group("value")) if kakera else None,
+        )
+
+    def parse_harem_key_page(self, text: str) -> HaremKeyPage:
+        """Parse one copied `$mmy=` page into keyed-harem observations."""
+        lines = self._lines(text)
+        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
+        entries: list[HaremKeyEntry] = []
+
+        for line in lines:
+            entry = self._HAREM_KEY_ENTRY.match(line)
+            if entry is None:
+                continue
+            entries.append(
+                HaremKeyEntry(
+                    name=entry.group("name").strip(),
+                    key_type=entry.group("key_type").lower(),
+                    key_count=int(entry.group("key_count")),
+                )
+            )
+
+        if not entries:
+            raise MudaeParseError("No keyed harem entries found in the Mudae $mmy= output.")
+
+        return HaremKeyPage(
+            page_number=int(page.group("page")) if page else None,
+            page_count=int(page.group("pages")) if page else None,
+            entries=tuple(entries),
         )
 
     def _first_number(self, lines: list[str], pattern: re.Pattern[str]) -> int | None:

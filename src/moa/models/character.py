@@ -39,3 +39,19 @@ class RollObservation(MOAModel):
     series: str
     claim_rank: int | None
     kakera_value: int | None
+
+
+class HaremKeyEntry(MOAModel):
+    """One keyed character displayed by Mudae's `$mmy=` harem view."""
+
+    name: str
+    key_type: str
+    key_count: int
+
+
+class HaremKeyPage(MOAModel):
+    """A single parsed page from Mudae's `$mmy=` keyed-harem view."""
+
+    page_number: int | None
+    page_count: int | None
+    entries: tuple[HaremKeyEntry, ...]

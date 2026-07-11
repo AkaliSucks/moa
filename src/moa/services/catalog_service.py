@@ -3,11 +3,13 @@
 from moa.models.catalog import (
     CharacterDetailsImportResult,
     CharacterProfile,
+    HaremKeyImportResult,
+    HaremKeyObservation,
     ImportEventSummary,
     RankedCatalogCharacter,
     TopImportResult,
 )
-from moa.models.character import CharacterDetails, TopPage
+from moa.models.character import CharacterDetails, HaremKeyPage, TopPage
 from moa.repositories.catalog_repository import CatalogRepository, CatalogRepositoryProtocol
 
 
@@ -43,3 +45,18 @@ class CatalogService:
 
     def delete_import_event(self, import_event_id: int) -> bool:
         return self._repository.delete_import_event(import_event_id)
+
+    def import_harem_key_page(
+        self,
+        page: HaremKeyPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> HaremKeyImportResult:
+        return self._repository.import_harem_key_page(
+            page, server_name, account_name, raw_message, source
+        )
+
+    def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
+        return self._repository.harem_keys(server_name, account_name)

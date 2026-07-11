@@ -31,6 +31,12 @@ with observed gender and roulette metadata, records the current global ranks,
 and stores the displayed Kakera value under that explicit server label. Kakera
 value is never treated as a universal character property.
 
+`moa import mm --server <label> --account <label> --clipboard` records one
+keyed-harem page from `$mmy=`. The harem list does not include series names, so
+MOA links an entry only when its character name resolves uniquely in the local
+catalog. Other entries remain explicitly unresolved until a matching `$im`
+import provides reliable identity metadata.
+
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does

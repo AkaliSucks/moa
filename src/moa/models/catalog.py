@@ -77,3 +77,24 @@ class ImportEventSummary(MOAModel):
     source: str
     server_name: str | None
     observed_at: datetime
+
+
+class HaremKeyImportResult(MOAModel):
+    """Summary of one persisted `$mmy=` keyed-harem page."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    entries_imported: int
+    entries_linked: int
+    observed_at: datetime
+
+
+class HaremKeyObservation(MOAModel):
+    """The latest imported key state for one harem entry."""
+
+    character_name: str
+    character: CatalogCharacter | None
+    key_type: str
+    key_count: int
+    observed_at: datetime
