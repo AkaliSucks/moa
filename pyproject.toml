@@ -15,6 +15,12 @@ dependencies = [
     "rapidfuzz",
     "orjson",
     "httpx",
+    "alembic>=1.18.5",
+    "pydantic-settings>=2.14.2",
+    "loguru>=0.7.3",
+    "pytest>=9.1.1",
+    "mypy>=2.2.0",
+    "ruff>=0.15.21",
 ]
 
 [project.optional-dependencies]
@@ -29,3 +35,6 @@ line-length = 100
 
 [tool.ruff]
 line-length = 100
+
+[project.scripts]
+moa = "moa.cli.main:app"
