@@ -7,6 +7,7 @@ from rich.table import Table
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
 from moa.services.catalog_service import CatalogService
+from moa.services.keyfarm_service import KeyFarmService
 from moa.services.reaction_service import ReactionService
 from moa.services.tower_service import TowerService
 
@@ -18,6 +19,7 @@ parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
 harem_app = typer.Typer(help="Build complete keyed-harem snapshots safely")
+recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
@@ -27,6 +29,7 @@ app.add_typer(parse_app, name="parse")
 app.add_typer(import_app, name="import")
 app.add_typer(catalog_app, name="catalog")
 app.add_typer(harem_app, name="harem")
+app.add_typer(recommend_app, name="recommend")
 
 
 @app.command()
@@ -741,6 +744,50 @@ def catalog_keyfarm(
     console.print(
         "[dim]Ordered by the current Mudae values you imported. This is a factual shortlist, "
         "not yet an expected-value recommendation.[/dim]"
+    )
+
+
+@recommend_app.command("keyfarm")
+def recommend_keyfarm(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to prioritize."),
+    limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of recommendations to show."),
+) -> None:
+    """Rank key-farm targets from imported value, wish bonuses, and key chance."""
+    try:
+        recommendations = KeyFarmService().recommend(server, account)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    if not recommendations:
+        console.print("[yellow]No valued, currently eligible harem entries were found.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title=f"{account} - key-farm recommendations")
+    table.add_column("#", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Kakera", justify="right", style="magenta")
+    table.add_column("Keys", justify="right")
+    table.add_column("Boost")
+    table.add_column("Spawn", justify="right")
+    table.add_column("Key chance", justify="right")
+    table.add_column("Opportunity", justify="right", style="yellow")
+    for index, entry in enumerate(recommendations[:limit], start=1):
+        table.add_row(
+            str(index),
+            entry.character_name,
+            f"{entry.kakera_value:,}",
+            f"{entry.key_type.title()} {entry.key_count}",
+            entry.wishlist_status,
+            f"{entry.relative_spawn_multiplier:.2f}x",
+            f"+{entry.additional_key_chance_percent}%",
+            f"{entry.value_weighted_opportunity_index:,.0f}",
+        )
+    console.print(table)
+    console.print(
+        "[dim]Opportunity = current Kakera value × relative wish/Starwish spawn multiplier × "
+        "the imported extra-key multiplier. It is a relative priority, not an absolute drop-rate forecast. "
+        "Directly observed unavailable characters are excluded; unobserved characters remain eligible.[/dim]"
     )
 
 

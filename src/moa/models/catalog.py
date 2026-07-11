@@ -220,3 +220,18 @@ class UnavailableCharacterObservation(MOAModel):
     claim_rank: int
     reason: str | None
     observed_at: datetime
+
+
+class KeyFarmRecommendation(MOAModel):
+    """A transparent, relative key-farm priority based on imported player state."""
+
+    character_name: str
+    kakera_value: int
+    key_type: str
+    key_count: int
+    wishlist_status: str
+    rollability: str
+    spawn_bonus_percent: int
+    relative_spawn_multiplier: float
+    additional_key_chance_percent: int
+    value_weighted_opportunity_index: float
