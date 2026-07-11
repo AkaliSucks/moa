@@ -4,22 +4,27 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
+from moa.services.catalog_service import CatalogService
 from moa.services.reaction_service import ReactionService
 from moa.services.tower_service import TowerService
-from moa.parser.mudae import MudaeParseError, MudaeTextParser
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 tower_app = typer.Typer(help="Tower commands")
 badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
+import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
+catalog_app = typer.Typer(help="Browse MOA's local character catalog")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
 app.add_typer(badge_app, name="badge")
 app.add_typer(reaction_app, name="reaction")
 app.add_typer(parse_app, name="parse")
+app.add_typer(import_app, name="import")
+app.add_typer(catalog_app, name="catalog")
 
 
 @app.command()
@@ -225,6 +230,59 @@ def parse_roll(
     console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
     console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
+
+
+@import_app.command("top")
+def import_top(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist a `$top` page as a timestamped local rank snapshot."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        page = MudaeTextParser().parse_top_page(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_top_page(page, raw_message, source)
+    total = CatalogService().character_count()
+    console.print(
+        f"[green]Imported {result.characters_imported} ranked characters.[/green] "
+        f"Catalog now contains [cyan]{total}[/cyan] characters."
+    )
+
+
+@catalog_app.command("top")
+def catalog_top(
+    limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of characters to display."),
+) -> None:
+    """Show the best ranks currently stored in MOA's local catalog."""
+    service = CatalogService()
+    try:
+        characters = service.top(limit)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    if not characters:
+        console.print("[yellow]Catalog is empty. Import a $top page first.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title="Imported Character Catalog")
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Series")
+    table.add_column("Observed (UTC)")
+    for ranked_character in characters:
+        table.add_row(
+            f"#{ranked_character.claim_rank:,}",
+            ranked_character.character.name,
+            ranked_character.character.series,
+            ranked_character.observed_at.strftime("%Y-%m-%d %H:%M"),
+        )
+    console.print(table)
 
 
 @tower_app.command("list")

@@ -19,6 +19,13 @@ live ranks and server-specific Kakera values. MOA must preserve raw imported
 messages in a later storage layer alongside the parsed observations and capture
 time.
 
+## First local catalog import
+
+`moa import top --clipboard` records each parsed character, appends a
+timestamped claim-rank snapshot, and archives the exact copied message in the
+local SQLite database. The database is intentionally local and ignored by Git:
+it is personal account data, not packaged reference knowledge.
+
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does
