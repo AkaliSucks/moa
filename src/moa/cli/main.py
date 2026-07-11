@@ -8,6 +8,7 @@ from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
+from moa.services.loot_service import KakeralootService
 from moa.services.reaction_service import ReactionService
 from moa.services.tower_service import TowerService
 
@@ -15,6 +16,7 @@ app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 tower_app = typer.Typer(help="Tower commands")
 badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
+loot_app = typer.Typer(help="Kakeraloot reference commands")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
@@ -25,6 +27,7 @@ console = Console()
 app.add_typer(tower_app, name="tower")
 app.add_typer(badge_app, name="badge")
 app.add_typer(reaction_app, name="reaction")
+app.add_typer(loot_app, name="loot")
 app.add_typer(parse_app, name="parse")
 app.add_typer(import_app, name="import")
 app.add_typer(catalog_app, name="catalog")
@@ -123,6 +126,37 @@ def show_reaction(reaction_id: str) -> None:
     if reaction.average_value is not None:
         console.print(f"[bold]Base average:[/bold] {reaction.average_value:,.4f} Kakera")
     console.print(f"[bold]Details:[/bold] {reaction.description}")
+
+
+@loot_app.command("list")
+def list_loots() -> None:
+    """List every known Kakeraloot reward, whether or not the account owns it."""
+    table = Table(title="Kakeraloot Rewards (universal reference)")
+    table.add_column("ID", style="cyan")
+    table.add_column("Reward", style="green")
+    table.add_column("Category")
+    table.add_column("Guaranteed")
+    for loot in KakeralootService().all():
+        table.add_row(loot.id, loot.name, loot.category.title(), "Yes" if loot.guaranteed else "No")
+    console.print(table)
+    console.print(
+        "[dim]This is the complete known reward list, not the account's current loot state. "
+        "Reward weights and expected value are intentionally not modeled yet.[/dim]"
+    )
+
+
+@loot_app.command("show")
+def show_loot(loot_id: str) -> None:
+    """Show the reference rules for one possible Kakeraloot reward."""
+    loot = KakeralootService().get(loot_id)
+    if loot is None:
+        console.print("[red]Kakeraloot reward not found.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[bold cyan]{loot.name}[/bold cyan]")
+    console.print(f"[bold]Category:[/bold] {loot.category.title()}")
+    console.print(f"[bold]Guaranteed:[/bold] {'Yes' if loot.guaranteed else 'No'}")
+    console.print(f"[bold]Details:[/bold] {loot.description}")
+    console.print(f"[bold]Progression:[/bold] {loot.progression_note}")
 
 
 def _read_copied_message(path: Path) -> str:
