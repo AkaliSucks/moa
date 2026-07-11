@@ -23,6 +23,12 @@ from moa.models.catalog import (
     DisableListObservation,
     RollabilityImportResult,
     UnavailableCharacterObservation,
+    KakeraStateImportResult,
+    KakeraStateObservation,
+    KakeralootStateImportResult,
+    KakeralootStateObservation,
+    TowerStateImportResult,
+    TowerStateObservation,
     WishlistImportResult,
     WishlistObservation,
     TopImportResult,
@@ -31,6 +37,9 @@ from moa.models.character import (
     CharacterDetails,
     DisableListSnapshot,
     HaremKeyPage,
+    KakeraStateSnapshot,
+    KakeralootStateSnapshot,
+    TowerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
     UnavailableCharacterPage,
@@ -124,6 +133,41 @@ class CatalogRepositoryProtocol(Protocol):
     def unavailable_characters(
         self, server_name: str, account_name: str
     ) -> tuple[UnavailableCharacterObservation, ...]: ...
+
+    def import_kakera_state(
+        self,
+        state: KakeraStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeraStateImportResult: ...
+
+    def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None: ...
+
+    def import_tower_state(
+        self,
+        state: TowerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TowerStateImportResult: ...
+
+    def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None: ...
+
+    def import_kakeraloot_state(
+        self,
+        state: KakeralootStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootStateImportResult: ...
+
+    def kakeraloot_state(
+        self, server_name: str, account_name: str
+    ) -> KakeralootStateObservation | None: ...
 
 
 class CatalogRepository:
@@ -982,6 +1026,247 @@ class CatalogRepository:
             for row in rows
         )
 
+    def import_kakera_state(
+        self,
+        state: KakeraStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeraStateImportResult:
+        """Store a complete account-scoped `$k` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("kakera_state", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO kakera_state_observations (
+                    account_context_id, kakera_balance, badges_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    state.kakera_balance,
+                    json.dumps([badge.model_dump() for badge in state.badges]),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return KakeraStateImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None:
+        """Return the latest `$k` snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT kakera_state_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN kakera_state_observations ON kakera_state_observations.id = (
+                    SELECT observations.id FROM kakera_state_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return KakeraStateObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            kakera_balance=row["kakera_balance"],
+            badges=tuple(json.loads(row["badges_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    def import_tower_state(
+        self,
+        state: TowerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TowerStateImportResult:
+        """Store a complete account-scoped `$kt` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("tower_state", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO tower_state_observations (
+                    account_context_id, current_level, completed_towers, next_level_cost,
+                    kakera_balance, built_perk_ids_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    state.current_level,
+                    state.completed_towers,
+                    state.next_level_cost,
+                    state.kakera_balance,
+                    json.dumps(state.built_perk_ids),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return TowerStateImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None:
+        """Return the latest `$kt` snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT tower_state_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN tower_state_observations ON tower_state_observations.id = (
+                    SELECT observations.id FROM tower_state_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return TowerStateObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            current_level=row["current_level"],
+            completed_towers=row["completed_towers"],
+            next_level_cost=row["next_level_cost"],
+            kakera_balance=row["kakera_balance"],
+            built_perk_ids=tuple(json.loads(row["built_perk_ids_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    def import_kakeraloot_state(
+        self,
+        state: KakeralootStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootStateImportResult:
+        """Store a complete account-scoped `$lk` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("kakeraloot_state", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO kakeraloot_state_observations (
+                    account_context_id, rolls_stacked, disable_wa_ha_reduction,
+                    disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
+                    mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
+                    star_branches, starwish_slots_from_branches, quantity_level, quality_level,
+                    usage_count, kakera_balance, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    state.rolls_stacked,
+                    state.disable_wa_ha_reduction,
+                    state.disable_wg_hg_reduction,
+                    state.protected_wish_level,
+                    state.protected_wish_denominator,
+                    state.mudapins,
+                    state.rt_cooldown_reduction_hours,
+                    state.permanent_roll_bonus,
+                    state.star_branches,
+                    state.starwish_slots_from_branches,
+                    state.quantity_level,
+                    state.quality_level,
+                    state.usage_count,
+                    state.kakera_balance,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return KakeralootStateImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def kakeraloot_state(
+        self, server_name: str, account_name: str
+    ) -> KakeralootStateObservation | None:
+        """Return the latest `$lk` snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT kakeraloot_state_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN kakeraloot_state_observations ON kakeraloot_state_observations.id = (
+                    SELECT observations.id FROM kakeraloot_state_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return KakeralootStateObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            rolls_stacked=row["rolls_stacked"],
+            disable_wa_ha_reduction=row["disable_wa_ha_reduction"],
+            disable_wg_hg_reduction=row["disable_wg_hg_reduction"],
+            protected_wish_level=row["protected_wish_level"],
+            protected_wish_denominator=row["protected_wish_denominator"],
+            mudapins=row["mudapins"],
+            rt_cooldown_reduction_hours=row["rt_cooldown_reduction_hours"],
+            permanent_roll_bonus=row["permanent_roll_bonus"],
+            star_branches=row["star_branches"],
+            starwish_slots_from_branches=row["starwish_slots_from_branches"],
+            quantity_level=row["quantity_level"],
+            quality_level=row["quality_level"],
+            usage_count=row["usage_count"],
+            kakera_balance=row["kakera_balance"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def delete_import_event(self, import_event_id: int) -> bool:
         """Delete one raw import and all observations derived from it.
 
@@ -1155,6 +1440,48 @@ class CatalogRepository:
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
                     character_id INTEGER NOT NULL REFERENCES characters(id),
                     reason TEXT,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kakera_state_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    kakera_balance INTEGER NOT NULL,
+                    badges_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS tower_state_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    current_level INTEGER NOT NULL,
+                    completed_towers INTEGER NOT NULL,
+                    next_level_cost INTEGER NOT NULL,
+                    kakera_balance INTEGER NOT NULL,
+                    built_perk_ids_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kakeraloot_state_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    rolls_stacked INTEGER NOT NULL,
+                    disable_wa_ha_reduction INTEGER NOT NULL,
+                    disable_wg_hg_reduction INTEGER NOT NULL,
+                    protected_wish_level INTEGER NOT NULL,
+                    protected_wish_denominator INTEGER NOT NULL,
+                    mudapins INTEGER NOT NULL,
+                    rt_cooldown_reduction_hours INTEGER NOT NULL,
+                    permanent_roll_bonus INTEGER NOT NULL,
+                    star_branches INTEGER NOT NULL,
+                    starwish_slots_from_branches INTEGER NOT NULL,
+                    quantity_level INTEGER NOT NULL,
+                    quality_level INTEGER NOT NULL,
+                    usage_count INTEGER NOT NULL,
+                    kakera_balance INTEGER NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

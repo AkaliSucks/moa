@@ -3,7 +3,13 @@
 from datetime import datetime
 
 from moa.models.base import MOAModel
-from moa.models.character import DisableListEntry, PlayerBonusMetric, WishlistEntry
+from moa.models.character import (
+    BadgeLevel,
+    DisableListEntry,
+    KakeralootStateSnapshot,
+    PlayerBonusMetric,
+    WishlistEntry,
+)
 
 
 class CatalogCharacter(MOAModel):
@@ -235,3 +241,61 @@ class KeyFarmRecommendation(MOAModel):
     relative_spawn_multiplier: float
     additional_key_chance_percent: int
     value_weighted_opportunity_index: float
+
+
+class KakeraStateImportResult(MOAModel):
+    """Summary of one persisted `$k` account-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class KakeraStateObservation(MOAModel):
+    """The latest imported Kakera balance and badge state for one account."""
+
+    server_name: str
+    account_name: str
+    kakera_balance: int
+    badges: tuple[BadgeLevel, ...]
+    observed_at: datetime
+
+
+class TowerStateImportResult(MOAModel):
+    """Summary of one persisted `$kt` account-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class TowerStateObservation(MOAModel):
+    """The latest imported Kakera Tower state for one account."""
+
+    server_name: str
+    account_name: str
+    current_level: int
+    completed_towers: int
+    next_level_cost: int
+    kakera_balance: int
+    built_perk_ids: tuple[int, ...]
+    observed_at: datetime
+
+
+class KakeralootStateImportResult(MOAModel):
+    """Summary of one persisted `$lk` account-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class KakeralootStateObservation(KakeralootStateSnapshot):
+    """The latest imported `$lk` snapshot for one account."""
+
+    server_name: str
+    account_name: str
+    observed_at: datetime

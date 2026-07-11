@@ -8,6 +8,10 @@ import re
 
 from moa.models.character import (
     CharacterDetails,
+    BadgeLevel,
+    KakeraStateSnapshot,
+    KakeralootStateSnapshot,
+    TowerStateSnapshot,
     DisableListEntry,
     DisableListSnapshot,
     HaremKeyEntry,
@@ -78,6 +82,40 @@ class MudaeTextParser:
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+?)"
         r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
     )
+    _KAKERA_BALANCE = re.compile(r"^You have\s+(?P<value>[\d,]+):kakera:!?$", re.IGNORECASE)
+    _BADGE_LEVEL = re.compile(
+        r"(?P<name>Bronze|Silver|Gold|Sapphire|Ruby|Emerald|Diamond)\s+"
+        r"(?P<level>I|II|III|IV)\s*[·\u00b7]\s*(?P<status>.+)$",
+        re.IGNORECASE,
+    )
+    _TOWER_LEVEL = re.compile(
+        r"current level is.*?tow(?P<level>\d+).*?\(\+\s*(?P<towers>\d+)\s+tower",
+        re.IGNORECASE,
+    )
+    _TOWER_NEXT_COST = re.compile(
+        r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
+    )
+    _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
+    _LOOT_ROLLS = re.compile(r"Rolls stacked:\s*(?P<value>\d+)", re.IGNORECASE)
+    _LOOT_DISABLE = re.compile(
+        r"\$disable limits:\s*-(?P<wa_ha>\d+)\s+\$wa/\$ha,\s*-(?P<wg_hg>\d+)\s+\$wg/\$hg",
+        re.IGNORECASE,
+    )
+    _LOOT_PROTECTED_WISH = re.compile(
+        r"Protected wish:\s*LVL\s*(?P<level>\d+)\s*\(spawn probability:\s*1/(?P<denominator>[\d,]+)\)",
+        re.IGNORECASE,
+    )
+    _LOOT_MUDAPINS = re.compile(r"Mudapins:\s*(?P<value>\d+)", re.IGNORECASE)
+    _LOOT_RT = re.compile(r"\$rt:\s*-(?P<value>\d+)h\s+cooldown", re.IGNORECASE)
+    _LOOT_PERMANENT_ROLL = re.compile(r"\+(?P<value>\d+)\s+permanent roll", re.IGNORECASE)
+    _LOOT_STAR_BRANCH = re.compile(
+        r"(?P<branches>\d+)\s+star branch(?:es)?\s*\(\+(?P<slots>\d+)\s+\$sw\)",
+        re.IGNORECASE,
+    )
+    _LOOT_QUANTITY = re.compile(r"Quantity\s+LVL\s+(?P<value>\d+)", re.IGNORECASE)
+    _LOOT_QUALITY = re.compile(r"Quality\s+LVL\s+(?P<value>\d+)", re.IGNORECASE)
+    _LOOT_USAGE = re.compile(r"\$kl usage:\s*(?P<value>[\d,]+)", re.IGNORECASE)
+    _LOOT_BALANCE = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -375,6 +413,112 @@ class MudaeTextParser:
             page_number=int(page.group("page")) if page else None,
             page_count=int(page.group("pages")) if page else None,
             characters=tuple(characters),
+        )
+
+    def parse_kakera_state(self, text: str) -> KakeraStateSnapshot:
+        """Parse current Kakera balance and badge levels from a copied `$k` response."""
+        lines = self._lines(text)
+        balance = next((self._KAKERA_BALANCE.match(line) for line in lines if self._KAKERA_BALANCE.match(line)), None)
+        if balance is None:
+            raise MudaeParseError("Expected a Mudae $k response with a Kakera balance.")
+        roman_levels = {"I": 1, "II": 2, "III": 3, "IV": 4}
+        badges: list[BadgeLevel] = []
+        for line in lines:
+            match = self._BADGE_LEVEL.search(line)
+            if match is None:
+                continue
+            badges.append(
+                BadgeLevel(
+                    badge_name=match.group("name").lower(),
+                    level=roman_levels[match.group("level").upper()],
+                    max_reached="max reached" in match.group("status").casefold(),
+                )
+            )
+        if not badges:
+            raise MudaeParseError("No Kakera badge levels found in the Mudae $k output.")
+        return KakeraStateSnapshot(
+            kakera_balance=self._number(balance.group("value")), badges=tuple(badges)
+        )
+
+    def parse_tower_state(self, text: str) -> TowerStateSnapshot:
+        """Parse current level, cost, balance, and owned floors from a copied `$kt` response."""
+        lines = self._lines(text)
+        level = next((self._TOWER_LEVEL.search(line) for line in lines if self._TOWER_LEVEL.search(line)), None)
+        next_cost = next(
+            (self._TOWER_NEXT_COST.search(line) for line in lines if self._TOWER_NEXT_COST.search(line)),
+            None,
+        )
+        balance = next((self._KAKERA_BALANCE.match(line) for line in lines if self._KAKERA_BALANCE.match(line)), None)
+        if level is None or next_cost is None or balance is None:
+            raise MudaeParseError("Expected a Mudae $kt response with current level, next cost, and balance.")
+
+        built_perks: list[int] = []
+        for line in lines:
+            perk = self._TOWER_PERK.match(line)
+            if perk is not None and "☑" in line:
+                built_perks.append(int(perk.group("id")))
+        return TowerStateSnapshot(
+            current_level=int(level.group("level")),
+            completed_towers=int(level.group("towers")),
+            next_level_cost=self._number(next_cost.group("value")),
+            kakera_balance=self._number(balance.group("value")),
+            built_perk_ids=tuple(built_perks),
+        )
+
+    def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
+        """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
+        lines = self._lines(text)
+
+        def first_match(pattern: re.Pattern[str]) -> re.Match[str] | None:
+            return next((pattern.search(line) for line in lines if pattern.search(line)), None)
+
+        rolls = first_match(self._LOOT_ROLLS)
+        disable = first_match(self._LOOT_DISABLE)
+        protected_wish = first_match(self._LOOT_PROTECTED_WISH)
+        mudapins = first_match(self._LOOT_MUDAPINS)
+        rt = first_match(self._LOOT_RT)
+        permanent_roll = first_match(self._LOOT_PERMANENT_ROLL)
+        star_branch = first_match(self._LOOT_STAR_BRANCH)
+        quantity = first_match(self._LOOT_QUANTITY)
+        quality = first_match(self._LOOT_QUALITY)
+        usage = first_match(self._LOOT_USAGE)
+        balance = next(
+            (self._LOOT_BALANCE.match(line) for line in lines if self._LOOT_BALANCE.match(line)),
+            None,
+        )
+        if any(
+            match is None
+            for match in (
+                rolls,
+                disable,
+                protected_wish,
+                mudapins,
+                rt,
+                permanent_roll,
+                star_branch,
+                quantity,
+                quality,
+                usage,
+                balance,
+            )
+        ):
+            raise MudaeParseError("Expected a complete Mudae $lk Kakeraloot stats response.")
+
+        return KakeralootStateSnapshot(
+            rolls_stacked=int(rolls.group("value")),
+            disable_wa_ha_reduction=int(disable.group("wa_ha")),
+            disable_wg_hg_reduction=int(disable.group("wg_hg")),
+            protected_wish_level=int(protected_wish.group("level")),
+            protected_wish_denominator=self._number(protected_wish.group("denominator")),
+            mudapins=int(mudapins.group("value")),
+            rt_cooldown_reduction_hours=int(rt.group("value")),
+            permanent_roll_bonus=int(permanent_roll.group("value")),
+            star_branches=int(star_branch.group("branches")),
+            starwish_slots_from_branches=int(star_branch.group("slots")),
+            quantity_level=int(quantity.group("value")),
+            quality_level=int(quality.group("value")),
+            usage_count=self._number(usage.group("value")),
+            kakera_balance=self._number(balance.group("value")),
         )
 
     @staticmethod

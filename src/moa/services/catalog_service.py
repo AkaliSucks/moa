@@ -15,6 +15,12 @@ from moa.models.catalog import (
     DisableListObservation,
     RollabilityImportResult,
     UnavailableCharacterObservation,
+    KakeraStateImportResult,
+    KakeraStateObservation,
+    KakeralootStateImportResult,
+    KakeralootStateObservation,
+    TowerStateImportResult,
+    TowerStateObservation,
     WishlistImportResult,
     WishlistObservation,
 )
@@ -22,6 +28,9 @@ from moa.models.character import (
     CharacterDetails,
     DisableListSnapshot,
     HaremKeyPage,
+    KakeraStateSnapshot,
+    KakeralootStateSnapshot,
+    TowerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
     WishlistSnapshot,
@@ -149,3 +158,50 @@ class CatalogService:
         self, server_name: str, account_name: str
     ) -> tuple[UnavailableCharacterObservation, ...]:
         return self._repository.unavailable_characters(server_name, account_name)
+
+    def import_kakera_state(
+        self,
+        state: KakeraStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeraStateImportResult:
+        return self._repository.import_kakera_state(
+            state, server_name, account_name, raw_message, source
+        )
+
+    def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None:
+        return self._repository.kakera_state(server_name, account_name)
+
+    def import_tower_state(
+        self,
+        state: TowerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TowerStateImportResult:
+        return self._repository.import_tower_state(
+            state, server_name, account_name, raw_message, source
+        )
+
+    def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None:
+        return self._repository.tower_state(server_name, account_name)
+
+    def import_kakeraloot_state(
+        self,
+        state: KakeralootStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootStateImportResult:
+        return self._repository.import_kakeraloot_state(
+            state, server_name, account_name, raw_message, source
+        )
+
+    def kakeraloot_state(
+        self, server_name: str, account_name: str
+    ) -> KakeralootStateObservation | None:
+        return self._repository.kakeraloot_state(server_name, account_name)

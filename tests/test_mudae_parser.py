@@ -271,6 +271,70 @@ def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:
     ]
 
 
+def test_parse_kakera_state_reads_balance_and_maxed_badges() -> None:
+    state = MudaeTextParser().parse_kakera_state(
+        "You have 7,673:kakera:!\n"
+        ":BronzeIV: Bronze IV · Max reached!\n"
+        "Silver IV · Max reached!\n"
+        "Gold IV · Max reached!\n"
+        "Sapphire IV · Max reached!\n"
+        "Ruby IV · Max reached!\n"
+        "Emerald IV · Max reached!\n"
+        "Diamond IV · Max reached!"
+    )
+
+    assert state.kakera_balance == 7673
+    assert [(badge.badge_name, badge.level, badge.max_reached) for badge in state.badges] == [
+        ("bronze", 4, True),
+        ("silver", 4, True),
+        ("gold", 4, True),
+        ("sapphire", 4, True),
+        ("ruby", 4, True),
+        ("emerald", 4, True),
+        ("diamond", 4, True),
+    ]
+
+
+def test_parse_tower_state_reads_current_level_cost_balance_and_built_perks() -> None:
+    state = MudaeTextParser().parse_tower_state(
+        "Your current level is:tow2: (+ 1 tower)\n"
+        "The next level costs 75,000:kakera:\n"
+        "You have 7,673:kakera:\n"
+        "☑️ [5] Unveil 1 random button for the $oh command\n"
+        "[6] +30 spheres with $dk\n"
+        "☑️ [11] +1 roll per hour"
+    )
+
+    assert state.current_level == 2
+    assert state.completed_towers == 1
+    assert state.next_level_cost == 75000
+    assert state.kakera_balance == 7673
+    assert state.built_perk_ids == (5, 11)
+
+
+def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "ernieuuu - Kakeraloots\n"
+        "Rolls stacked: 1 ($us)\n"
+        "$disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+        "Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+        "Mudapins: 22 ($mp)\n"
+        "$rt: -2h cooldown\n"
+        "+1 permanent roll\n"
+        "1 star branch (+0 $sw)\n\n"
+        "Quantity LVL 23\n"
+        "Quality LVL 6\n"
+        "$kl usage: 256 (:kakeraC:+1)\n"
+        "9,210:kakera:"
+    )
+
+    assert state.quantity_level == 23
+    assert state.quality_level == 6
+    assert state.usage_count == 256
+    assert state.kakera_balance == 9210
+    assert state.protected_wish_denominator == 4642
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

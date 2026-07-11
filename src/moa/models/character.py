@@ -143,3 +143,47 @@ class UnavailableCharacterPage(MOAModel):
     page_number: int | None
     page_count: int | None
     characters: tuple[UnavailableCharacter, ...]
+
+
+class BadgeLevel(MOAModel):
+    """One displayed Kakera badge level from `$k`."""
+
+    badge_name: str
+    level: int
+    max_reached: bool
+
+
+class KakeraStateSnapshot(MOAModel):
+    """Account-scoped Kakera balance and badge state parsed from `$k`."""
+
+    kakera_balance: int
+    badges: tuple[BadgeLevel, ...]
+
+
+class TowerStateSnapshot(MOAModel):
+    """Account-scoped Kakera Tower state parsed from `$kt`."""
+
+    current_level: int
+    completed_towers: int
+    next_level_cost: int
+    kakera_balance: int
+    built_perk_ids: tuple[int, ...]
+
+
+class KakeralootStateSnapshot(MOAModel):
+    """Account-scoped Kakeraloot progress parsed from `$lk`."""
+
+    rolls_stacked: int
+    disable_wa_ha_reduction: int
+    disable_wg_hg_reduction: int
+    protected_wish_level: int
+    protected_wish_denominator: int
+    mudapins: int
+    rt_cooldown_reduction_hours: int
+    permanent_roll_bonus: int
+    star_branches: int
+    starwish_slots_from_branches: int
+    quantity_level: int
+    quality_level: int
+    usage_count: int
+    kakera_balance: int

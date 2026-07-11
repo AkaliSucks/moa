@@ -374,6 +374,66 @@ def parse_topx(
     console.print(table)
 
 
+@parse_app.command("kakera")
+def parse_kakera(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $k response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$k` balance and badge-state response."""
+    try:
+        state = MudaeTextParser().parse_kakera_state(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    table = Table(title=f"Kakera balance: {state.kakera_balance:,}")
+    table.add_column("Badge", style="green")
+    table.add_column("Level", justify="right", style="cyan")
+    table.add_column("Status")
+    for badge in state.badges:
+        table.add_row(badge.badge_name.title(), str(badge.level), "Max" if badge.max_reached else "In progress")
+    console.print(table)
+
+
+@parse_app.command("towerstate")
+def parse_towerstate(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $kt response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$kt` tower-state response."""
+    try:
+        state = MudaeTextParser().parse_tower_state(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[bold cyan]Tower level {state.current_level}[/bold cyan] · "
+        f"{state.completed_towers} completed tower(s)\n"
+        f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera\n"
+        f"Built perks: {', '.join(str(perk) for perk in state.built_perk_ids) or 'none'}"
+    )
+
+
+@parse_app.command("lootstate")
+def parse_lootstate(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $lk response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$lk` Kakeraloot-state response."""
+    try:
+        state = MudaeTextParser().parse_kakeraloot_state(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[bold cyan]Kakeraloots[/bold cyan] · Quantity {state.quantity_level} · "
+        f"Quality {state.quality_level}\n"
+        f"Usage: {state.usage_count:,} · Balance: {state.kakera_balance:,} Kakera · "
+        f"Rolls stacked: {state.rolls_stacked}\n"
+        f"Wishprotect: LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,}) · "
+        f"Permanent rolls: +{state.permanent_roll_bonus}"
+    )
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -550,6 +610,72 @@ def import_topx(
     console.print(
         f"[green]Imported {result.characters_imported} unavailable-character observations for "
         f"{result.account_name}.[/green]"
+    )
+
+
+@import_app.command("kakera")
+def import_kakera(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakera state is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $k response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$k` response as account-scoped Kakera state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        state = MudaeTextParser().parse_kakera_state(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_kakera_state(state, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported {state.kakera_balance:,} Kakera and {len(state.badges)} badge levels for "
+        f"{result.account_name}.[/green]"
+    )
+
+
+@import_app.command("towerstate")
+def import_towerstate(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose tower state is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $kt response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$kt` response as account-scoped tower state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        state = MudaeTextParser().parse_tower_state(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_tower_state(state, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported tower level {state.current_level} for {result.account_name}.[/green] "
+        f"Next floor costs [cyan]{state.next_level_cost:,} Kakera[/cyan]."
+    )
+
+
+@import_app.command("lootstate")
+def import_lootstate(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakeraloot state is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $lk response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$lk` response as account-scoped Kakeraloot state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        state = MudaeTextParser().parse_kakeraloot_state(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_kakeraloot_state(state, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported Kakeraloot state for {result.account_name}.[/green] "
+        f"Quantity [cyan]{state.quantity_level}[/cyan] · Quality [cyan]{state.quality_level}[/cyan]."
     )
 
 
@@ -883,6 +1009,72 @@ def catalog_unavailable(
             observation.reason or "Disabled bundle/pool",
         )
     console.print(table)
+
+
+@catalog_app.command("kakera")
+def catalog_kakera(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakera state to show."),
+) -> None:
+    """Show the latest imported `$k` snapshot for one account."""
+    state = CatalogService().kakera_state(server, account)
+    if state is None:
+        console.print("[yellow]No $k snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{state.account_name} - Kakera balance: {state.kakera_balance:,}")
+    table.add_column("Badge", style="green")
+    table.add_column("Level", justify="right", style="cyan")
+    table.add_column("Status")
+    for badge in state.badges:
+        table.add_row(badge.badge_name.title(), str(badge.level), "Max" if badge.max_reached else "In progress")
+    console.print(table)
+
+
+@catalog_app.command("towerstate")
+def catalog_towerstate(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose tower state to show."),
+) -> None:
+    """Show the latest imported `$kt` snapshot for one account."""
+    state = CatalogService().tower_state(server, account)
+    if state is None:
+        console.print("[yellow]No $kt snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    gap = max(0, state.next_level_cost - state.kakera_balance)
+    console.print(
+        f"[bold cyan]{state.account_name} - Tower level {state.current_level}[/bold cyan]\n"
+        f"Completed towers: {state.completed_towers} · Built perks: "
+        f"{', '.join(str(perk) for perk in state.built_perk_ids) or 'none'}\n"
+        f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera · "
+        f"Shortfall: {gap:,} Kakera"
+    )
+
+
+@catalog_app.command("lootstate")
+def catalog_lootstate(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakeraloot state to show."),
+) -> None:
+    """Show the latest imported `$lk` snapshot for one account."""
+    state = CatalogService().kakeraloot_state(server, account)
+    if state is None:
+        console.print("[yellow]No $lk snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{state.account_name} - Kakeraloot state")
+    table.add_column("Metric", style="green")
+    table.add_column("Value", justify="right", style="cyan")
+    table.add_row("Kakera balance", f"{state.kakera_balance:,}")
+    table.add_row("$kl usage", f"{state.usage_count:,}")
+    table.add_row("Quantity / Quality", f"{state.quantity_level} / {state.quality_level}")
+    table.add_row("Rolls stacked", str(state.rolls_stacked))
+    table.add_row("Permanent rolls", f"+{state.permanent_roll_bonus}")
+    table.add_row("Wishprotect", f"LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,})")
+    table.add_row("$disable reduction", f"-{state.disable_wa_ha_reduction} $wa/$ha · -{state.disable_wg_hg_reduction} $wg/$hg")
+    table.add_row("$rt cooldown", f"-{state.rt_cooldown_reduction_hours}h")
+    table.add_row("Mudapins", str(state.mudapins))
+    table.add_row("Star branches", f"{state.star_branches} (+{state.starwish_slots_from_branches} $sw)")
+    console.print(table)
+    console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
 
 
 @catalog_app.command("imports")

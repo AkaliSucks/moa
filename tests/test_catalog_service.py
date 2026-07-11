@@ -310,3 +310,79 @@ def test_import_topx_persists_direct_unavailable_character_evidence(tmp_path) ->
         ("2B", None),
         ("Venom", "$togglewestern"),
     ]
+
+
+def test_import_kakera_state_persists_balance_and_badges(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = "You have 7,673:kakera:!\nBronze IV · Max reached!\nSilver III · In progress"
+
+    result = service.import_kakera_state(
+        MudaeTextParser().parse_kakera_state(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    state = service.kakera_state("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert state is not None
+    assert state.kakera_balance == 7673
+    assert [(badge.badge_name, badge.level, badge.max_reached) for badge in state.badges] == [
+        ("bronze", 4, True),
+        ("silver", 3, False),
+    ]
+
+
+def test_import_tower_state_persists_current_tower_progress(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "Your current level is:tow2: (+ 1 tower)\n"
+        "The next level costs 75,000:kakera:\n"
+        "You have 7,673:kakera:\n"
+        "☑️ [5] Unveil 1 random button for the $oh command\n"
+        "☑️ [11] +1 roll per hour"
+    )
+
+    result = service.import_tower_state(
+        MudaeTextParser().parse_tower_state(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    state = service.tower_state("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert state is not None
+    assert state.next_level_cost == 75000
+    assert state.built_perk_ids == (5, 11)
+
+
+def test_import_kakeraloot_state_persists_account_progress(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "Rolls stacked: 1 ($us)\n"
+        "$disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+        "Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+        "Mudapins: 22 ($mp)\n"
+        "$rt: -2h cooldown\n"
+        "+1 permanent roll\n"
+        "1 star branch (+0 $sw)\n"
+        "Quantity LVL 23\nQuality LVL 6\n$kl usage: 256 (:kakeraC:+1)\n9,210:kakera:"
+    )
+
+    result = service.import_kakeraloot_state(
+        MudaeTextParser().parse_kakeraloot_state(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    state = service.kakeraloot_state("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert state is not None
+    assert state.quantity_level == 23
+    assert state.quality_level == 6
+    assert state.kakera_balance == 9210
