@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -5,16 +7,19 @@ from rich.table import Table
 from moa.services.badge_service import BadgeService
 from moa.services.reaction_service import ReactionService
 from moa.services.tower_service import TowerService
+from moa.parser.mudae import MudaeParseError, MudaeTextParser
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 tower_app = typer.Typer(help="Tower commands")
 badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
+parse_app = typer.Typer(help="Parse copied Mudae bot output")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
 app.add_typer(badge_app, name="badge")
 app.add_typer(reaction_app, name="reaction")
+app.add_typer(parse_app, name="parse")
 
 
 @app.command()
@@ -108,6 +113,118 @@ def show_reaction(reaction_id: str) -> None:
     if reaction.average_value is not None:
         console.print(f"[bold]Base average:[/bold] {reaction.average_value:,.4f} Kakera")
     console.print(f"[bold]Details:[/bold] {reaction.description}")
+
+
+def _read_copied_message(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        console.print(f"[red]Could not read {path}: {error}[/red]")
+        raise typer.Exit(1) from error
+
+
+def _read_clipboard() -> str:
+    """Read text the user has copied from Discord on the local desktop."""
+    try:
+        import tkinter
+
+        root = tkinter.Tk()
+        root.withdraw()
+        try:
+            text = root.clipboard_get()
+        finally:
+            root.destroy()
+    except Exception as error:
+        console.print(f"[red]Could not read text from the clipboard: {error}[/red]")
+        raise typer.Exit(1) from error
+
+    if not text.strip():
+        console.print("[red]The clipboard does not contain text.[/red]")
+        raise typer.Exit(1)
+    return str(text)
+
+
+def _read_message_source(path: Path | None, clipboard: bool) -> str:
+    if clipboard:
+        if path is not None:
+            console.print("[red]Use either a file path or --clipboard, not both.[/red]")
+            raise typer.Exit(1)
+        return _read_clipboard()
+
+    if path is None:
+        console.print("[red]Provide a text-file path or use --clipboard.[/red]")
+        raise typer.Exit(1)
+    return _read_copied_message(path)
+
+
+def _format_optional_number(value: int | None) -> str:
+    return "-" if value is None else f"{value:,}"
+
+
+def _format_optional_rank(value: int | None) -> str:
+    return "-" if value is None else f"#{value:,}"
+
+
+@parse_app.command("top")
+def parse_top(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$top` page from a file or the clipboard."""
+    try:
+        page = MudaeTextParser().parse_top_page(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    if page.limit is None or page.page_number is None or page.page_count is None:
+        console.print("[bold cyan]Ranked characters (partial import)[/bold cyan]")
+    else:
+        console.print(
+            f"[bold cyan]TOP {page.limit:,} - Page {page.page_number}/{page.page_count}[/bold cyan]"
+        )
+    table = Table()
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Series")
+    for character in page.characters:
+        table.add_row(f"#{character.claim_rank:,}", character.name, character.series)
+    console.print(table)
+
+
+@parse_app.command("im")
+def parse_im(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $im response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$im` response from a file or the clipboard."""
+    try:
+        character = MudaeTextParser().parse_character_details(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    console.print(f"[bold cyan]{character.name}[/bold cyan] — {character.series}")
+    console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(character.claim_rank)}")
+    console.print(f"[bold]Like rank:[/bold] {_format_optional_rank(character.like_rank)}")
+    console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(character.kakera_value)}")
+
+
+@parse_app.command("roll")
+def parse_roll(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae roll card from a file or the clipboard."""
+    try:
+        roll = MudaeTextParser().parse_roll(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
+    console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
+    console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
 
 
 @tower_app.command("list")
