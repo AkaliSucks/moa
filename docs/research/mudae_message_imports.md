@@ -32,10 +32,35 @@ and stores the displayed Kakera value under that explicit server label. Kakera
 value is never treated as a universal character property.
 
 `moa import mm --server <label> --account <label> --clipboard` records one
-keyed-harem page from `$mmy=`. The harem list does not include series names, so
-MOA links an entry only when its character name resolves uniquely in the local
-catalog. Other entries remain explicitly unresolved until a matching `$im`
-import provides reliable identity metadata.
+keyed-harem page from `$mmy=`. `$mmyk=` is also supported: its per-character
+Kakera values are stored against that server/account rather than treated as
+global values. The harem list does not include series names, so MOA links an
+entry only when its character name resolves uniquely in the local catalog.
+Other entries remain explicitly unresolved until a matching `$im` import
+provides reliable identity metadata.
+
+For an accurate full-harem snapshot, begin a scan before copying pages:
+
+```powershell
+uv run moa harem begin --server "Lake Arrowhead 2025" --account "ernieuuu"
+uv run moa import mm --scan <id> --server "Lake Arrowhead 2025" --account "ernieuuu" --clipboard
+uv run moa harem status <id>
+uv run moa harem complete <id>
+```
+
+Import every page under the same scan ID. MOA activates that scan only when it
+has all pages advertised by Mudae, so a partial page can never become the
+current basis for key-farm recommendations.
+
+`moa import bonus --server <label> --account <label> --clipboard` stores a
+timestamped `$bonus` snapshot. Every displayed line is retained; the
+decision-critical values (roll, wish, Starwish, key, and Kakera-button
+modifiers) are additionally extracted as typed fields.
+
+`moa import wishlist --server <label> --account <label> --clipboard` stores a
+timestamped `$wl` snapshot. `$wl` is the authoritative source for active
+Starwishes because each Starwish is marked with `⭐`; `$sw` itself only displays
+help and slot information.
 
 ## Intentional limits
 

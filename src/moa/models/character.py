@@ -57,3 +57,47 @@ class HaremKeyPage(MOAModel):
     page_count: int | None
     entries: tuple[HaremKeyEntry, ...]
     total_harem_value: int | None = None
+
+
+class PlayerBonusMetric(MOAModel):
+    """One labelled modifier reported by Mudae's `$bonus` command."""
+
+    label: str
+    detail: str
+
+
+class PlayerBonusSnapshot(MOAModel):
+    """Typed, account-scoped values extracted from one `$bonus` response."""
+
+    metrics: tuple[PlayerBonusMetric, ...]
+    rolls_per_hour_bonus: int | None = None
+    wishlist_slot_bonus: int | None = None
+    wish_spawn_bonus_percent: int | None = None
+    starwish_spawn_bonus_percent: int | None = None
+    starwish_total_spawn_bonus_percent: int | None = None
+    starwish_slot_bonus: int | None = None
+    additional_wish_key_chance_percent: int | None = None
+    kakera_max_power_percent: int | None = None
+    kakera_button_power_cost_percent: int | None = None
+    starwish_kakera_button_bonus_percent: int | None = None
+    light_kakera_minimum: int | None = None
+    light_kakera_maximum: int | None = None
+
+
+class WishlistEntry(MOAModel):
+    """One character in a Mudae `$wl` response."""
+
+    name: str
+    is_starwish: bool
+    is_owned_marker_present: bool
+    kakera_marker_present: bool
+
+
+class WishlistSnapshot(MOAModel):
+    """Account-scoped wishlist and Starwish state parsed from `$wl`."""
+
+    wishlist_count: int
+    wishlist_capacity: int
+    starwish_count: int
+    starwish_capacity: int
+    entries: tuple[WishlistEntry, ...]

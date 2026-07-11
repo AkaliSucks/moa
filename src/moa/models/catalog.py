@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from moa.models.base import MOAModel
+from moa.models.character import PlayerBonusMetric, WishlistEntry
 
 
 class CatalogCharacter(MOAModel):
@@ -88,6 +89,9 @@ class HaremKeyImportResult(MOAModel):
     entries_imported: int
     entries_linked: int
     observed_at: datetime
+    scan_id: int | None = None
+    page_number: int | None = None
+    page_count: int | None = None
 
 
 class HaremKeyObservation(MOAModel):
@@ -98,4 +102,73 @@ class HaremKeyObservation(MOAModel):
     key_type: str
     key_count: int
     kakera_value: int | None
+    observed_at: datetime
+
+
+class HaremScanProgress(MOAModel):
+    """The completeness state of one multi-page keyed-harem import."""
+
+    id: int
+    server_name: str
+    account_name: str
+    expected_page_count: int | None
+    imported_pages: tuple[int, ...]
+    completed_at: datetime | None
+
+    @property
+    def is_complete(self) -> bool:
+        if self.expected_page_count is None:
+            return False
+        return self.imported_pages == tuple(range(1, self.expected_page_count + 1))
+
+
+class PlayerBonusImportResult(MOAModel):
+    """Summary of one persisted `$bonus` player-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class PlayerBonusObservation(MOAModel):
+    """The latest imported `$bonus` snapshot for one account on one server."""
+
+    server_name: str
+    account_name: str
+    metrics: tuple[PlayerBonusMetric, ...]
+    rolls_per_hour_bonus: int | None
+    wishlist_slot_bonus: int | None
+    wish_spawn_bonus_percent: int | None
+    starwish_spawn_bonus_percent: int | None
+    starwish_total_spawn_bonus_percent: int | None
+    starwish_slot_bonus: int | None
+    additional_wish_key_chance_percent: int | None
+    kakera_max_power_percent: int | None
+    kakera_button_power_cost_percent: int | None
+    starwish_kakera_button_bonus_percent: int | None
+    light_kakera_minimum: int | None
+    light_kakera_maximum: int | None
+    observed_at: datetime
+
+
+class WishlistImportResult(MOAModel):
+    """Summary of one persisted `$wl` account-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class WishlistObservation(MOAModel):
+    """The latest imported wishlist snapshot for one account on one server."""
+
+    server_name: str
+    account_name: str
+    wishlist_count: int
+    wishlist_capacity: int
+    starwish_count: int
+    starwish_capacity: int
+    entries: tuple[WishlistEntry, ...]
     observed_at: datetime

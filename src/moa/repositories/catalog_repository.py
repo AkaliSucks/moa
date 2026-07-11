@@ -1,5 +1,6 @@
 """SQLite-backed repository for MOA's imported character catalog."""
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,12 +13,23 @@ from moa.models.catalog import (
     CharacterProfile,
     HaremKeyImportResult,
     HaremKeyObservation,
+    HaremScanProgress,
     ImportEventSummary,
     RankedCatalogCharacter,
     ServerKakeraObservation,
+    PlayerBonusImportResult,
+    PlayerBonusObservation,
+    WishlistImportResult,
+    WishlistObservation,
     TopImportResult,
 )
-from moa.models.character import CharacterDetails, HaremKeyPage, TopPage
+from moa.models.character import (
+    CharacterDetails,
+    HaremKeyPage,
+    PlayerBonusSnapshot,
+    TopPage,
+    WishlistSnapshot,
+)
 
 
 class CatalogRepositoryProtocol(Protocol):
@@ -50,9 +62,38 @@ class CatalogRepositoryProtocol(Protocol):
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> HaremKeyImportResult: ...
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]: ...
+
+    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress: ...
+
+    def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None: ...
+
+    def complete_harem_scan(self, scan_id: int) -> HaremScanProgress: ...
+
+    def import_player_bonus(
+        self,
+        bonus: PlayerBonusSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> PlayerBonusImportResult: ...
+
+    def player_bonus(self, server_name: str, account_name: str) -> PlayerBonusObservation | None: ...
+
+    def import_wishlist(
+        self,
+        wishlist: WishlistSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> WishlistImportResult: ...
+
+    def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None: ...
 
 
 class CatalogRepository:
@@ -344,6 +385,7 @@ class CatalogRepository:
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> HaremKeyImportResult:
         """Append a keyed-harem page while retaining unresolved names safely."""
         observed_at = datetime.now(timezone.utc)
@@ -358,6 +400,8 @@ class CatalogRepository:
             import_event_id = int(cursor.lastrowid)
             server_id = self._upsert_server(connection, server_name, observed_at)
             account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            if scan_id is not None:
+                self._prepare_harem_scan_page(connection, scan_id, account_id, page)
             linked_entries = 0
 
             for entry in page.entries:
@@ -373,7 +417,8 @@ class CatalogRepository:
                     INSERT INTO harem_key_observations (
                         account_context_id, character_id, character_name, normalized_character_name,
                         key_type, key_count, kakera_value, observed_at, import_event_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        , harem_scan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -385,7 +430,15 @@ class CatalogRepository:
                         entry.kakera_value,
                         observed_at.isoformat(),
                         import_event_id,
+                        scan_id,
                     ),
+                )
+
+            if scan_id is not None:
+                connection.execute(
+                    "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+                    "VALUES (?, ?, ?)",
+                    (scan_id, page.page_number, import_event_id),
                 )
 
         return HaremKeyImportResult(
@@ -395,13 +448,21 @@ class CatalogRepository:
             entries_imported=len(page.entries),
             entries_linked=linked_entries,
             observed_at=observed_at,
+            scan_id=scan_id,
+            page_number=page.page_number,
+            page_count=page.page_count,
         )
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
         """Return latest key observations for one account in one server context."""
         with self._connection() as connection:
+            active_scan_id = self._active_harem_scan_id(connection, server_name, account_name)
+            scan_filter = "harem_key_observations.harem_scan_id = ?" if active_scan_id else (
+                "harem_key_observations.harem_scan_id IS NULL"
+            )
+            scan_params: tuple[object, ...] = (active_scan_id,) if active_scan_id else ()
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     harem_key_observations.character_name,
                     harem_key_observations.key_type,
@@ -435,11 +496,12 @@ class CatalogRepository:
                     )
                 WHERE server_contexts.normalized_name = ?
                   AND account_contexts.normalized_name = ?
+                  AND {scan_filter}
                 ORDER BY harem_key_observations.kakera_value DESC NULLS LAST,
                          harem_key_observations.key_count DESC,
                          harem_key_observations.character_name COLLATE NOCASE
                 """,
-                (self._normalize(server_name), self._normalize(account_name)),
+                (self._normalize(server_name), self._normalize(account_name), *scan_params),
             ).fetchall()
 
         return tuple(
@@ -462,6 +524,244 @@ class CatalogRepository:
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
+        )
+
+    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress:
+        """Start a multi-page harem import that must be completed before activation."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            cursor = connection.execute(
+                "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at) "
+                "VALUES (?, NULL, ?)",
+                (account_id, observed_at.isoformat()),
+            )
+            scan_id = int(cursor.lastrowid)
+        progress = self.harem_scan_progress(scan_id)
+        assert progress is not None
+        return progress
+
+    def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT harem_scans.id, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name, harem_scans.expected_page_count,
+                       harem_scans.completed_at
+                FROM harem_scans
+                JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                WHERE harem_scans.id = ?
+                """,
+                (scan_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            page_rows = connection.execute(
+                "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ? "
+                "ORDER BY page_number",
+                (scan_id,),
+            ).fetchall()
+        return HaremScanProgress(
+            id=row["id"],
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            expected_page_count=row["expected_page_count"],
+            imported_pages=tuple(page_row["page_number"] for page_row in page_rows),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"]) if row["completed_at"] is not None else None
+            ),
+        )
+
+    def complete_harem_scan(self, scan_id: int) -> HaremScanProgress:
+        progress = self.harem_scan_progress(scan_id)
+        if progress is None:
+            raise ValueError("Harem scan not found.")
+        if not progress.is_complete:
+            expected = progress.expected_page_count or "an unknown number of"
+            raise ValueError(
+                f"Harem scan is incomplete: imported pages {list(progress.imported_pages)}; "
+                f"expected {expected} pages."
+            )
+        completed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE harem_scans SET completed_at = ? WHERE id = ?",
+                (completed_at.isoformat(), scan_id),
+            )
+        completed = self.harem_scan_progress(scan_id)
+        assert completed is not None
+        return completed
+
+    def import_player_bonus(
+        self,
+        bonus: PlayerBonusSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> PlayerBonusImportResult:
+        """Store a complete, account-scoped `$bonus` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("player_bonus", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO player_bonus_observations (
+                    account_context_id, metrics_json, rolls_per_hour_bonus, wishlist_slot_bonus,
+                    wish_spawn_bonus_percent, starwish_spawn_bonus_percent,
+                    starwish_total_spawn_bonus_percent, starwish_slot_bonus,
+                    additional_wish_key_chance_percent, kakera_max_power_percent,
+                    kakera_button_power_cost_percent, starwish_kakera_button_bonus_percent,
+                    light_kakera_minimum, light_kakera_maximum, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    json.dumps([metric.model_dump() for metric in bonus.metrics]),
+                    bonus.rolls_per_hour_bonus,
+                    bonus.wishlist_slot_bonus,
+                    bonus.wish_spawn_bonus_percent,
+                    bonus.starwish_spawn_bonus_percent,
+                    bonus.starwish_total_spawn_bonus_percent,
+                    bonus.starwish_slot_bonus,
+                    bonus.additional_wish_key_chance_percent,
+                    bonus.kakera_max_power_percent,
+                    bonus.kakera_button_power_cost_percent,
+                    bonus.starwish_kakera_button_bonus_percent,
+                    bonus.light_kakera_minimum,
+                    bonus.light_kakera_maximum,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return PlayerBonusImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def player_bonus(self, server_name: str, account_name: str) -> PlayerBonusObservation | None:
+        """Return the latest player bonus snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT player_bonus_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN player_bonus_observations ON player_bonus_observations.id = (
+                    SELECT observations.id FROM player_bonus_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return PlayerBonusObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            metrics=tuple(json.loads(row["metrics_json"])),
+            rolls_per_hour_bonus=row["rolls_per_hour_bonus"],
+            wishlist_slot_bonus=row["wishlist_slot_bonus"],
+            wish_spawn_bonus_percent=row["wish_spawn_bonus_percent"],
+            starwish_spawn_bonus_percent=row["starwish_spawn_bonus_percent"],
+            starwish_total_spawn_bonus_percent=row["starwish_total_spawn_bonus_percent"],
+            starwish_slot_bonus=row["starwish_slot_bonus"],
+            additional_wish_key_chance_percent=row["additional_wish_key_chance_percent"],
+            kakera_max_power_percent=row["kakera_max_power_percent"],
+            kakera_button_power_cost_percent=row["kakera_button_power_cost_percent"],
+            starwish_kakera_button_bonus_percent=row["starwish_kakera_button_bonus_percent"],
+            light_kakera_minimum=row["light_kakera_minimum"],
+            light_kakera_maximum=row["light_kakera_maximum"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    def import_wishlist(
+        self,
+        wishlist: WishlistSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> WishlistImportResult:
+        """Store a complete account-scoped `$wl` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("wishlist", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO wishlist_observations (
+                    account_context_id, wishlist_count, wishlist_capacity, starwish_count,
+                    starwish_capacity, entries_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    wishlist.wishlist_count,
+                    wishlist.wishlist_capacity,
+                    wishlist.starwish_count,
+                    wishlist.starwish_capacity,
+                    json.dumps([entry.model_dump() for entry in wishlist.entries]),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return WishlistImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
+        """Return the latest `$wl` snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT wishlist_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN wishlist_observations ON wishlist_observations.id = (
+                    SELECT observations.id FROM wishlist_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return WishlistObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            wishlist_count=row["wishlist_count"],
+            wishlist_capacity=row["wishlist_capacity"],
+            starwish_count=row["starwish_count"],
+            starwish_capacity=row["starwish_capacity"],
+            entries=tuple(json.loads(row["entries_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
     def delete_import_event(self, import_event_id: int) -> bool:
@@ -565,6 +865,53 @@ class CatalogRepository:
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS harem_scans (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    expected_page_count INTEGER,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS harem_scan_pages (
+                    harem_scan_id INTEGER NOT NULL REFERENCES harem_scans(id),
+                    page_number INTEGER NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    PRIMARY KEY (harem_scan_id, page_number)
+                );
+
+                CREATE TABLE IF NOT EXISTS player_bonus_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    metrics_json TEXT NOT NULL,
+                    rolls_per_hour_bonus INTEGER,
+                    wishlist_slot_bonus INTEGER,
+                    wish_spawn_bonus_percent INTEGER,
+                    starwish_spawn_bonus_percent INTEGER,
+                    starwish_total_spawn_bonus_percent INTEGER,
+                    starwish_slot_bonus INTEGER,
+                    additional_wish_key_chance_percent INTEGER,
+                    kakera_max_power_percent INTEGER,
+                    kakera_button_power_cost_percent INTEGER,
+                    starwish_kakera_button_bonus_percent INTEGER,
+                    light_kakera_minimum INTEGER,
+                    light_kakera_maximum INTEGER,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS wishlist_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    wishlist_count INTEGER NOT NULL,
+                    wishlist_capacity INTEGER NOT NULL,
+                    starwish_count INTEGER NOT NULL,
+                    starwish_capacity INTEGER NOT NULL,
+                    entries_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
                 """
             )
             columns = {
@@ -573,6 +920,62 @@ class CatalogRepository:
             }
             if "kakera_value" not in columns:
                 connection.execute("ALTER TABLE harem_key_observations ADD COLUMN kakera_value INTEGER")
+            if "harem_scan_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE harem_key_observations ADD COLUMN harem_scan_id INTEGER "
+                    "REFERENCES harem_scans(id)"
+                )
+
+    def _prepare_harem_scan_page(
+        self,
+        connection: sqlite3.Connection,
+        scan_id: int,
+        account_id: int,
+        page: HaremKeyPage,
+    ) -> None:
+        if page.page_number is None or page.page_count is None:
+            raise ValueError("A scanned harem page must include its Page X / Y indicator.")
+        scan = connection.execute(
+            "SELECT account_context_id, expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+        if scan is None:
+            raise ValueError("Harem scan not found.")
+        if scan["account_context_id"] != account_id:
+            raise ValueError("Harem scan belongs to a different server or account.")
+        if scan["completed_at"] is not None:
+            raise ValueError("Harem scan is already complete; begin a new scan to refresh it.")
+        if scan["expected_page_count"] not in (None, page.page_count):
+            raise ValueError("Harem page count does not match the scan's first imported page.")
+        duplicate = connection.execute(
+            "SELECT 1 FROM harem_scan_pages WHERE harem_scan_id = ? AND page_number = ?",
+            (scan_id, page.page_number),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("This harem scan already contains that page.")
+        connection.execute(
+            "UPDATE harem_scans SET expected_page_count = ? WHERE id = ?",
+            (page.page_count, scan_id),
+        )
+
+    def _active_harem_scan_id(
+        self, connection: sqlite3.Connection, server_name: str, account_name: str
+    ) -> int | None:
+        row = connection.execute(
+            """
+            SELECT harem_scans.id
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            WHERE server_contexts.normalized_name = ?
+              AND account_contexts.normalized_name = ?
+              AND harem_scans.completed_at IS NOT NULL
+            ORDER BY harem_scans.completed_at DESC
+            LIMIT 1
+            """,
+            (self._normalize(server_name), self._normalize(account_name)),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
 
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)

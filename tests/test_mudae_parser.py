@@ -175,6 +175,54 @@ def test_parse_value_sorted_keyed_harem_page_from_mmyk_output() -> None:
     assert page.entries[2].key_type == "gold"
 
 
+def test_parse_player_bonus_preserves_metrics_and_extracts_key_modifiers() -> None:
+    bonus = MudaeTextParser().parse_player_bonus(
+        "Player Bonuses\n"
+        ":addroll: · Rolls per hour: +9 (6 $k + 1 $kl + 2 $kt) -3 ($bw)\n"
+        ":wlslot: · Wishlist slots: +8 (6 $k + 0 $kl + 2 $kt) -2 ($sw)\n"
+        ":wlslot: · Spawn bonus for wishes: +210% ($k + $bw + slash)\n"
+        ":sw: · Additional % spawn bonus for $starwish: +180% ($kt + $bw + $tuto) (= 390%)\n"
+        ":sw: · Starwish slots: +1 (0 $kl + 1 $sw)\n"
+        ":morekakera: · Kakera max power: 110% ($kt)\n"
+        ":morekakera: · Power cost per kakera button: 36% (-60% $k -4% $kt)\n"
+        ":morekakera: · Additional bonus for kakera buttons on starwishes: +20% ($sw)\n"
+        ":kakeraL: · Random kakera per light kakera: 4-5 (1 $kt)\n"
+        ":chaoskey: · Chance to get an additional key on wishes: +10% ($kt)\n"
+    )
+
+    assert len(bonus.metrics) == 10
+    assert bonus.rolls_per_hour_bonus == 9
+    assert bonus.wishlist_slot_bonus == 8
+    assert bonus.wish_spawn_bonus_percent == 210
+    assert bonus.starwish_spawn_bonus_percent == 180
+    assert bonus.starwish_total_spawn_bonus_percent == 390
+    assert bonus.additional_wish_key_chance_percent == 10
+    assert bonus.light_kakera_minimum == 4
+    assert bonus.light_kakera_maximum == 5
+
+
+def test_parse_wishlist_reads_starwish_markers_from_wl_output() -> None:
+    wishlist = MudaeTextParser().parse_wishlist(
+        "**ernieuuu's Wishlist - 13/13 $wl, 2/2 $sw**\n"
+        "**Saber** ✅:kakera:\n"
+        "**Emilia** ✅ ⭐\n"
+        "**Power** ✅ ⭐\n"
+        "**Xenovia Quarta** ✅:kakera:\n"
+    )
+
+    assert wishlist.wishlist_count == 13
+    assert wishlist.wishlist_capacity == 13
+    assert wishlist.starwish_count == 2
+    assert wishlist.starwish_capacity == 2
+    assert [entry.name for entry in wishlist.entries] == [
+        "Saber",
+        "Emilia",
+        "Power",
+        "Xenovia Quarta",
+    ]
+    assert [entry.name for entry in wishlist.entries if entry.is_starwish] == ["Emilia", "Power"]
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

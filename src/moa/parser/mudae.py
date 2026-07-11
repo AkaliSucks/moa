@@ -10,9 +10,13 @@ from moa.models.character import (
     CharacterDetails,
     HaremKeyEntry,
     HaremKeyPage,
+    PlayerBonusMetric,
+    PlayerBonusSnapshot,
     RankedCharacter,
     RollObservation,
     TopPage,
+    WishlistEntry,
+    WishlistSnapshot,
 )
 
 
@@ -46,6 +50,12 @@ class MudaeTextParser:
         r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
     )
     _GENDER = re.compile(r"\s+:(?P<gender>female|male):\s*$", re.IGNORECASE)
+    _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
+    _WISHLIST_HEADER = re.compile(
+        r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
+        r"(?P<starwish_count>\d+)\s*/\s*(?P<starwish_capacity>\d+)\s*\$sw",
+        re.IGNORECASE,
+    )
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -176,6 +186,115 @@ class MudaeTextParser:
             entries=tuple(entries),
             total_harem_value=self._number(total.group("value")) if total else None,
         )
+
+    def parse_player_bonus(self, text: str) -> PlayerBonusSnapshot:
+        """Parse stable player modifiers from a copied Mudae `$bonus` message."""
+        metrics: list[PlayerBonusMetric] = []
+        for line in self._lines(text):
+            content = line.split(" · ", 1)[-1]
+            match = self._BONUS_METRIC.match(content)
+            if match is not None:
+                metrics.append(
+                    PlayerBonusMetric(
+                        label=match.group("label").strip(), detail=match.group("detail").strip()
+                    )
+                )
+
+        if not metrics:
+            raise MudaeParseError("No player bonus metrics found in the Mudae $bonus output.")
+
+        details = {metric.label.casefold(): metric.detail for metric in metrics}
+        return PlayerBonusSnapshot(
+            metrics=tuple(metrics),
+            rolls_per_hour_bonus=self._bonus_number(details, "rolls per hour"),
+            wishlist_slot_bonus=self._bonus_number(details, "wishlist slots"),
+            wish_spawn_bonus_percent=self._bonus_number(details, "spawn bonus for wishes"),
+            starwish_spawn_bonus_percent=self._bonus_number(
+                details, "additional % spawn bonus for $starwish"
+            ),
+            starwish_total_spawn_bonus_percent=self._parenthesized_total(
+                details.get("additional % spawn bonus for $starwish")
+            ),
+            starwish_slot_bonus=self._bonus_number(details, "starwish slots"),
+            additional_wish_key_chance_percent=self._bonus_number(
+                details, "chance to get an additional key on wishes"
+            ),
+            kakera_max_power_percent=self._bonus_number(details, "kakera max power"),
+            kakera_button_power_cost_percent=self._bonus_number(
+                details, "power cost per kakera button"
+            ),
+            starwish_kakera_button_bonus_percent=self._bonus_number(
+                details, "additional bonus for kakera buttons on starwishes"
+            ),
+            light_kakera_minimum=self._light_kakera_bound(details, 0),
+            light_kakera_maximum=self._light_kakera_bound(details, 1),
+        )
+
+    def parse_wishlist(self, text: str) -> WishlistSnapshot:
+        """Parse one copied Mudae `$wl` response, including Starwish markers."""
+        lines = self._lines(text)
+        header = next((self._WISHLIST_HEADER.search(line) for line in lines), None)
+        if header is None:
+            raise MudaeParseError("Expected a Mudae $wl header with $wl and $sw capacities.")
+
+        entries: list[WishlistEntry] = []
+        header_line = header.group(0)
+        for line in lines:
+            if header_line in line:
+                continue
+            name = (
+                line.replace("✅", "")
+                .replace("⭐", "")
+                .replace(":kakera:", "")
+                .strip()
+                .strip("*")
+                .strip()
+            )
+            if not name:
+                continue
+            entries.append(
+                WishlistEntry(
+                    name=name,
+                    is_starwish="⭐" in line,
+                    is_owned_marker_present="✅" in line,
+                    kakera_marker_present=":kakera:" in line,
+                )
+            )
+
+        if not entries:
+            raise MudaeParseError("No wishlist entries found in the Mudae $wl output.")
+        return WishlistSnapshot(
+            wishlist_count=int(header.group("wishlist_count")),
+            wishlist_capacity=int(header.group("wishlist_capacity")),
+            starwish_count=int(header.group("starwish_count")),
+            starwish_capacity=int(header.group("starwish_capacity")),
+            entries=tuple(entries),
+        )
+
+    @staticmethod
+    def _bonus_number(details: dict[str, str], label: str) -> int | None:
+        detail = details.get(label)
+        if detail is None:
+            return None
+        match = re.search(r"[+-]?(?P<value>\d+)(?:%|h)?", detail)
+        return int(match.group("value")) if match else None
+
+    @staticmethod
+    def _parenthesized_total(detail: str | None) -> int | None:
+        if detail is None:
+            return None
+        match = re.search(r"\(=\s*(?P<value>\d+)%\)", detail)
+        return int(match.group("value")) if match else None
+
+    @staticmethod
+    def _light_kakera_bound(details: dict[str, str], index: int) -> int | None:
+        detail = details.get("random kakera per light kakera")
+        if detail is None:
+            return None
+        match = re.match(r"(?P<minimum>\d+)\s*-\s*(?P<maximum>\d+)", detail)
+        if match is None:
+            return None
+        return int(match.group(("minimum", "maximum")[index]))
 
     def _first_number(self, lines: list[str], pattern: re.Pattern[str]) -> int | None:
         match = next((pattern.match(line) for line in lines if pattern.match(line)), None)

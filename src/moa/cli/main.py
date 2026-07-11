@@ -17,6 +17,7 @@ reaction_app = typer.Typer(help="Kakera reaction commands")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
+harem_app = typer.Typer(help="Build complete keyed-harem snapshots safely")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
@@ -25,6 +26,7 @@ app.add_typer(reaction_app, name="reaction")
 app.add_typer(parse_app, name="parse")
 app.add_typer(import_app, name="import")
 app.add_typer(catalog_app, name="catalog")
+app.add_typer(harem_app, name="harem")
 
 
 @app.command()
@@ -267,6 +269,51 @@ def parse_mm(
         console.print(f"[bold]Total harem value:[/bold] {page.total_harem_value:,} Kakera")
 
 
+@parse_app.command("bonus")
+def parse_bonus(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $bonus response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$bonus` response."""
+    try:
+        bonus = MudaeTextParser().parse_player_bonus(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    table = Table(title="Parsed player bonuses")
+    table.add_column("Metric", style="green")
+    table.add_column("Mudae value")
+    for metric in bonus.metrics:
+        table.add_row(metric.label, metric.detail)
+    console.print(table)
+
+
+@parse_app.command("wishlist")
+def parse_wishlist(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $wl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$wl` response."""
+    try:
+        wishlist = MudaeTextParser().parse_wishlist(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    table = Table(
+        title=(
+            f"Wishlist {wishlist.wishlist_count}/{wishlist.wishlist_capacity} · "
+            f"Starwish {wishlist.starwish_count}/{wishlist.starwish_capacity}"
+        )
+    )
+    table.add_column("Character", style="green")
+    table.add_column("Status")
+    for entry in wishlist.entries:
+        table.add_row(entry.name, "Starwish" if entry.is_starwish else "Wish")
+    console.print(table)
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -315,6 +362,9 @@ def import_im(
 def import_mm(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
     account: str = typer.Option(..., "--account", "-a", help="Account whose harem is shown."),
+    scan: int | None = typer.Option(
+        None, "--scan", help="Optional active harem scan ID created by `moa harem begin`."
+    ),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
@@ -327,17 +377,118 @@ def import_mm(
         raise typer.Exit(1) from error
 
     source = "clipboard" if clipboard else f"file:{path}"
-    result = CatalogService().import_harem_key_page(
-        page,
-        server,
-        account,
-        raw_message,
-        source,
-    )
+    try:
+        result = CatalogService().import_harem_key_page(
+            page,
+            server,
+            account,
+            raw_message,
+            source,
+            scan,
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
     console.print(
         f"[green]Imported {result.entries_imported} keyed harem entries for "
         f"{result.account_name}.[/green] "
         f"[cyan]{result.entries_linked}[/cyan] linked to the current catalog."
+    )
+    if result.scan_id is not None and result.page_number is not None and result.page_count is not None:
+        console.print(
+            f"[cyan]Scan {result.scan_id}:[/cyan] saved page {result.page_number}/{result.page_count}. "
+            f"Keep using [bold]--scan {result.scan_id}[/bold] for every remaining page."
+        )
+
+
+@import_app.command("bonus")
+def import_bonus(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose bonuses are shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $bonus response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$bonus` response as account-scoped player state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        bonus = MudaeTextParser().parse_player_bonus(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_player_bonus(bonus, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported {len(bonus.metrics)} player bonus metrics for "
+        f"{result.account_name}.[/green]"
+    )
+
+
+@import_app.command("wishlist")
+def import_wishlist(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose wishlist is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $wl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$wl` response as account-scoped wishlist state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        wishlist = MudaeTextParser().parse_wishlist(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_wishlist(wishlist, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported {len(wishlist.entries)} wishlist entries for {result.account_name}.[/green] "
+        f"[cyan]{wishlist.starwish_count}[/cyan] marked as Starwish."
+    )
+
+
+@harem_app.command("begin")
+def harem_begin(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem you are scanning."),
+) -> None:
+    """Start a new multi-page harem scan that activates only when complete."""
+    scan = CatalogService().begin_harem_scan(server, account)
+    console.print(
+        f"[green]Started harem scan {scan.id}[/green] for [cyan]{scan.account_name}[/cyan].\n"
+        "Import each Mudae page with:\n"
+        f"[bold]uv run moa import mm --scan {scan.id} --server {scan.server_name!r} "
+        f"--account {scan.account_name!r} --clipboard[/bold]"
+    )
+
+
+@harem_app.command("status")
+def harem_status(scan_id: int) -> None:
+    """Show pages captured for a harem scan."""
+    scan = CatalogService().harem_scan_progress(scan_id)
+    if scan is None:
+        console.print("[red]Harem scan not found.[/red]")
+        raise typer.Exit(1)
+    expected = str(scan.expected_page_count) if scan.expected_page_count is not None else "unknown"
+    captured = ", ".join(str(page) for page in scan.imported_pages) or "none"
+    status = "complete" if scan.completed_at is not None else "in progress"
+    console.print(
+        f"[bold cyan]Harem scan {scan.id}[/bold cyan] — {scan.server_name} / {scan.account_name}\n"
+        f"Pages: {captured} of {expected} · Status: {status}"
+    )
+
+
+@harem_app.command("complete")
+def harem_complete(scan_id: int) -> None:
+    """Validate and activate a fully imported harem scan."""
+    try:
+        scan = CatalogService().complete_harem_scan(scan_id)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[green]Harem scan {scan.id} is complete and active[/green] for "
+        f"{scan.server_name} / {scan.account_name}."
     )
 
 
@@ -443,7 +594,12 @@ def catalog_keyfarm(
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of entries to display."),
 ) -> None:
     """Show the highest-value imported keyed characters for a future key-farm plan."""
-    entries = CatalogService().harem_keys(server, account)
+    service = CatalogService()
+    entries = service.harem_keys(server, account)
+    wishlist = service.wishlist(server, account)
+    wishlist_by_name = {
+        entry.name.casefold(): entry for entry in wishlist.entries
+    } if wishlist is not None else {}
     valued_entries = [entry for entry in entries if entry.kakera_value is not None][:limit]
     if not valued_entries:
         console.print(
@@ -457,18 +613,69 @@ def catalog_keyfarm(
     table.add_column("Kakera", justify="right", style="magenta")
     table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Wishlist")
     for entry in valued_entries:
+        wishlist_entry = wishlist_by_name.get(entry.character_name.casefold())
+        wishlist_status = (
+            "Starwish" if wishlist_entry and wishlist_entry.is_starwish
+            else "Wish" if wishlist_entry
+            else "-"
+        )
         table.add_row(
             entry.character_name,
             _format_optional_number(entry.kakera_value),
             entry.key_type.title(),
             str(entry.key_count),
+            wishlist_status,
         )
     console.print(table)
     console.print(
         "[dim]Ordered by the current Mudae values you imported. This is a factual shortlist, "
         "not yet an expected-value recommendation.[/dim]"
     )
+
+
+@catalog_app.command("bonus")
+def catalog_bonus(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose bonus snapshot to show."),
+) -> None:
+    """Show the latest imported `$bonus` snapshot for one account."""
+    bonus = CatalogService().player_bonus(server, account)
+    if bonus is None:
+        console.print("[yellow]No $bonus snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title=f"{bonus.account_name} - player bonuses")
+    table.add_column("Metric", style="green")
+    table.add_column("Mudae value")
+    for metric in bonus.metrics:
+        table.add_row(metric.label, metric.detail)
+    console.print(table)
+    console.print(f"[dim]Observed: {bonus.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+
+
+@catalog_app.command("wishlist")
+def catalog_wishlist(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose wishlist to show."),
+) -> None:
+    """Show the latest imported `$wl` snapshot for one account."""
+    wishlist = CatalogService().wishlist(server, account)
+    if wishlist is None:
+        console.print("[yellow]No $wl snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(
+        title=(
+            f"{wishlist.account_name} - wishlist {wishlist.wishlist_count}/{wishlist.wishlist_capacity} · "
+            f"Starwish {wishlist.starwish_count}/{wishlist.starwish_capacity}"
+        )
+    )
+    table.add_column("Character", style="green")
+    table.add_column("Status")
+    for entry in wishlist.entries:
+        table.add_row(entry.name, "Starwish" if entry.is_starwish else "Wish")
+    console.print(table)
 
 
 @catalog_app.command("imports")

@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.catalog_service import CatalogService
@@ -167,4 +169,96 @@ def test_import_mmyk_page_persists_current_harem_kakera_values(tmp_path) -> None
     assert [(entry.character_name, entry.kakera_value) for entry in entries] == [
         ("Megumin", 1505),
         ("Albedo", 1453),
+    ]
+
+
+def test_complete_harem_scan_activates_only_after_every_page_is_imported(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    scan = service.begin_harem_scan("Lake Arrowhead 2025", "ernieuuu")
+    first_page = "Megumin · :silverkey:  (5) 1,505 ka\nPage 1 / 2"
+    second_page = "Albedo · :goldkey:  (7) 1,453 ka\nPage 2 / 2"
+
+    service.import_harem_key_page(
+        MudaeTextParser().parse_harem_key_page(first_page),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        first_page,
+        "clipboard",
+        scan.id,
+    )
+    assert service.harem_scan_progress(scan.id).imported_pages == (1,)
+    with pytest.raises(ValueError, match="incomplete"):
+        service.complete_harem_scan(scan.id)
+
+    service.import_harem_key_page(
+        MudaeTextParser().parse_harem_key_page(second_page),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        second_page,
+        "clipboard",
+        scan.id,
+    )
+    completed = service.complete_harem_scan(scan.id)
+
+    assert completed.is_complete
+    assert completed.completed_at is not None
+    assert [entry.character_name for entry in service.harem_keys("Lake Arrowhead 2025", "ernieuuu")] == [
+        "Megumin",
+        "Albedo",
+    ]
+
+
+def test_import_bonus_persists_latest_account_scoped_player_state(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "Player Bonuses\n"
+        "Rolls per hour: +9 (6 $k + 1 $kl + 2 $kt) -3 ($bw)\n"
+        "Spawn bonus for wishes: +210% ($k + $bw + slash)\n"
+        "Starwish slots: +1 (0 $kl + 1 $sw)\n"
+    )
+
+    result = service.import_player_bonus(
+        MudaeTextParser().parse_player_bonus(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    bonus = service.player_bonus("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert bonus is not None
+    assert bonus.rolls_per_hour_bonus == 9
+    assert bonus.wish_spawn_bonus_percent == 210
+    assert bonus.starwish_slot_bonus == 1
+    assert [metric.label for metric in bonus.metrics] == [
+        "Rolls per hour",
+        "Spawn bonus for wishes",
+        "Starwish slots",
+    ]
+
+
+def test_import_wishlist_persists_starwish_state_per_server_account(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "**ernieuuu's Wishlist - 2/13 $wl, 1/2 $sw**\n"
+        "**Emilia** ✅ ⭐\n"
+        "**Saber** ✅:kakera:\n"
+    )
+
+    result = service.import_wishlist(
+        MudaeTextParser().parse_wishlist(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    wishlist = service.wishlist("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert wishlist is not None
+    assert wishlist.starwish_count == 1
+    assert [(entry.name, entry.is_starwish) for entry in wishlist.entries] == [
+        ("Emilia", True),
+        ("Saber", False),
     ]

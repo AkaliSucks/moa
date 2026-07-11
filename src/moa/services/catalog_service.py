@@ -5,11 +5,22 @@ from moa.models.catalog import (
     CharacterProfile,
     HaremKeyImportResult,
     HaremKeyObservation,
+    HaremScanProgress,
     ImportEventSummary,
     RankedCatalogCharacter,
     TopImportResult,
+    PlayerBonusImportResult,
+    PlayerBonusObservation,
+    WishlistImportResult,
+    WishlistObservation,
 )
-from moa.models.character import CharacterDetails, HaremKeyPage, TopPage
+from moa.models.character import (
+    CharacterDetails,
+    HaremKeyPage,
+    PlayerBonusSnapshot,
+    TopPage,
+    WishlistSnapshot,
+)
 from moa.repositories.catalog_repository import CatalogRepository, CatalogRepositoryProtocol
 
 
@@ -53,10 +64,50 @@ class CatalogService:
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> HaremKeyImportResult:
         return self._repository.import_harem_key_page(
-            page, server_name, account_name, raw_message, source
+            page, server_name, account_name, raw_message, source, scan_id
         )
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
         return self._repository.harem_keys(server_name, account_name)
+
+    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress:
+        return self._repository.begin_harem_scan(server_name, account_name)
+
+    def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None:
+        return self._repository.harem_scan_progress(scan_id)
+
+    def complete_harem_scan(self, scan_id: int) -> HaremScanProgress:
+        return self._repository.complete_harem_scan(scan_id)
+
+    def import_player_bonus(
+        self,
+        bonus: PlayerBonusSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> PlayerBonusImportResult:
+        return self._repository.import_player_bonus(
+            bonus, server_name, account_name, raw_message, source
+        )
+
+    def player_bonus(self, server_name: str, account_name: str) -> PlayerBonusObservation | None:
+        return self._repository.player_bonus(server_name, account_name)
+
+    def import_wishlist(
+        self,
+        wishlist: WishlistSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> WishlistImportResult:
+        return self._repository.import_wishlist(
+            wishlist, server_name, account_name, raw_message, source
+        )
+
+    def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
+        return self._repository.wishlist(server_name, account_name)
