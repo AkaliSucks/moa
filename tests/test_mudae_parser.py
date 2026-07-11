@@ -223,6 +223,35 @@ def test_parse_wishlist_reads_starwish_markers_from_wl_output() -> None:
     assert [entry.name for entry in wishlist.entries if entry.is_starwish] == ["Emilia", "Power"]
 
 
+def test_parse_disablelist_reads_pool_limits_toggles_and_bundles() -> None:
+    disablelist = MudaeTextParser().parse_disablelist(
+        "$dl\n"
+        "Mudae\n"
+        "APP\n"
+        "ernieuuu's Disablelist (13/16)\n"
+        "107,529 disabled (41,247 $wa, 42,438 $ha, 20,996 $wg, 14,789 $hg)\n"
+        "⚠️ Pool limit reached: 40,861 $wa (series above this limit are not disabled)\n"
+        "⚠️ Pool limit reached: 42,213 $ha (series above this limit are not disabled)\n"
+        "Western animanga series are completely disabled ($togglewestern)\n"
+        "IRL series are completely disabled ($toggleirl)\n"
+        "Kadokawa Corporation (13,207)\n"
+        "Mobile Games (16,769)\n"
+    )
+
+    assert disablelist.slots_used == 13
+    assert disablelist.slots_capacity == 16
+    assert disablelist.total_disabled == 107529
+    assert disablelist.disabled_wa == 41247
+    assert disablelist.wa_pool_limit == 40861
+    assert disablelist.ha_pool_limit == 42213
+    assert disablelist.western_disabled
+    assert disablelist.irl_disabled
+    assert [(entry.name, entry.disabled_count) for entry in disablelist.entries] == [
+        ("Kadokawa Corporation", 13207),
+        ("Mobile Games", 16769),
+    ]
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

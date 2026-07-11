@@ -19,12 +19,15 @@ from moa.models.catalog import (
     ServerKakeraObservation,
     PlayerBonusImportResult,
     PlayerBonusObservation,
+    DisableListImportResult,
+    DisableListObservation,
     WishlistImportResult,
     WishlistObservation,
     TopImportResult,
 )
 from moa.models.character import (
     CharacterDetails,
+    DisableListSnapshot,
     HaremKeyPage,
     PlayerBonusSnapshot,
     TopPage,
@@ -94,6 +97,17 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> WishlistImportResult: ...
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None: ...
+
+    def import_disablelist(
+        self,
+        disablelist: DisableListSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DisableListImportResult: ...
+
+    def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None: ...
 
 
 class CatalogRepository:
@@ -764,6 +778,96 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_disablelist(
+        self,
+        disablelist: DisableListSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DisableListImportResult:
+        """Store a complete account-scoped `$dl` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("disablelist", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO disablelist_observations (
+                    account_context_id, slots_used, slots_capacity, total_disabled, disabled_wa,
+                    disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit,
+                    western_disabled, irl_disabled, entries_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    disablelist.slots_used,
+                    disablelist.slots_capacity,
+                    disablelist.total_disabled,
+                    disablelist.disabled_wa,
+                    disablelist.disabled_ha,
+                    disablelist.disabled_wg,
+                    disablelist.disabled_hg,
+                    disablelist.wa_pool_limit,
+                    disablelist.ha_pool_limit,
+                    disablelist.western_disabled,
+                    disablelist.irl_disabled,
+                    json.dumps([entry.model_dump() for entry in disablelist.entries]),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return DisableListImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None:
+        """Return the latest `$dl` snapshot for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT disablelist_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN disablelist_observations ON disablelist_observations.id = (
+                    SELECT observations.id FROM disablelist_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return DisableListObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            slots_used=row["slots_used"],
+            slots_capacity=row["slots_capacity"],
+            total_disabled=row["total_disabled"],
+            disabled_wa=row["disabled_wa"],
+            disabled_ha=row["disabled_ha"],
+            disabled_wg=row["disabled_wg"],
+            disabled_hg=row["disabled_hg"],
+            wa_pool_limit=row["wa_pool_limit"],
+            ha_pool_limit=row["ha_pool_limit"],
+            western_disabled=bool(row["western_disabled"]),
+            irl_disabled=bool(row["irl_disabled"]),
+            entries=tuple(json.loads(row["entries_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def delete_import_event(self, import_event_id: int) -> bool:
         """Delete one raw import and all observations derived from it.
 
@@ -908,6 +1012,25 @@ class CatalogRepository:
                     wishlist_capacity INTEGER NOT NULL,
                     starwish_count INTEGER NOT NULL,
                     starwish_capacity INTEGER NOT NULL,
+                    entries_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS disablelist_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    slots_used INTEGER NOT NULL,
+                    slots_capacity INTEGER NOT NULL,
+                    total_disabled INTEGER NOT NULL,
+                    disabled_wa INTEGER NOT NULL,
+                    disabled_ha INTEGER NOT NULL,
+                    disabled_wg INTEGER NOT NULL,
+                    disabled_hg INTEGER NOT NULL,
+                    wa_pool_limit INTEGER,
+                    ha_pool_limit INTEGER,
+                    western_disabled INTEGER NOT NULL,
+                    irl_disabled INTEGER NOT NULL,
                     entries_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)

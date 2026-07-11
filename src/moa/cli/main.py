@@ -314,6 +314,34 @@ def parse_wishlist(
     console.print(table)
 
 
+@parse_app.command("disablelist")
+def parse_disablelist(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $dl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$dl` response."""
+    try:
+        disablelist = MudaeTextParser().parse_disablelist(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    console.print(
+        f"[bold cyan]Disablelist:[/bold cyan] {disablelist.slots_used}/{disablelist.slots_capacity} slots · "
+        f"{disablelist.total_disabled:,} total disabled"
+    )
+    console.print(
+        f"$wa {disablelist.disabled_wa:,} · $ha {disablelist.disabled_ha:,} · "
+        f"$wg {disablelist.disabled_wg:,} · $hg {disablelist.disabled_hg:,}"
+    )
+    table = Table()
+    table.add_column("Disabled bundle", style="green")
+    table.add_column("Characters", justify="right", style="cyan")
+    for entry in disablelist.entries:
+        table.add_row(entry.name, f"{entry.disabled_count:,}")
+    console.print(table)
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -444,6 +472,29 @@ def import_wishlist(
     console.print(
         f"[green]Imported {len(wishlist.entries)} wishlist entries for {result.account_name}.[/green] "
         f"[cyan]{wishlist.starwish_count}[/cyan] marked as Starwish."
+    )
+
+
+@import_app.command("disablelist")
+def import_disablelist(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose disable list is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $dl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$dl` response as account-scoped roll-pool state."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        disablelist = MudaeTextParser().parse_disablelist(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_disablelist(disablelist, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported {len(disablelist.entries)} disabled bundles for {result.account_name}.[/green] "
+        f"[cyan]{disablelist.slots_used}/{disablelist.slots_capacity}[/cyan] slots used."
     )
 
 
@@ -675,6 +726,32 @@ def catalog_wishlist(
     table.add_column("Status")
     for entry in wishlist.entries:
         table.add_row(entry.name, "Starwish" if entry.is_starwish else "Wish")
+    console.print(table)
+
+
+@catalog_app.command("disablelist")
+def catalog_disablelist(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose disable list to show."),
+) -> None:
+    """Show the latest imported `$dl` snapshot for one account."""
+    disablelist = CatalogService().disablelist(server, account)
+    if disablelist is None:
+        console.print("[yellow]No $dl snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    console.print(
+        f"[bold cyan]{disablelist.account_name} - disablelist[/bold cyan]\n"
+        f"Slots: {disablelist.slots_used}/{disablelist.slots_capacity} · "
+        f"Disabled: {disablelist.total_disabled:,}\n"
+        f"$wa: {disablelist.disabled_wa:,} · $ha: {disablelist.disabled_ha:,} · "
+        f"$wg: {disablelist.disabled_wg:,} · $hg: {disablelist.disabled_hg:,}\n"
+        f"Western disabled: {disablelist.western_disabled} · IRL disabled: {disablelist.irl_disabled}"
+    )
+    table = Table()
+    table.add_column("Disabled bundle", style="green")
+    table.add_column("Characters", justify="right", style="cyan")
+    for entry in disablelist.entries:
+        table.add_row(entry.name, f"{entry.disabled_count:,}")
     console.print(table)
 
 

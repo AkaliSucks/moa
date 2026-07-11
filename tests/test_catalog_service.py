@@ -262,3 +262,31 @@ def test_import_wishlist_persists_starwish_state_per_server_account(tmp_path) ->
         ("Emilia", True),
         ("Saber", False),
     ]
+
+
+def test_import_disablelist_persists_account_scoped_roll_pool_state(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "ernieuuu's Disablelist (1/16)\n"
+        "1,000 disabled (400 $wa, 300 $ha, 200 $wg, 100 $hg)\n"
+        "Western animanga series are completely disabled ($togglewestern)\n"
+        "Kadokawa Corporation (400)\n"
+    )
+
+    result = service.import_disablelist(
+        MudaeTextParser().parse_disablelist(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    disablelist = service.disablelist("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert disablelist is not None
+    assert disablelist.disabled_wa == 400
+    assert disablelist.western_disabled
+    assert not disablelist.irl_disabled
+    assert [(entry.name, entry.disabled_count) for entry in disablelist.entries] == [
+        ("Kadokawa Corporation", 400)
+    ]

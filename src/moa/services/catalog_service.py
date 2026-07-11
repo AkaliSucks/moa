@@ -11,11 +11,14 @@ from moa.models.catalog import (
     TopImportResult,
     PlayerBonusImportResult,
     PlayerBonusObservation,
+    DisableListImportResult,
+    DisableListObservation,
     WishlistImportResult,
     WishlistObservation,
 )
 from moa.models.character import (
     CharacterDetails,
+    DisableListSnapshot,
     HaremKeyPage,
     PlayerBonusSnapshot,
     TopPage,
@@ -111,3 +114,18 @@ class CatalogService:
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
         return self._repository.wishlist(server_name, account_name)
+
+    def import_disablelist(
+        self,
+        disablelist: DisableListSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DisableListImportResult:
+        return self._repository.import_disablelist(
+            disablelist, server_name, account_name, raw_message, source
+        )
+
+    def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None:
+        return self._repository.disablelist(server_name, account_name)

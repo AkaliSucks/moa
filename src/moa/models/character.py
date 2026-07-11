@@ -101,3 +101,27 @@ class WishlistSnapshot(MOAModel):
     starwish_count: int
     starwish_capacity: int
     entries: tuple[WishlistEntry, ...]
+
+
+class DisableListEntry(MOAModel):
+    """One disabled Mudae bundle shown by `$dl`."""
+
+    name: str
+    disabled_count: int
+
+
+class DisableListSnapshot(MOAModel):
+    """Account-scoped roll-pool settings parsed from one `$dl` response."""
+
+    slots_used: int
+    slots_capacity: int
+    total_disabled: int
+    disabled_wa: int
+    disabled_ha: int
+    disabled_wg: int
+    disabled_hg: int
+    wa_pool_limit: int | None
+    ha_pool_limit: int | None
+    western_disabled: bool
+    irl_disabled: bool
+    entries: tuple[DisableListEntry, ...]

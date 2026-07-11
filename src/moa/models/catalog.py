@@ -3,7 +3,7 @@
 from datetime import datetime
 
 from moa.models.base import MOAModel
-from moa.models.character import PlayerBonusMetric, WishlistEntry
+from moa.models.character import DisableListEntry, PlayerBonusMetric, WishlistEntry
 
 
 class CatalogCharacter(MOAModel):
@@ -171,4 +171,33 @@ class WishlistObservation(MOAModel):
     starwish_count: int
     starwish_capacity: int
     entries: tuple[WishlistEntry, ...]
+    observed_at: datetime
+
+
+class DisableListImportResult(MOAModel):
+    """Summary of one persisted `$dl` account-state snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class DisableListObservation(MOAModel):
+    """The latest imported disable-list snapshot for one server/account pair."""
+
+    server_name: str
+    account_name: str
+    slots_used: int
+    slots_capacity: int
+    total_disabled: int
+    disabled_wa: int
+    disabled_ha: int
+    disabled_wg: int
+    disabled_hg: int
+    wa_pool_limit: int | None
+    ha_pool_limit: int | None
+    western_disabled: bool
+    irl_disabled: bool
+    entries: tuple[DisableListEntry, ...]
     observed_at: datetime
