@@ -1,8 +1,14 @@
 [
-    {
-        "id": 1,
-        "name": "Bonus Wishlist Slots",
-        "max_level": 10,
-        "description": "Increase wishlist capacity"
-    }
+  {"id": 1, "name": "Wishlist Slots", "category": "wishes", "description": "Adds two wishlist slots.", "first_tower_effect": "+2 wishlist slots", "progression_note": "Continues indefinitely.", "initial_cap_level": null},
+  {"id": 2, "name": "Starwish Spawn", "category": "wishes", "description": "Raises the spawn chance of the account's STARWISH.", "first_tower_effect": "+50% STARWISH spawn chance", "progression_note": "Continues indefinitely with smaller increases until reaching +1%.", "initial_cap_level": null},
+  {"id": 3, "name": "Disablelist Capacity", "category": "rolling", "description": "Adds a disablelist slot and lowers pool limits.", "first_tower_effect": "+1 disablelist slot; lower $disable/$limroul limits", "progression_note": "Continues indefinitely with smaller reductions after the first tower.", "initial_cap_level": null},
+  {"id": 4, "name": "Second Key Chance", "category": "keys", "description": "Gives wished characters a chance to earn an additional key.", "first_tower_effect": "+10% chance for a second key on a wished character", "progression_note": "Falls to +5% after tower 2; after 100%, becomes third-key chance.", "initial_cap_level": null},
+  {"id": 5, "name": "Sphere Button Reveal", "category": "ourospheres", "description": "Reveals hidden $oh buttons before choosing one.", "first_tower_effect": "Reveal 2 random $oh buttons", "progression_note": "Caps at 9 revealed buttons, then becomes a sphere-doubling chance.", "initial_cap_level": 4},
+  {"id": 6, "name": "Sphere Income", "category": "ourospheres", "description": "Adds spheres from claims, $dailykakera, Bronze IV, and $rolls.", "first_tower_effect": "+30 claims/$dailykakera; +20 Bronze IV; +10 $rolls spheres", "progression_note": "Cycles through sources; later bonuses are reduced but continue indefinitely.", "initial_cap_level": null},
+  {"id": 7, "name": "Maximum Kakera Power", "category": "kakera", "description": "Raises maximum base kakera reaction power.", "first_tower_effect": "+10% maximum base kakera power", "progression_note": "Continues indefinitely with smaller gains after the first tower and +1% after tower 75.", "initial_cap_level": null},
+  {"id": 8, "name": "Kakera Reaction Cost", "category": "kakera", "description": "Reduces kakera reaction power costs.", "first_tower_effect": "-4% kakera reaction power cost", "progression_note": "Caps at -10% (30% reaction power); later floors add Red/Rainbow kakera.", "initial_cap_level": 10},
+  {"id": 9, "name": "Gold Key Income Cap", "category": "keys", "description": "Raises the Gold Key kakera cap shown by $bku.", "first_tower_effect": "+500 kakera/3h Gold Key cap", "progression_note": "Continues indefinitely; increases shrink after towers 11 and 21.", "initial_cap_level": null},
+  {"id": 10, "name": "Light Kakera", "category": "kakera", "description": "Adds one random kakera inside Light Kakera.", "first_tower_effect": "+1 random kakera in Light Kakera", "progression_note": "Caps at 13-14 rewards, then improves Chaos Kakera rarity.", "initial_cap_level": 10},
+  {"id": 11, "name": "Additional Rolls", "category": "rolling", "description": "Adds one roll per hour.", "first_tower_effect": "+1 roll per hour", "progression_note": "Caps at +10 rolls/hour, then raises Bronze IV and Silver IV kakera rewards.", "initial_cap_level": 10},
+  {"id": 12, "name": "Color Commands", "category": "utility", "description": "Unlocks collection and profile color commands.", "first_tower_effect": "Unlock $colormm and $colorpr", "progression_note": "Color unlocks cap at tower 2; later floors add Chaos Kakera.", "initial_cap_level": 2}
 ]
