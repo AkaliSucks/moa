@@ -8,9 +8,15 @@ app = typer.Typer(
 
 @app.command()
 def version():
-    """Display MOA version."""
-    print("[green]MOA v0.1.0[/green]")
+    """Show MOA version."""
+    print("[cyan]MOA[/cyan] v0.1.0")
+
+
+@app.command()
+def hello():
+    """Test command."""
+    print("[green]Hello from MOA![/green]")
 
 
 if __name__ == "__main__":
-    app()
+    app()                               

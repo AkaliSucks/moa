@@ -1,9 +1,8 @@
-from dataclasses import dataclass
+from moa.models.base import MOAModel
 
 
-@dataclass(frozen=True)
-class TowerPerk:
+class TowerPerk(MOAModel):
     id: int
     name: str
+    max_level: int
     description: str
-    max_level: int | None
