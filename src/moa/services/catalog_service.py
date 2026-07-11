@@ -13,6 +13,8 @@ from moa.models.catalog import (
     PlayerBonusObservation,
     DisableListImportResult,
     DisableListObservation,
+    RollabilityImportResult,
+    UnavailableCharacterObservation,
     WishlistImportResult,
     WishlistObservation,
 )
@@ -23,6 +25,7 @@ from moa.models.character import (
     PlayerBonusSnapshot,
     TopPage,
     WishlistSnapshot,
+    UnavailableCharacterPage,
 )
 from moa.repositories.catalog_repository import CatalogRepository, CatalogRepositoryProtocol
 
@@ -129,3 +132,20 @@ class CatalogService:
 
     def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None:
         return self._repository.disablelist(server_name, account_name)
+
+    def import_unavailable_characters(
+        self,
+        page: UnavailableCharacterPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollabilityImportResult:
+        return self._repository.import_unavailable_characters(
+            page, server_name, account_name, raw_message, source
+        )
+
+    def unavailable_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[UnavailableCharacterObservation, ...]:
+        return self._repository.unavailable_characters(server_name, account_name)

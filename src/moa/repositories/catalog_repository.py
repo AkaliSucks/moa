@@ -21,6 +21,8 @@ from moa.models.catalog import (
     PlayerBonusObservation,
     DisableListImportResult,
     DisableListObservation,
+    RollabilityImportResult,
+    UnavailableCharacterObservation,
     WishlistImportResult,
     WishlistObservation,
     TopImportResult,
@@ -31,6 +33,7 @@ from moa.models.character import (
     HaremKeyPage,
     PlayerBonusSnapshot,
     TopPage,
+    UnavailableCharacterPage,
     WishlistSnapshot,
 )
 
@@ -108,6 +111,19 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> DisableListImportResult: ...
 
     def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None: ...
+
+    def import_unavailable_characters(
+        self,
+        page: UnavailableCharacterPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollabilityImportResult: ...
+
+    def unavailable_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[UnavailableCharacterObservation, ...]: ...
 
 
 class CatalogRepository:
@@ -868,6 +884,104 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_unavailable_characters(
+        self,
+        page: UnavailableCharacterPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollabilityImportResult:
+        """Store direct Mudae evidence that characters cannot currently roll."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("topx_page", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            for character in page.characters:
+                character_id = self._upsert_character(
+                    connection,
+                    name=character.name,
+                    series=character.series,
+                    gender=None,
+                    roulette=None,
+                    observed_at=observed_at,
+                ).fetchone()["id"]
+                connection.execute(
+                    """
+                    INSERT INTO rank_snapshots (
+                        character_id, claim_rank, like_rank, observed_at, import_event_id
+                    ) VALUES (?, ?, NULL, ?, ?)
+                    """,
+                    (character_id, character.claim_rank, observed_at.isoformat(), import_event_id),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO unavailable_character_observations (
+                        account_context_id, character_id, reason, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (account_id, character_id, character.reason, observed_at.isoformat(), import_event_id),
+                )
+        return RollabilityImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            characters_imported=len(page.characters),
+            observed_at=observed_at,
+        )
+
+    def unavailable_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[UnavailableCharacterObservation, ...]:
+        """Return the latest unavailable observations for one server/account pair."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT characters.id, characters.name, characters.series, characters.gender, characters.roulette,
+                       unavailable_character_observations.reason,
+                       unavailable_character_observations.observed_at,
+                       rank_snapshots.claim_rank
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN unavailable_character_observations ON unavailable_character_observations.id = (
+                    SELECT observations.id FROM unavailable_character_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                      AND observations.character_id = unavailable_character_observations.character_id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                JOIN characters ON characters.id = unavailable_character_observations.character_id
+                JOIN rank_snapshots ON rank_snapshots.id = (
+                    SELECT snapshots.id FROM rank_snapshots AS snapshots
+                    WHERE snapshots.character_id = characters.id
+                    ORDER BY snapshots.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                ORDER BY rank_snapshots.claim_rank ASC
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchall()
+        return tuple(
+            UnavailableCharacterObservation(
+                character=CatalogCharacter(
+                    id=row["id"],
+                    name=row["name"],
+                    series=row["series"],
+                    gender=row["gender"],
+                    roulette=row["roulette"],
+                ),
+                claim_rank=row["claim_rank"],
+                reason=row["reason"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
+        )
+
     def delete_import_event(self, import_event_id: int) -> bool:
         """Delete one raw import and all observations derived from it.
 
@@ -1032,6 +1146,15 @@ class CatalogRepository:
                     western_disabled INTEGER NOT NULL,
                     irl_disabled INTEGER NOT NULL,
                     entries_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS unavailable_character_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    character_id INTEGER NOT NULL REFERENCES characters(id),
+                    reason TEXT,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

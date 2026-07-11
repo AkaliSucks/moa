@@ -201,3 +201,22 @@ class DisableListObservation(MOAModel):
     irl_disabled: bool
     entries: tuple[DisableListEntry, ...]
     observed_at: datetime
+
+
+class RollabilityImportResult(MOAModel):
+    """Summary of a persisted unavailable-character `$topx` page."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    characters_imported: int
+    observed_at: datetime
+
+
+class UnavailableCharacterObservation(MOAModel):
+    """A direct Mudae observation that a character cannot currently roll."""
+
+    character: CatalogCharacter
+    claim_rank: int
+    reason: str | None
+    observed_at: datetime

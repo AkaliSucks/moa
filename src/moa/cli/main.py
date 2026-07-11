@@ -342,6 +342,35 @@ def parse_disablelist(
     console.print(table)
 
 
+@parse_app.command("topx")
+def parse_topx(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $topx response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$topx` page of unavailable characters."""
+    try:
+        page = MudaeTextParser().parse_unavailable_characters(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    page_label = (
+        f"TOP {page.limit:,} — Page {page.page_number}/{page.page_count}"
+        if page.limit is not None and page.page_number is not None and page.page_count is not None
+        else "Unavailable characters (partial import)"
+    )
+    table = Table(title=page_label)
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Series")
+    table.add_column("Reason")
+    for character in page.characters:
+        table.add_row(
+            f"#{character.claim_rank:,}", character.name, character.series, character.reason or "Disabled"
+        )
+    console.print(table)
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -498,6 +527,29 @@ def import_disablelist(
     )
 
 
+@import_app.command("topx")
+def import_topx(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose roll pool is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $topx response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Persist direct Mudae evidence that `$topx` characters cannot currently roll."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        page = MudaeTextParser().parse_unavailable_characters(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_unavailable_characters(page, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported {result.characters_imported} unavailable-character observations for "
+        f"{result.account_name}.[/green]"
+    )
+
+
 @harem_app.command("begin")
 def harem_begin(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
@@ -651,6 +703,10 @@ def catalog_keyfarm(
     wishlist_by_name = {
         entry.name.casefold(): entry for entry in wishlist.entries
     } if wishlist is not None else {}
+    unavailable_names = {
+        observation.character.name.casefold()
+        for observation in service.unavailable_characters(server, account)
+    }
     valued_entries = [entry for entry in entries if entry.kakera_value is not None][:limit]
     if not valued_entries:
         console.print(
@@ -665,6 +721,7 @@ def catalog_keyfarm(
     table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
     table.add_column("Wishlist")
+    table.add_column("Rollability")
     for entry in valued_entries:
         wishlist_entry = wishlist_by_name.get(entry.character_name.casefold())
         wishlist_status = (
@@ -678,6 +735,7 @@ def catalog_keyfarm(
             entry.key_type.title(),
             str(entry.key_count),
             wishlist_status,
+            "Unavailable" if entry.character_name.casefold() in unavailable_names else "Unknown",
         )
     console.print(table)
     console.print(
@@ -752,6 +810,31 @@ def catalog_disablelist(
     table.add_column("Characters", justify="right", style="cyan")
     for entry in disablelist.entries:
         table.add_row(entry.name, f"{entry.disabled_count:,}")
+    console.print(table)
+
+
+@catalog_app.command("unavailable")
+def catalog_unavailable(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose roll pool to show."),
+) -> None:
+    """Show characters directly observed as unavailable by `$topx`."""
+    observations = CatalogService().unavailable_characters(server, account)
+    if not observations:
+        console.print("[yellow]No unavailable-character observations imported yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{account} - directly observed unavailable characters")
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Series")
+    table.add_column("Reason")
+    for observation in observations:
+        table.add_row(
+            f"#{observation.claim_rank:,}",
+            observation.character.name,
+            observation.character.series,
+            observation.reason or "Disabled bundle/pool",
+        )
     console.print(table)
 
 

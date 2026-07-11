@@ -17,6 +17,8 @@ from moa.models.character import (
     RankedCharacter,
     RollObservation,
     TopPage,
+    UnavailableCharacter,
+    UnavailableCharacterPage,
     WishlistEntry,
     WishlistSnapshot,
 )
@@ -72,6 +74,10 @@ class MudaeTextParser:
         re.IGNORECASE,
     )
     _DISABLELIST_ENTRY = re.compile(r"^(?P<name>.+?)\s*\((?P<count>[\d,]+)\)$")
+    _TOPX_ENTRY = re.compile(
+        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+?)"
+        r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
+    )
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -342,6 +348,33 @@ class MudaeTextParser:
             western_disabled=any("western animanga series are completely disabled" in line.casefold() for line in lines),
             irl_disabled=any("irl series are completely disabled" in line.casefold() for line in lines),
             entries=tuple(entries),
+        )
+
+    def parse_unavailable_characters(self, text: str) -> UnavailableCharacterPage:
+        """Parse the currently unrollable characters listed by Mudae `$topx`."""
+        lines = self._lines(text)
+        header = next((self._TOP_HEADER.search(line) for line in lines if self._TOP_HEADER.search(line)), None)
+        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
+        characters: list[UnavailableCharacter] = []
+        for line in lines:
+            entry = self._TOPX_ENTRY.match(line)
+            if entry is None:
+                continue
+            characters.append(
+                UnavailableCharacter(
+                    name=entry.group("name").removesuffix(" 💞").strip(),
+                    series=entry.group("series").strip(),
+                    claim_rank=self._number(entry.group("rank")),
+                    reason=entry.group("reason"),
+                )
+            )
+        if not characters:
+            raise MudaeParseError("No unavailable characters found in the Mudae $topx output.")
+        return UnavailableCharacterPage(
+            limit=self._number(header.group("limit")) if header else None,
+            page_number=int(page.group("page")) if page else None,
+            page_count=int(page.group("pages")) if page else None,
+            characters=tuple(characters),
         )
 
     @staticmethod

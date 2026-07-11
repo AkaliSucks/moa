@@ -290,3 +290,23 @@ def test_import_disablelist_persists_account_scoped_roll_pool_state(tmp_path) ->
     assert [(entry.name, entry.disabled_count) for entry in disablelist.entries] == [
         ("Kadokawa Corporation", 400)
     ]
+
+
+def test_import_topx_persists_direct_unavailable_character_evidence(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = "#10 - 2B - NieR: Automata 🚫\n#88 - Venom - Marvel 🚫 ($togglewestern)"
+
+    result = service.import_unavailable_characters(
+        MudaeTextParser().parse_unavailable_characters(text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        text,
+        "clipboard",
+    )
+    unavailable = service.unavailable_characters("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.characters_imported == 2
+    assert [(entry.character.name, entry.reason) for entry in unavailable] == [
+        ("2B", None),
+        ("Venom", "$togglewestern"),
+    ]

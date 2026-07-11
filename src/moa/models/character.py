@@ -125,3 +125,21 @@ class DisableListSnapshot(MOAModel):
     western_disabled: bool
     irl_disabled: bool
     entries: tuple[DisableListEntry, ...]
+
+
+class UnavailableCharacter(MOAModel):
+    """One character Mudae marks unavailable in a `$topx` response."""
+
+    name: str
+    series: str
+    claim_rank: int
+    reason: str | None
+
+
+class UnavailableCharacterPage(MOAModel):
+    """A single parsed page from Mudae's unavailable-character `$topx` output."""
+
+    limit: int | None
+    page_number: int | None
+    page_count: int | None
+    characters: tuple[UnavailableCharacter, ...]

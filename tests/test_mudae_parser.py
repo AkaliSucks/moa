@@ -252,6 +252,25 @@ def test_parse_disablelist_reads_pool_limits_toggles_and_bundles() -> None:
     ]
 
 
+def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:
+    page = MudaeTextParser().parse_unavailable_characters(
+        "🏆 TOP 1000\n"
+        "#10 - 2B - NieR: Automata  🚫\n"
+        "#88 - Venom - Marvel 🚫  ($togglewestern)\n"
+        "#119 - Ado - Utaite 🚫  ($toggleirl)\n"
+        "Page 1 / 67"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 1
+    assert page.page_count == 67
+    assert [(character.name, character.reason) for character in page.characters] == [
+        ("2B", None),
+        ("Venom", "$togglewestern"),
+        ("Ado", "$toggleirl"),
+    ]
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")
