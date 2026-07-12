@@ -11,6 +11,7 @@ from moa.models.character import (
     BadgeLevel,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    KakeralootSettingsSnapshot,
     PersonalRareSnapshot,
     ServerSettingMetric,
     ServerSettingsSnapshot,
@@ -123,6 +124,12 @@ class MudaeTextParser:
     _LOOT_USAGE = re.compile(r"\$kl usage:\s*(?P<value>[\d,]+)", re.IGNORECASE)
     _LOOT_BALANCE = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
     _NO_KAKERALOOTS = re.compile(r"No kakeraloots bought", re.IGNORECASE)
+    _LOOT_COST = re.compile(r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE)
+    _LOOT_UPGRADE_COST = re.compile(
+        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+):kakera:"
+        r".*?increased\s+by\s+(?P<increment>[\d,]+)/level",
+        re.IGNORECASE,
+    )
     _SERVER_PREMIUM = re.compile(r"Server\s+(?P<status>not\s+premium|premium)", re.IGNORECASE)
     _SETTING_LINE = re.compile(
         r"^[·•]\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
@@ -558,6 +565,18 @@ class MudaeTextParser:
             quality_level=int(quality.group("value")),
             usage_count=self._number(usage.group("value")),
             kakera_balance=self._number(balance.group("value")),
+        )
+
+    def parse_kakeraloot_settings(self, text: str) -> KakeralootSettingsSnapshot:
+        """Parse server-configurable and universal Kakeraloot costs from `$infokl`."""
+        loot_cost = self._LOOT_COST.search(text)
+        upgrade_cost = self._LOOT_UPGRADE_COST.search(text)
+        if loot_cost is None or upgrade_cost is None:
+            raise MudaeParseError("Expected a Mudae $infokl response with Kakeraloot cost details.")
+        return KakeralootSettingsSnapshot(
+            loot_cost=self._number(loot_cost.group("value")),
+            quantity_quality_base_cost=self._number(upgrade_cost.group("base")),
+            quantity_quality_level_increment=self._number(upgrade_cost.group("increment")),
         )
 
     def parse_server_settings(self, text: str) -> ServerSettingsSnapshot:

@@ -23,6 +23,8 @@ from moa.models.catalog import (
     ServerSettingsObservation,
     KakeralootStateImportResult,
     KakeralootStateObservation,
+    KakeralootSettingsImportResult,
+    KakeralootSettingsObservation,
     TowerStateImportResult,
     TowerStateObservation,
     WishlistImportResult,
@@ -34,6 +36,7 @@ from moa.models.character import (
     HaremKeyPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    KakeralootSettingsSnapshot,
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
@@ -228,6 +231,18 @@ class CatalogService:
         self, server_name: str, account_name: str
     ) -> KakeralootStateObservation | None:
         return self._repository.kakeraloot_state(server_name, account_name)
+
+    def import_kakeraloot_settings(
+        self,
+        settings: KakeralootSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootSettingsImportResult:
+        return self._repository.import_kakeraloot_settings(settings, server_name, raw_message, source)
+
+    def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
+        return self._repository.kakeraloot_settings(server_name)
 
     def import_server_settings(
         self,

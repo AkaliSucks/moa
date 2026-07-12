@@ -31,6 +31,8 @@ from moa.models.catalog import (
     ServerSettingsObservation,
     KakeralootStateImportResult,
     KakeralootStateObservation,
+    KakeralootSettingsImportResult,
+    KakeralootSettingsObservation,
     TowerStateImportResult,
     TowerStateObservation,
     WishlistImportResult,
@@ -43,6 +45,7 @@ from moa.models.character import (
     HaremKeyPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    KakeralootSettingsSnapshot,
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
@@ -187,6 +190,16 @@ class CatalogRepositoryProtocol(Protocol):
     def kakeraloot_state(
         self, server_name: str, account_name: str
     ) -> KakeralootStateObservation | None: ...
+
+    def import_kakeraloot_settings(
+        self,
+        settings: KakeralootSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootSettingsImportResult: ...
+
+    def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None: ...
 
     def import_server_settings(
         self,
@@ -1363,6 +1376,70 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_kakeraloot_settings(
+        self,
+        settings: KakeralootSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> KakeralootSettingsImportResult:
+        """Store the latest server-scoped Kakeraloot price configuration."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("kakeraloot_settings", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO kakeraloot_settings_observations (
+                    server_context_id, loot_cost, quantity_quality_base_cost,
+                    quantity_quality_level_increment, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    server_id,
+                    settings.loot_cost,
+                    settings.quantity_quality_base_cost,
+                    settings.quantity_quality_level_increment,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return KakeralootSettingsImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
+        """Return the latest `$infokl` price configuration for one server."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT kakeraloot_settings_observations.*, server_contexts.name AS server_name
+                FROM server_contexts
+                JOIN kakeraloot_settings_observations ON kakeraloot_settings_observations.id = (
+                    SELECT observations.id FROM kakeraloot_settings_observations AS observations
+                    WHERE observations.server_context_id = server_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name),),
+            ).fetchone()
+        if row is None:
+            return None
+        return KakeralootSettingsObservation(
+            server_name=row["server_name"],
+            loot_cost=row["loot_cost"],
+            quantity_quality_base_cost=row["quantity_quality_base_cost"],
+            quantity_quality_level_increment=row["quantity_quality_level_increment"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def import_server_settings(
         self,
         settings: ServerSettingsSnapshot,
@@ -1676,6 +1753,16 @@ class CatalogRepository:
                     quality_level INTEGER NOT NULL,
                     usage_count INTEGER NOT NULL,
                     kakera_balance INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kakeraloot_settings_observations (
+                    id INTEGER PRIMARY KEY,
+                    server_context_id INTEGER NOT NULL REFERENCES server_contexts(id),
+                    loot_cost INTEGER NOT NULL,
+                    quantity_quality_base_cost INTEGER NOT NULL,
+                    quantity_quality_level_increment INTEGER NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

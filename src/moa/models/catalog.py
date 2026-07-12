@@ -332,6 +332,24 @@ class KakeralootStateObservation(KakeralootStateSnapshot):
     observed_at: datetime
 
 
+class KakeralootSettingsImportResult(MOAModel):
+    """Summary of one persisted `$infokl` server-configuration import."""
+
+    import_event_id: int
+    server_name: str
+    observed_at: datetime
+
+
+class KakeralootSettingsObservation(MOAModel):
+    """The latest imported Kakeraloot pricing configuration for a server."""
+
+    server_name: str
+    loot_cost: int
+    quantity_quality_base_cost: int
+    quantity_quality_level_increment: int
+    observed_at: datetime
+
+
 class AccountOverview(MOAModel):
     """A non-destructive summary of the latest imported account state."""
 

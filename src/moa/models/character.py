@@ -197,6 +197,14 @@ class KakeralootStateSnapshot(MOAModel):
     kakera_balance: int | None = None
 
 
+class KakeralootSettingsSnapshot(MOAModel):
+    """Server-scoped Kakeraloot costs parsed from `$infokl`."""
+
+    loot_cost: int
+    quantity_quality_base_cost: int
+    quantity_quality_level_increment: int
+
+
 class ServerSettingMetric(MOAModel):
     """One labelled option reported by Mudae's `$settings` command."""
 

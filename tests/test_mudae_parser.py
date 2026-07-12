@@ -382,6 +382,19 @@ def test_parse_personal_rare_reads_the_account_override() -> None:
     assert state.personal_rare_multiplier == 1
 
 
+def test_parse_kakeraloot_settings_reads_server_costs() -> None:
+    settings = MudaeTextParser().parse_kakeraloot_settings(
+        "Kakeraloots\n"
+        "Each $kl costs 500:kakera: (admins can change this value with $klvalue)\n"
+        "Reaching the level 1 of quantity or quality costs 2,000:kakera: "
+        "(increased by 200/level, values can't be changed)"
+    )
+
+    assert settings.loot_cost == 500
+    assert settings.quantity_quality_base_cost == 2000
+    assert settings.quantity_quality_level_increment == 200
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

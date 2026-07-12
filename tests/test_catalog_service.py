@@ -455,3 +455,24 @@ def test_import_personal_rare_persists_an_account_scoped_override(tmp_path) -> N
     assert result.account_name == "ernieuuu"
     assert state is not None
     assert state.personal_rare_multiplier == 1
+
+
+def test_import_kakeraloot_settings_persists_server_pricing(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    raw_message = (
+        "Each $kl costs 500:kakera:\n"
+        "Reaching the level 1 of quantity or quality costs 2,000:kakera: (increased by 200/level)"
+    )
+
+    result = service.import_kakeraloot_settings(
+        MudaeTextParser().parse_kakeraloot_settings(raw_message),
+        "Lake Arrowhead 2025",
+        raw_message,
+        "clipboard",
+    )
+    settings = service.kakeraloot_settings("Lake Arrowhead 2025")
+
+    assert result.server_name == "Lake Arrowhead 2025"
+    assert settings is not None
+    assert settings.loot_cost == 500
+    assert settings.quantity_quality_level_increment == 200

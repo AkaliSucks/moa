@@ -12,6 +12,7 @@ from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
+from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
 from moa.services.reaction_service import ReactionService
 from moa.services.server_comparison_service import ServerComparisonService
@@ -196,6 +197,49 @@ def show_loot(loot_id: str) -> None:
     console.print(f"[bold]Unlocks after:[/bold] {', '.join(loot.unlock_prerequisites)}")
     console.print(f"[bold]Details:[/bold] {loot.description}")
     console.print(f"[bold]Progression:[/bold] {loot.progression_note}")
+
+
+@loot_app.command("next")
+def next_loot_spending_step(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakeraloot state is shown."),
+) -> None:
+    """Show the next Quantity and Quality costs from imported server/account state."""
+    plan = KakeralootBudgetService().plan(server, account)
+    console.print(
+        f"[bold cyan]{plan.account_name} - Kakeraloot spending readiness[/bold cyan]\n"
+        f"{plan.status}"
+    )
+    if plan.kakera_balance is not None:
+        console.print(f"Kakera balance: [cyan]{plan.kakera_balance:,}[/cyan] ($k)")
+    if plan.missing_prerequisites:
+        console.print("[yellow]Missing: " + ", ".join(plan.missing_prerequisites) + "[/yellow]")
+        return
+    if plan.loot_cost is not None and plan.affordable_loot_count is not None:
+        console.print(
+            f"Each $kl: [cyan]{plan.loot_cost:,}[/cyan] Kakera | "
+            f"affordable now: [cyan]{plan.affordable_loot_count:,}[/cyan]"
+        )
+    if not plan.upgrades:
+        return
+    table = Table()
+    table.add_column("Upgrade", style="green")
+    table.add_column("Current", justify="right")
+    table.add_column("Next", justify="right")
+    table.add_column("Cost", justify="right", style="cyan")
+    table.add_column("Affordable")
+    for upgrade in plan.upgrades:
+        affordability = "Yes" if upgrade.affordable else "No"
+        if upgrade.remaining_kakera is not None:
+            affordability += f" ({upgrade.remaining_kakera:,} left)"
+        table.add_row(
+            upgrade.name,
+            str(upgrade.current_level),
+            str(upgrade.next_level),
+            f"{upgrade.cost:,}",
+            affordability,
+        )
+    console.print(table)
 
 
 @key_app.command("list")
@@ -678,6 +722,25 @@ def parse_lootstate(
     )
 
 
+@parse_app.command("infokl")
+def parse_infokl(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $infokl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse server-specific Kakeraloot prices from `$infokl`."""
+    try:
+        settings = MudaeTextParser().parse_kakeraloot_settings(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[bold cyan]Kakeraloot configuration[/bold cyan]\n"
+        f"Each $kl: {settings.loot_cost:,} Kakera | Quantity/Quality: "
+        f"{settings.quantity_quality_base_cost:,} + "
+        f"{settings.quantity_quality_level_increment:,} per current level"
+    )
+
+
 @parse_app.command("settings")
 def parse_settings(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $settings response."),
@@ -967,6 +1030,27 @@ def import_lootstate(
     console.print(
         f"[green]Imported Kakeraloot state for {result.account_name}.[/green] "
         f"Quantity [cyan]{state.quantity_level}[/cyan] · Quality [cyan]{state.quality_level}[/cyan]."
+    )
+
+
+@import_app.command("infokl")
+def import_infokl(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $infokl response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Persist one `$infokl` response as server-scoped Kakeraloot configuration."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        settings = MudaeTextParser().parse_kakeraloot_settings(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_kakeraloot_settings(settings, server, raw_message, source)
+    console.print(
+        f"[green]Imported Kakeraloot configuration for {result.server_name}.[/green] "
+        f"Each $kl costs [cyan]{settings.loot_cost:,} Kakera[/cyan]."
     )
 
 
@@ -1424,6 +1508,24 @@ def catalog_lootstate(
     table.add_row("Star branches", f"{state.star_branches} (+{state.starwish_slots_from_branches} $sw)")
     console.print(table)
     console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+
+
+@catalog_app.command("infokl")
+def catalog_infokl(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+) -> None:
+    """Show the latest imported `$infokl` configuration for one server."""
+    settings = CatalogService().kakeraloot_settings(server)
+    if settings is None:
+        console.print("[yellow]No $infokl configuration imported for this server yet.[/yellow]")
+        raise typer.Exit()
+    console.print(
+        f"[bold cyan]{settings.server_name} - Kakeraloot configuration[/bold cyan]\n"
+        f"Each $kl: {settings.loot_cost:,} Kakera\n"
+        f"Quantity/Quality next-level cost: {settings.quantity_quality_base_cost:,} + "
+        f"{settings.quantity_quality_level_increment:,} per current level\n"
+        f"[dim]Observed: {settings.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
+    )
 
 
 @catalog_app.command("settings")
