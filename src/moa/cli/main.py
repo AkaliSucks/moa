@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
+from moa.parser.message_router import MudaeMessageRouter
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
@@ -55,6 +56,18 @@ app.add_typer(server_app, name="server")
 @app.command()
 def version():
     console.print("[cyan]MOA[/cyan] v0.1.0")
+
+
+@app.command("detect")
+def detect_mudae_message(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Identify which supported Mudae format one raw message uses."""
+    detection = MudaeMessageRouter().detect(_read_message_source(path, clipboard))
+    style = "green" if detection.kind != "unknown" else "yellow"
+    console.print(f"[{style}]Detected: {detection.kind}[/{style}]")
+    console.print(f"[dim]{detection.reason}[/dim]")
 
 
 @server_app.command("compare")

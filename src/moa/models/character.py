@@ -41,6 +41,13 @@ class RollObservation(MOAModel):
     kakera_value: int | None
 
 
+class MudaeMessageDetection(MOAModel):
+    """A conservative classification for one raw Mudae message."""
+
+    kind: str
+    reason: str
+
+
 class HaremKeyEntry(MOAModel):
     """One keyed character displayed by a Mudae keyed-harem view."""
 
