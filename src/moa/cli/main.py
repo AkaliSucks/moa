@@ -7,6 +7,7 @@ from rich.table import Table
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
+from moa.services.account_comparison_service import AccountComparisonService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
@@ -319,6 +320,32 @@ def account_overview(
     console.print(
         "[dim]Each source is retained separately. Kakera balance comes only from the latest imported $k snapshot.[/dim]"
     )
+
+
+@account_app.command("compare")
+def account_compare(
+    left_server: str = typer.Option(..., "--left-server", help="First imported server label."),
+    left_account: str = typer.Option(..., "--left-account", help="First account name."),
+    right_server: str = typer.Option(..., "--right-server", help="Second imported server label."),
+    right_account: str = typer.Option(..., "--right-account", help="Second account name."),
+) -> None:
+    """Compare the latest imported state for two account contexts."""
+    comparison = AccountComparisonService().compare(
+        left_server, left_account, right_server, right_account
+    )
+    table = Table(
+        title=(
+            f"{comparison.left_account_name} ({comparison.left_server_name}) vs "
+            f"{comparison.right_account_name} ({comparison.right_server_name})"
+        )
+    )
+    table.add_column("Area", style="green")
+    table.add_column(comparison.left_account_name)
+    table.add_column(comparison.right_account_name)
+    for row in comparison.rows:
+        table.add_row(row.label, row.left_value, row.right_value)
+    console.print(table)
+    console.print("[dim]Only imported state is compared; 'Not imported' is never treated as zero.[/dim]")
 
 
 def _read_copied_message(path: Path) -> str:

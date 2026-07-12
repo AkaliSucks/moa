@@ -365,6 +365,24 @@ class AccountOverview(MOAModel):
     keyed_harem_count: int
 
 
+class AccountComparisonRow(MOAModel):
+    """One factual account-state comparison row."""
+
+    label: str
+    left_value: str
+    right_value: str
+
+
+class AccountComparison(MOAModel):
+    """A read-only comparison of two imported account contexts."""
+
+    left_server_name: str
+    left_account_name: str
+    right_server_name: str
+    right_account_name: str
+    rows: tuple[AccountComparisonRow, ...]
+
+
 class ServerSettingsImportResult(MOAModel):
     """Summary of one persisted `$settings` snapshot."""
 
