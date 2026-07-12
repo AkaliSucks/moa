@@ -39,6 +39,14 @@ class AutomaticImportService:
             )
 
         server = self._require(server_name, "server", kind)
+        if kind == "reaction_receipt":
+            receipt = self._parser.parse_kakera_reaction_receipt(raw_message)
+            result = self._catalog.import_kakera_reaction(receipt, server, raw_message, source)
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported +{receipt.kakera_earned:,} Kakera for {result.account_name}.",
+            )
         if kind == "roll":
             account = self._require(account_name, "account", kind)
             result = self._catalog.import_roll(
