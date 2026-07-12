@@ -160,6 +160,12 @@ def test_parse_roll_without_claim_rank_when_rank_display_is_disabled() -> None:
     assert roll.kakera_value == 30
 
 
+def test_parse_roll_accepts_a_positive_kakera_prefix() -> None:
+    roll = MudaeTextParser().parse_roll("Mai Sakurajima\nSeishun Buta Yarou\n+1,386:kakera:")
+
+    assert roll.kakera_value == 1386
+
+
 def test_parse_kakera_reaction_receipt() -> None:
     receipt = MudaeTextParser().parse_kakera_reaction_receipt(
         ":kakeraY: cute_beagle_91130 +497 ($k)"

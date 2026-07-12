@@ -54,7 +54,7 @@ class MudaeTextParser:
     _CLAIM_RANK = re.compile(r"^Claim Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _KAKERA = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _KAKERA = re.compile(r"^\+?(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
         re.IGNORECASE,
