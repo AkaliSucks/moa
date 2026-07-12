@@ -116,6 +116,7 @@ class MudaeTextParser:
     _LOOT_QUALITY = re.compile(r"Quality\s+LVL\s+(?P<value>\d+)", re.IGNORECASE)
     _LOOT_USAGE = re.compile(r"\$kl usage:\s*(?P<value>[\d,]+)", re.IGNORECASE)
     _LOOT_BALANCE = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _NO_KAKERALOOTS = re.compile(r"No kakeraloots bought", re.IGNORECASE)
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -469,6 +470,16 @@ class MudaeTextParser:
         """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
         lines = self._lines(text)
 
+        no_loots = next(
+            (self._NO_KAKERALOOTS.search(line) for line in lines if self._NO_KAKERALOOTS.search(line)),
+            None,
+        )
+        if no_loots is not None:
+            return KakeralootStateSnapshot(
+                has_kakeraloots=False,
+                status_note="No Kakeraloots bought; Mudae did not report loot statistics.",
+            )
+
         def first_match(pattern: re.Pattern[str]) -> re.Match[str] | None:
             return next((pattern.search(line) for line in lines if pattern.search(line)), None)
 
@@ -505,6 +516,7 @@ class MudaeTextParser:
             raise MudaeParseError("Expected a complete Mudae $lk Kakeraloot stats response.")
 
         return KakeralootStateSnapshot(
+            has_kakeraloots=True,
             rolls_stacked=int(rolls.group("value")),
             disable_wa_ha_reduction=int(disable.group("wa_ha")),
             disable_wg_hg_reduction=int(disable.group("wg_hg")),

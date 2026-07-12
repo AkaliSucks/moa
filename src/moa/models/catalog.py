@@ -311,3 +311,32 @@ class KakeralootStateObservation(KakeralootStateSnapshot):
     server_name: str
     account_name: str
     observed_at: datetime
+
+
+class AccountOverview(MOAModel):
+    """A non-destructive summary of the latest imported account state."""
+
+    server_name: str
+    account_name: str
+    kakera_balance: int | None
+    kakera_balance_source: str | None
+    badge_count: int
+    max_badge_count: int
+    tower_level: int | None
+    completed_towers: int | None
+    next_tower_cost: int | None
+    tower_shortfall: int | None
+    kakeraloots_unlocked: bool | None
+    missing_kakeraloot_prerequisites: tuple[str, ...]
+    has_kakeraloots: bool | None
+    kakeraloot_status_note: str | None
+    quantity_level: int | None
+    quality_level: int | None
+    loot_usage_count: int | None
+    wishlist_count: int | None
+    wishlist_capacity: int | None
+    starwish_count: int | None
+    starwish_capacity: int | None
+    disable_slots_used: int | None
+    disable_slots_capacity: int | None
+    keyed_harem_count: int

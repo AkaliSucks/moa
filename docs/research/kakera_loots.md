@@ -15,6 +15,8 @@ The copied `$infokl` response for Lake Arrowhead 2025 states that Kakeraloots ca
 
 The copied `$lk` response exposes account values for stacked rolls, disable limits, Wishprotect, Mudapins, `$rt`, permanent rolls, Star Branches, Quantity, Quality, usage count, and balance.
 
+The Kakeraloots page lists Sapphire I, Ruby I, and Emerald I as the unlock prerequisites. The account overview evaluates that requirement from the latest imported `$k` badge snapshot.
+
 ## Modeling boundary
 
 Quantity and Quality are modeled as account state. The complete reward catalog is modeled as immutable reference data. Exact reward weights, Kakera payout ranges, and therefore Kakeraloot expected value are deliberately absent until independently verified from reliable Mudae data.

@@ -6,6 +6,7 @@ from rich.table import Table
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
+from moa.services.account_overview_service import AccountOverviewService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
@@ -20,6 +21,7 @@ badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 key_app = typer.Typer(help="Character key reference commands")
+account_app = typer.Typer(help="Imported account-state summary commands")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
@@ -32,6 +34,7 @@ app.add_typer(badge_app, name="badge")
 app.add_typer(reaction_app, name="reaction")
 app.add_typer(loot_app, name="loot")
 app.add_typer(key_app, name="key")
+app.add_typer(account_app, name="account")
 app.add_typer(parse_app, name="parse")
 app.add_typer(import_app, name="import")
 app.add_typer(catalog_app, name="catalog")
@@ -159,6 +162,7 @@ def show_loot(loot_id: str) -> None:
     console.print(f"[bold cyan]{loot.name}[/bold cyan]")
     console.print(f"[bold]Category:[/bold] {loot.category.title()}")
     console.print(f"[bold]Guaranteed:[/bold] {'Yes' if loot.guaranteed else 'No'}")
+    console.print(f"[bold]Unlocks after:[/bold] {', '.join(loot.unlock_prerequisites)}")
     console.print(f"[bold]Details:[/bold] {loot.description}")
     console.print(f"[bold]Progression:[/bold] {loot.progression_note}")
 
@@ -204,6 +208,68 @@ def show_key(key_id: str) -> None:
     for milestone in tier.milestones:
         table.add_row(str(milestone.key_count), "\n".join(milestone.effects))
     console.print(table)
+
+
+@account_app.command("overview")
+def account_overview(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose imported state to summarize."),
+) -> None:
+    """Show one read-only summary of the latest imported account state."""
+    overview = AccountOverviewService().overview(server, account)
+    table = Table(title=f"{overview.account_name} - account overview")
+    table.add_column("Area", style="green")
+    table.add_column("Latest imported state")
+    balance = (
+        f"{overview.kakera_balance:,} Kakera ({overview.kakera_balance_source})"
+        if overview.kakera_balance is not None
+        else "Not imported"
+    )
+    table.add_row("Kakera balance", balance)
+    table.add_row("Badges", f"{overview.max_badge_count}/{overview.badge_count} maxed" if overview.badge_count else "Not imported")
+    if overview.tower_level is None:
+        table.add_row("Tower", "Not imported")
+    else:
+        shortfall = (
+            f"; shortfall {overview.tower_shortfall:,} Kakera"
+            if overview.tower_shortfall is not None
+            else ""
+        )
+        table.add_row(
+            "Tower",
+            f"Level {overview.tower_level}, {overview.completed_towers} completed; "
+            f"next floor {overview.next_tower_cost:,} Kakera{shortfall}",
+        )
+    if overview.kakeraloots_unlocked is False:
+        loot_state = "Locked: requires " + " and ".join(overview.missing_kakeraloot_prerequisites)
+    elif overview.has_kakeraloots is False:
+        loot_state = overview.kakeraloot_status_note or "No Kakeraloots bought"
+    elif overview.quantity_level is not None:
+        loot_state = (
+            f"Quantity {overview.quantity_level} | Quality {overview.quality_level} | "
+            f"{overview.loot_usage_count:,} uses"
+        )
+    else:
+        loot_state = "Not imported"
+    table.add_row("Kakeraloots", loot_state)
+    wishlist_state = (
+        f"{overview.wishlist_count}/{overview.wishlist_capacity} wishes | "
+        f"{overview.starwish_count}/{overview.starwish_capacity} Starwishes"
+        if overview.wishlist_count is not None
+        else "Not imported"
+    )
+    table.add_row("Wishlist", wishlist_state)
+    disable_state = (
+        f"{overview.disable_slots_used}/{overview.disable_slots_capacity} slots used"
+        if overview.disable_slots_used is not None
+        else "Not imported"
+    )
+    table.add_row("Disablelist", disable_state)
+    table.add_row("Keyed harem", f"{overview.keyed_harem_count} imported characters")
+    console.print(table)
+    console.print(
+        "[dim]Each source is retained separately. Kakera balance comes only from the latest imported $k snapshot.[/dim]"
+    )
 
 
 def _read_copied_message(path: Path) -> str:
@@ -505,6 +571,9 @@ def parse_lootstate(
     except MudaeParseError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
+    if not state.has_kakeraloots:
+        console.print(f"[yellow]{state.status_note}[/yellow]")
+        return
     console.print(
         f"[bold cyan]Kakeraloots[/bold cyan] · Quantity {state.quantity_level} · "
         f"Quality {state.quality_level}\n"
@@ -754,6 +823,12 @@ def import_lootstate(
         raise typer.Exit(1) from error
     source = "clipboard" if clipboard else f"file:{path}"
     result = CatalogService().import_kakeraloot_state(state, server, account, raw_message, source)
+    if not state.has_kakeraloots:
+        console.print(
+            f"[green]Imported Kakeraloot status for {result.account_name}.[/green] "
+            f"[yellow]{state.status_note}[/yellow]"
+        )
+        return
     console.print(
         f"[green]Imported Kakeraloot state for {result.account_name}.[/green] "
         f"Quantity [cyan]{state.quantity_level}[/cyan] · Quality [cyan]{state.quality_level}[/cyan]."
@@ -1174,6 +1249,10 @@ def catalog_lootstate(
     if state is None:
         console.print("[yellow]No $lk snapshot imported for this server/account yet.[/yellow]")
         raise typer.Exit()
+    if not state.has_kakeraloots:
+        console.print(f"[yellow]{state.status_note}[/yellow]")
+        console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        return
     table = Table(title=f"{state.account_name} - Kakeraloot state")
     table.add_column("Metric", style="green")
     table.add_column("Value", justify="right", style="cyan")

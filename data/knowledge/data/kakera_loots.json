@@ -4,6 +4,7 @@
     "name": "Additional Rolls",
     "category": "rolls",
     "guaranteed": true,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Adds a stacked roll; this is the guaranteed Kakeraloot reward.",
     "description": "Adds one roll to the account's $us roll stock."
   },
@@ -12,6 +13,7 @@
     "name": "Kakera",
     "category": "kakera",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable reward; exact reward weights and amounts are not modeled yet.",
     "description": "Awards Kakera directly."
   },
@@ -20,6 +22,7 @@
     "name": "Reset Timer Cooldown",
     "category": "utility",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "The effective $rt cooldown improvement has a cap; further loot behavior must be modeled separately.",
     "description": "Improves the $rt command cooldown."
   },
@@ -28,6 +31,7 @@
     "name": "Disablelist Capacity",
     "category": "rolling",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable; additional capacity and roll-pool limits become rarer as they increase.",
     "description": "Improves $disable/$limroul capacity and lowers applicable roulette limits."
   },
@@ -36,6 +40,7 @@
     "name": "Permanent Rolls",
     "category": "rolls",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable; each additional permanent roll becomes rarer.",
     "description": "Adds a permanent roll per hour."
   },
@@ -44,6 +49,7 @@
     "name": "Wishlist Slots",
     "category": "wishes",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable; each additional wishlist slot becomes rarer.",
     "description": "Adds wishlist capacity."
   },
@@ -52,6 +58,7 @@
     "name": "Wishprotect",
     "category": "wishes",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "The effective spawn chance has a cap, although additional levels can still be received.",
     "description": "Unlocks or improves the additional chance to spawn a protected wishlist character."
   },
@@ -60,6 +67,7 @@
     "name": "Mudapins",
     "category": "collection",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable collection progress.",
     "description": "Awards Mudapins, the collection currency tracked by $mp."
   },
@@ -68,6 +76,7 @@
     "name": "$bku Reset Chance",
     "category": "utility",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Applies when rolling an eligible Starwish; exact probability progression is not modeled yet.",
     "description": "Adds a chance to complete and reset $bku after rolling a Starwish."
   },
@@ -76,6 +85,7 @@
     "name": "Star Branches",
     "category": "wishes",
     "guaranteed": false,
+    "unlock_prerequisites": ["Sapphire I", "Ruby I", "Emerald I"],
     "progression_note": "Repeatable progress toward additional $starwish capacity.",
     "description": "Awards Star Branches used to unlock additional $starwish slots."
   }

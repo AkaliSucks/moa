@@ -386,3 +386,21 @@ def test_import_kakeraloot_state_persists_account_progress(tmp_path) -> None:
     assert state.quantity_level == 23
     assert state.quality_level == 6
     assert state.kakera_balance == 9210
+
+
+def test_import_kakeraloot_state_persists_when_mudae_reports_no_loots(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = "No kakeraloots bought! ($kl)\nType $infokl to get more infos about kakeraloots."
+
+    service.import_kakeraloot_state(
+        MudaeTextParser().parse_kakeraloot_state(text),
+        "ernieuuu's server",
+        "cute_beagle_91130",
+        text,
+        "clipboard",
+    )
+    state = service.kakeraloot_state("ernieuuu's server", "cute_beagle_91130")
+
+    assert state is not None
+    assert not state.has_kakeraloots
+    assert state.quantity_level is None

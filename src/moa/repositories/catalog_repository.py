@@ -1190,29 +1190,31 @@ class CatalogRepository:
             connection.execute(
                 """
                 INSERT INTO kakeraloot_state_observations (
-                    account_context_id, rolls_stacked, disable_wa_ha_reduction,
+                    account_context_id, has_kakeraloots, status_note, rolls_stacked, disable_wa_ha_reduction,
                     disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
                     mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
                     star_branches, starwish_slots_from_branches, quantity_level, quality_level,
                     usage_count, kakera_balance, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
-                    state.rolls_stacked,
-                    state.disable_wa_ha_reduction,
-                    state.disable_wg_hg_reduction,
-                    state.protected_wish_level,
-                    state.protected_wish_denominator,
-                    state.mudapins,
-                    state.rt_cooldown_reduction_hours,
-                    state.permanent_roll_bonus,
-                    state.star_branches,
-                    state.starwish_slots_from_branches,
-                    state.quantity_level,
-                    state.quality_level,
-                    state.usage_count,
-                    state.kakera_balance,
+                    int(state.has_kakeraloots),
+                    state.status_note,
+                    state.rolls_stacked or 0,
+                    state.disable_wa_ha_reduction or 0,
+                    state.disable_wg_hg_reduction or 0,
+                    state.protected_wish_level or 0,
+                    state.protected_wish_denominator or 0,
+                    state.mudapins or 0,
+                    state.rt_cooldown_reduction_hours or 0,
+                    state.permanent_roll_bonus or 0,
+                    state.star_branches or 0,
+                    state.starwish_slots_from_branches or 0,
+                    state.quantity_level or 0,
+                    state.quality_level or 0,
+                    state.usage_count or 0,
+                    state.kakera_balance or 0,
                     observed_at.isoformat(),
                     import_event_id,
                 ),
@@ -1250,20 +1252,22 @@ class CatalogRepository:
         return KakeralootStateObservation(
             server_name=row["server_name"],
             account_name=row["account_name"],
-            rolls_stacked=row["rolls_stacked"],
-            disable_wa_ha_reduction=row["disable_wa_ha_reduction"],
-            disable_wg_hg_reduction=row["disable_wg_hg_reduction"],
-            protected_wish_level=row["protected_wish_level"],
-            protected_wish_denominator=row["protected_wish_denominator"],
-            mudapins=row["mudapins"],
-            rt_cooldown_reduction_hours=row["rt_cooldown_reduction_hours"],
-            permanent_roll_bonus=row["permanent_roll_bonus"],
-            star_branches=row["star_branches"],
-            starwish_slots_from_branches=row["starwish_slots_from_branches"],
-            quantity_level=row["quantity_level"],
-            quality_level=row["quality_level"],
-            usage_count=row["usage_count"],
-            kakera_balance=row["kakera_balance"],
+            has_kakeraloots=bool(row["has_kakeraloots"]),
+            status_note=row["status_note"],
+            rolls_stacked=row["rolls_stacked"] if row["has_kakeraloots"] else None,
+            disable_wa_ha_reduction=row["disable_wa_ha_reduction"] if row["has_kakeraloots"] else None,
+            disable_wg_hg_reduction=row["disable_wg_hg_reduction"] if row["has_kakeraloots"] else None,
+            protected_wish_level=row["protected_wish_level"] if row["has_kakeraloots"] else None,
+            protected_wish_denominator=row["protected_wish_denominator"] if row["has_kakeraloots"] else None,
+            mudapins=row["mudapins"] if row["has_kakeraloots"] else None,
+            rt_cooldown_reduction_hours=row["rt_cooldown_reduction_hours"] if row["has_kakeraloots"] else None,
+            permanent_roll_bonus=row["permanent_roll_bonus"] if row["has_kakeraloots"] else None,
+            star_branches=row["star_branches"] if row["has_kakeraloots"] else None,
+            starwish_slots_from_branches=row["starwish_slots_from_branches"] if row["has_kakeraloots"] else None,
+            quantity_level=row["quantity_level"] if row["has_kakeraloots"] else None,
+            quality_level=row["quality_level"] if row["has_kakeraloots"] else None,
+            usage_count=row["usage_count"] if row["has_kakeraloots"] else None,
+            kakera_balance=row["kakera_balance"] if row["has_kakeraloots"] else None,
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
@@ -1468,6 +1472,8 @@ class CatalogRepository:
                 CREATE TABLE IF NOT EXISTS kakeraloot_state_observations (
                     id INTEGER PRIMARY KEY,
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    has_kakeraloots INTEGER NOT NULL DEFAULT 1,
+                    status_note TEXT,
                     rolls_stacked INTEGER NOT NULL,
                     disable_wa_ha_reduction INTEGER NOT NULL,
                     disable_wg_hg_reduction INTEGER NOT NULL,
@@ -1498,6 +1504,17 @@ class CatalogRepository:
                     "ALTER TABLE harem_key_observations ADD COLUMN harem_scan_id INTEGER "
                     "REFERENCES harem_scans(id)"
                 )
+            loot_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(kakeraloot_state_observations)").fetchall()
+            }
+            if "has_kakeraloots" not in loot_columns:
+                connection.execute(
+                    "ALTER TABLE kakeraloot_state_observations "
+                    "ADD COLUMN has_kakeraloots INTEGER NOT NULL DEFAULT 1"
+                )
+            if "status_note" not in loot_columns:
+                connection.execute("ALTER TABLE kakeraloot_state_observations ADD COLUMN status_note TEXT")
 
     def _prepare_harem_scan_page(
         self,

@@ -39,6 +39,7 @@ def test_kakeraloot_service_finds_unowned_universal_reward() -> None:
     assert loot is not None
     assert loot.name == "$bku Reset Chance"
     assert not loot.guaranteed
+    assert loot.unlock_prerequisites == ("Sapphire I", "Ruby I", "Emerald I")
 
 
 def test_kakeraloot_service_returns_none_for_unknown_reward() -> None:
@@ -51,6 +52,7 @@ def test_kakeraloot_service_accepts_a_storage_independent_repository() -> None:
         name="Test Loot",
         category="utility",
         guaranteed=False,
+        unlock_prerequisites=("Sapphire I", "Ruby I", "Emerald I"),
         progression_note="Test-only.",
         description="A test-only reward.",
     )

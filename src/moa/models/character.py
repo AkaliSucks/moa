@@ -173,17 +173,19 @@ class TowerStateSnapshot(MOAModel):
 class KakeralootStateSnapshot(MOAModel):
     """Account-scoped Kakeraloot progress parsed from `$lk`."""
 
-    rolls_stacked: int
-    disable_wa_ha_reduction: int
-    disable_wg_hg_reduction: int
-    protected_wish_level: int
-    protected_wish_denominator: int
-    mudapins: int
-    rt_cooldown_reduction_hours: int
-    permanent_roll_bonus: int
-    star_branches: int
-    starwish_slots_from_branches: int
-    quantity_level: int
-    quality_level: int
-    usage_count: int
-    kakera_balance: int
+    has_kakeraloots: bool = True
+    status_note: str | None = None
+    rolls_stacked: int | None = None
+    disable_wa_ha_reduction: int | None = None
+    disable_wg_hg_reduction: int | None = None
+    protected_wish_level: int | None = None
+    protected_wish_denominator: int | None = None
+    mudapins: int | None = None
+    rt_cooldown_reduction_hours: int | None = None
+    permanent_roll_bonus: int | None = None
+    star_branches: int | None = None
+    starwish_slots_from_branches: int | None = None
+    quantity_level: int | None = None
+    quality_level: int | None = None
+    usage_count: int | None = None
+    kakera_balance: int | None = None

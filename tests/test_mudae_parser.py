@@ -335,6 +335,17 @@ def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:
     assert state.protected_wish_denominator == 4642
 
 
+def test_parse_kakeraloot_state_accepts_the_no_loots_message() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "No kakeraloots bought! ($kl)\n"
+        "Type $infokl to get more infos about kakeraloots."
+    )
+
+    assert not state.has_kakeraloots
+    assert state.status_note == "No Kakeraloots bought; Mudae did not report loot statistics."
+    assert state.quantity_level is None
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

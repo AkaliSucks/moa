@@ -12,5 +12,6 @@ class KakeralootDefinition(MOAModel):
     name: str
     category: Literal["rolls", "kakera", "rolling", "wishes", "utility", "collection"]
     guaranteed: bool
+    unlock_prerequisites: tuple[str, ...]
     progression_note: str
     description: str
