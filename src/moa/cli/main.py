@@ -82,6 +82,7 @@ def account_activity(
     overview = AccountOverviewService().overview(server, account)
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
+    recent_gains = CatalogService().recent_key_gains(server, account, 1)
     try:
         keyfarm = KeyFarmService().recommend(server, account)
     except ValueError:
@@ -115,10 +116,15 @@ def account_activity(
         target = keyfarm[0]
         table.add_row(
             "Top key-farm target",
-            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_count} — {target.key_type.title()} | {target.wishlist_status}",
+            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_count} - {target.key_type.title()} | {target.wishlist_status}",
         )
     else:
         table.add_row("Top key-farm target", "No eligible valued harem entry imported")
+    if recent_gains:
+        gain = recent_gains[0]
+        table.add_row("Latest key observation", f"{gain.character_name} | {gain.key_count} - {gain.key_type.title()}")
+    else:
+        table.add_row("Latest key observation", "None imported from rolls")
     console.print(table)
     if readiness.upcoming_events:
         console.print("[dim]Upcoming: " + " · ".join(f"{name} in {minutes} min" for name, minutes in readiness.upcoming_events) + "[/dim]")
