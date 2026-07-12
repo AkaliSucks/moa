@@ -35,6 +35,8 @@ from moa.models.catalog import (
     KakeralootSettingsObservation,
     TowerStateImportResult,
     TowerStateObservation,
+    TimerStateImportResult,
+    TimerStateObservation,
     WishlistImportResult,
     WishlistObservation,
     TopImportResult,
@@ -49,6 +51,7 @@ from moa.models.character import (
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
+    TimerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
     UnavailableCharacterPage,
@@ -177,6 +180,17 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> TowerStateImportResult: ...
 
     def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None: ...
+
+    def import_timer_state(
+        self,
+        state: TimerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TimerStateImportResult: ...
+
+    def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None: ...
 
     def import_kakeraloot_state(
         self,
@@ -1274,6 +1288,67 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_timer_state(
+        self,
+        state: TimerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TimerStateImportResult:
+        """Store one short-lived account action snapshot from `$tu`."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("timer_state", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO timer_state_observations (
+                    account_context_id, snapshot_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (account_id, json.dumps(state.model_dump()), observed_at.isoformat(), import_event_id),
+            )
+        return TimerStateImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None:
+        """Return the newest imported `$tu` snapshot for one account."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT timer_state_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN timer_state_observations ON timer_state_observations.id = (
+                    SELECT observations.id FROM timer_state_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return TimerStateObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            snapshot=TimerStateSnapshot.model_validate(json.loads(row["snapshot_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def import_kakeraloot_state(
         self,
         state: KakeralootStateSnapshot,
@@ -1730,6 +1805,14 @@ class CatalogRepository:
                     next_level_cost INTEGER NOT NULL,
                     kakera_balance INTEGER NOT NULL,
                     built_perk_ids_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS timer_state_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    snapshot_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

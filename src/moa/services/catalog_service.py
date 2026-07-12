@@ -27,6 +27,8 @@ from moa.models.catalog import (
     KakeralootSettingsObservation,
     TowerStateImportResult,
     TowerStateObservation,
+    TimerStateImportResult,
+    TimerStateObservation,
     WishlistImportResult,
     WishlistObservation,
 )
@@ -40,6 +42,7 @@ from moa.models.character import (
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
+    TimerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
     WishlistSnapshot,
@@ -214,6 +217,19 @@ class CatalogService:
 
     def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None:
         return self._repository.tower_state(server_name, account_name)
+
+    def import_timer_state(
+        self,
+        state: TimerStateSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> TimerStateImportResult:
+        return self._repository.import_timer_state(state, server_name, account_name, raw_message, source)
+
+    def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None:
+        return self._repository.timer_state(server_name, account_name)
 
     def import_kakeraloot_state(
         self,

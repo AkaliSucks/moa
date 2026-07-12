@@ -205,6 +205,34 @@ class KakeralootSettingsSnapshot(MOAModel):
     quantity_quality_level_increment: int
 
 
+class TimerStateSnapshot(MOAModel):
+    """Account-scoped action timers parsed from `$tu`."""
+
+    can_claim_now: bool | None
+    claim_reset_minutes: int | None
+    rolls_left: int | None
+    rolls_reset_minutes: int | None
+    rolls_reset_stock: int | None
+    vote_reset_minutes: int | None
+    daily_reset_minutes: int | None
+    daily_kakera_ready: bool | None
+    rt_available: bool | None
+    can_react_kakera_now: bool | None
+    reaction_power_percent: int | None
+    kakera_button_power_cost_percent: int | None
+    soulmate_button_power_cost_percent: int | None
+    kakera_stock: int | None
+    gold_key_stock_remaining: int | None
+    gold_key_reset_minutes: int | None
+    bku_reset_probability_percent: int | None
+    oh_remaining: int | None
+    oc_remaining: int | None
+    oq_remaining: int | None
+    oq_stored: int | None
+    ot_remaining: int | None
+    ouro_refill_minutes: int | None
+
+
 class ServerSettingMetric(MOAModel):
     """One labelled option reported by Mudae's `$settings` command."""
 

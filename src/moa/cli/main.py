@@ -8,6 +8,7 @@ from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
+from moa.services.action_service import ActionService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
@@ -25,6 +26,7 @@ reaction_app = typer.Typer(help="Kakera reaction commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 key_app = typer.Typer(help="Character key reference commands")
 account_app = typer.Typer(help="Imported account-state summary commands")
+action_app = typer.Typer(help="Use fresh imported timers to show available actions")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
@@ -39,6 +41,7 @@ app.add_typer(reaction_app, name="reaction")
 app.add_typer(loot_app, name="loot")
 app.add_typer(key_app, name="key")
 app.add_typer(account_app, name="account")
+app.add_typer(action_app, name="action")
 app.add_typer(parse_app, name="parse")
 app.add_typer(import_app, name="import")
 app.add_typer(catalog_app, name="catalog")
@@ -392,6 +395,37 @@ def account_compare(
     console.print("[dim]Only imported state is compared; 'Not imported' is never treated as zero.[/dim]")
 
 
+@action_app.command("now")
+def action_now(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose latest $tu snapshot to use."),
+) -> None:
+    """Show the action checklist supported by a recent imported `$tu` snapshot."""
+    readiness = ActionService().readiness(server, account)
+    console.print(f"[bold cyan]{readiness.account_name} - action readiness[/bold cyan]")
+    console.print(readiness.status)
+    if readiness.observed_at is not None:
+        console.print(
+            f"[dim]Snapshot age: {readiness.snapshot_age_seconds}s | observed "
+            f"{readiness.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
+        )
+    if readiness.is_stale:
+        return
+    if readiness.available_actions:
+        console.print("[green]Available when imported:[/green] " + ", ".join(readiness.available_actions))
+    else:
+        console.print("[yellow]No immediately available actions were reported.[/yellow]")
+    if readiness.upcoming_events:
+        table = Table(title="Upcoming timers from this snapshot")
+        table.add_column("Event", style="green")
+        table.add_column("In", justify="right", style="cyan")
+        for label, minutes in readiness.upcoming_events:
+            hours, remaining_minutes = divmod(minutes, 60)
+            duration = f"{hours}h {remaining_minutes} min" if hours else f"{remaining_minutes} min"
+            table.add_row(label, duration)
+        console.print(table)
+
+
 def _read_copied_message(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -676,6 +710,26 @@ def parse_personalrare(
     console.print(
         f"[bold cyan]Personal rare multiplier:[/bold cyan] {state.personal_rare_multiplier} "
         f"([dim]{source}[/dim])"
+    )
+
+
+@parse_app.command("timers")
+def parse_timers(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $tu response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse whichever timer categories the current `$tu` layout displays."""
+    try:
+        state = MudaeTextParser().parse_timer_state(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    claim = "ready" if state.can_claim_now else f"in {state.claim_reset_minutes} min" if state.can_claim_now is False else "hidden"
+    rolls = f"{state.rolls_left} left" if state.rolls_left is not None else "hidden"
+    console.print(
+        f"[bold cyan]Action timers[/bold cyan] | claim {claim} | rolls {rolls}\n"
+        f"$dk: {'ready' if state.daily_kakera_ready else 'not ready' if state.daily_kakera_ready is False else 'hidden'} | "
+        f"$rt: {'available' if state.rt_available else 'not available' if state.rt_available is False else 'hidden'}"
     )
 
 
@@ -980,6 +1034,28 @@ def import_personalrare(
     console.print(
         f"[green]Imported $personalrare {state.personal_rare_multiplier} for "
         f"{result.account_name}.[/green]"
+    )
+
+
+@import_app.command("timers")
+def import_timers(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose $tu state is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $tu response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Persist one `$tu` response as a short-lived account action snapshot."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        state = MudaeTextParser().parse_timer_state(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_timer_state(state, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported $tu timer snapshot for {result.account_name}.[/green] "
+        "Use [cyan]moa action now[/cyan] immediately for a current checklist."
     )
 
 
@@ -1477,6 +1553,37 @@ def catalog_towerstate(
         f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera · "
         f"Shortfall: {gap:,} Kakera"
     )
+
+
+@catalog_app.command("timers")
+def catalog_timers(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose latest $tu snapshot to show."),
+) -> None:
+    """Show the most recently imported `$tu` snapshot without treating it as live state."""
+    observation = CatalogService().timer_state(server, account)
+    if observation is None:
+        console.print("[yellow]No $tu snapshot imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    state = observation.snapshot
+    table = Table(title=f"{observation.account_name} - $tu snapshot")
+    table.add_column("Metric", style="green")
+    table.add_column("Mudae value")
+    if state.can_claim_now is not None:
+        claim = "Ready now" if state.can_claim_now else f"Available in {state.claim_reset_minutes} min"
+        table.add_row("Claim", claim)
+    if state.rolls_left is not None:
+        table.add_row("Rolls", f"{state.rolls_left} left; reset in {state.rolls_reset_minutes} min")
+    if state.daily_kakera_ready is not None:
+        table.add_row("$dk", "Ready" if state.daily_kakera_ready else "Not ready")
+    if state.rt_available is not None:
+        table.add_row("$rt", "Available" if state.rt_available else "Not available")
+    if state.reaction_power_percent is not None:
+        table.add_row("Kakera reaction power", f"{state.reaction_power_percent}%")
+    if state.oh_remaining is not None:
+        table.add_row("Ouro", f"$oh {state.oh_remaining}; $oc {state.oc_remaining}; $oq {state.oq_remaining}; $ot {state.ot_remaining}")
+    console.print(table)
+    console.print(f"[dim]Observed: {observation.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
 
 
 @catalog_app.command("lootstate")

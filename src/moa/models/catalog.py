@@ -9,6 +9,7 @@ from moa.models.character import (
     KakeralootStateSnapshot,
     PlayerBonusMetric,
     ServerSettingMetric,
+    TimerStateSnapshot,
     WishlistEntry,
 )
 
@@ -348,6 +349,37 @@ class KakeralootSettingsObservation(MOAModel):
     quantity_quality_base_cost: int
     quantity_quality_level_increment: int
     observed_at: datetime
+
+
+class TimerStateImportResult(MOAModel):
+    """Summary of one persisted `$tu` account-timer import."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class TimerStateObservation(MOAModel):
+    """The newest imported `$tu` action snapshot for one account."""
+
+    server_name: str
+    account_name: str
+    snapshot: TimerStateSnapshot
+    observed_at: datetime
+
+
+class ActionReadiness(MOAModel):
+    """Actions supported by a sufficiently recent imported `$tu` snapshot."""
+
+    server_name: str
+    account_name: str
+    observed_at: datetime | None
+    snapshot_age_seconds: int | None
+    is_stale: bool
+    status: str
+    available_actions: tuple[str, ...]
+    upcoming_events: tuple[tuple[str, int], ...]
 
 
 class AccountOverview(MOAModel):

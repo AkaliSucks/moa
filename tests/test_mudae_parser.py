@@ -395,6 +395,58 @@ def test_parse_kakeraloot_settings_reads_server_costs() -> None:
     assert settings.quantity_quality_level_increment == 200
 
 
+def test_parse_timer_state_keeps_detailed_action_categories() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "ernieuuu, you can claim right now! The next claim reset is in 2h 32 min.\n"
+        "You have 0 rolls left. Next rolls reset in 32 min.\n"
+        "You have 0 rolls reset in stock.\n"
+        "You may vote again in 5h 50 min.\n"
+        "Next $daily reset in 8h 16 min.\n"
+        "$dk is ready!\n"
+        "$rt is available!\n"
+        "You can react to kakera right now!\n"
+        "Power: 72%\n"
+        "Each kakera button consumes 36% of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (18%)\n"
+        "Stock: 12,114:kakera:\n"
+        "(Keys LVL 6+) 5,000:kakera:to collect before the next reset (2h 32 min.)\n"
+        "Probability to complete + reset $bku on your next $sw: 10%\n"
+        "0 $oh left for today, 0 $oc, 0 $oq (+1 stored) and 0 $ot.\n"
+        "15h 18 min before the refill."
+    )
+
+    assert state.can_claim_now
+    assert state.claim_reset_minutes == 152
+    assert state.rolls_left == 0
+    assert state.daily_kakera_ready
+    assert state.kakera_stock == 12114
+    assert state.oq_stored == 1
+
+
+def test_parse_timer_state_accepts_a_shorter_customized_layout() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "ernieuuu, you can't claim for another 14 min.\n"
+        "You have 0 rolls left. Next rolls reset in 14 min.\n"
+        "Next $daily reset in 8h 13 min.\n"
+        "You can react to kakera right now!\n"
+        "Power: 100%\n"
+        "Each kakera button consumes 60% of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (30%)\n"
+        "Stock: 37:kakera:\n"
+        "Next $dk in 19h 26 min.\n"
+        "You may vote again in 5h 47 min.\n"
+        "0 $oh left for today, 0 $oc, 0 $oq and 0 $ot.\n"
+        "15h 15 min before the refill."
+    )
+
+    assert state.can_claim_now is False
+    assert state.claim_reset_minutes == 14
+    assert state.rolls_reset_stock is None
+    assert state.daily_kakera_ready is False
+    assert state.rt_available is None
+    assert state.oq_stored == 0
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

@@ -476,3 +476,27 @@ def test_import_kakeraloot_settings_persists_server_pricing(tmp_path) -> None:
     assert settings is not None
     assert settings.loot_cost == 500
     assert settings.quantity_quality_level_increment == 200
+
+
+def test_import_timer_state_persists_a_short_lived_account_snapshot(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    raw_message = (
+        "ernieuuu, you can claim right now! The next claim reset is in 2h 32 min.\n"
+        "You have 0 rolls left. Next rolls reset in 32 min.\n"
+        "Power: 72%\n"
+        "Stock: 12,114:kakera:"
+    )
+
+    result = service.import_timer_state(
+        MudaeTextParser().parse_timer_state(raw_message),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        raw_message,
+        "clipboard",
+    )
+    state = service.timer_state("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert state is not None
+    assert state.snapshot.claim_reset_minutes == 152
+    assert state.snapshot.kakera_stock == 12114

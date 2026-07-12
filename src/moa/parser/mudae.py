@@ -16,6 +16,7 @@ from moa.models.character import (
     ServerSettingMetric,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
+    TimerStateSnapshot,
     DisableListEntry,
     DisableListSnapshot,
     HaremKeyEntry,
@@ -144,6 +145,39 @@ class MudaeTextParser:
     _SETTING_SPHERE_BONUS = re.compile(r"% sphere bonus:\s*\+?(?P<value>\d+)", re.IGNORECASE)
     _SETTING_GAMEMODE = re.compile(r"Game mode:\s*(?P<value>\d+)", re.IGNORECASE)
     _SETTING_CHANNEL_INSTANCE = re.compile(r"This channel instance:\s*(?P<value>\d+)", re.IGNORECASE)
+    _TIMER_CLAIM_READY = re.compile(
+        r"you can claim right now!\s*The next claim reset is in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+    _TIMER_CLAIM_WAITING = re.compile(
+        r"you can't claim for another\s*(?P<duration>.+?)\.", re.IGNORECASE
+    )
+    _TIMER_ROLLS = re.compile(
+        r"You have\s*(?P<rolls>\d+)\s+rolls? left\.\s*Next rolls reset in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+    _TIMER_ROLL_STOCK = re.compile(r"You have\s*(?P<value>\d+)\s+rolls? reset in stock", re.IGNORECASE)
+    _TIMER_VOTE = re.compile(r"You may vote again in\s*(?P<duration>.+?)\.", re.IGNORECASE)
+    _TIMER_DAILY = re.compile(r"Next \$daily reset in\s*(?P<duration>.+?)\.", re.IGNORECASE)
+    _TIMER_POWER = re.compile(r"^Power:\s*(?P<value>\d+)%$", re.IGNORECASE)
+    _TIMER_POWER_COST = re.compile(
+        r"Each kakera button consumes\s*(?P<value>\d+)%\s+of your reaction power", re.IGNORECASE
+    )
+    _TIMER_SOULMATE_COST = re.compile(r"half the power \((?P<value>\d+)%\)", re.IGNORECASE)
+    _TIMER_STOCK = re.compile(r"^Stock:\s*(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _TIMER_GOLD_KEY_STOCK = re.compile(
+        r"\(Keys LVL 6\+\)\s*(?P<value>[\d,]+):kakera:to collect before the next reset "
+        r"\((?P<duration>.+?)\)",
+        re.IGNORECASE,
+    )
+    _TIMER_BKU_PROBABILITY = re.compile(r"next \$sw:\s*(?P<value>\d+)%", re.IGNORECASE)
+    _TIMER_OURO = re.compile(
+        r"(?P<oh>\d+)\s+\$oh left for today,\s*(?P<oc>\d+)\s+\$oc,\s*"
+        r"(?P<oq>\d+)\s+\$oq(?:\s*\(\+(?P<stored>\d+) stored\))?\s*and\s*"
+        r"(?P<ot>\d+)\s+\$ot\.",
+        re.IGNORECASE,
+    )
+    _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -152,6 +186,17 @@ class MudaeTextParser:
     @staticmethod
     def _number(value: str) -> int:
         return int(value.replace(",", ""))
+
+    @staticmethod
+    def _duration_minutes(value: str) -> int:
+        """Convert Mudae's `2h 32 min`/`32 min` wording to whole minutes."""
+        hours = re.search(r"(?P<value>\d+)h", value, re.IGNORECASE)
+        minutes = re.search(r"(?P<value>\d+)\s*min", value, re.IGNORECASE)
+        if hours is None and minutes is None:
+            raise MudaeParseError(f"Unsupported Mudae timer duration: {value!r}")
+        return (int(hours.group("value")) * 60 if hours else 0) + (
+            int(minutes.group("value")) if minutes else 0
+        )
 
     def parse_top_page(self, text: str) -> TopPage:
         """Parse one copied `$top` page into ranked character observations."""
@@ -474,6 +519,100 @@ class MudaeTextParser:
         if match is None:
             raise MudaeParseError("Expected a Mudae $persr response with a current $personalrare value.")
         return PersonalRareSnapshot(personal_rare_multiplier=int(match.group("value")))
+
+    def parse_timer_state(self, text: str) -> TimerStateSnapshot:
+        """Parse whichever action categories are currently visible in `$tu`."""
+        lines = self._lines(text)
+
+        def first(pattern: re.Pattern[str]) -> re.Match[str] | None:
+            return next((pattern.search(line) for line in lines if pattern.search(line)), None)
+
+        claim_ready = first(self._TIMER_CLAIM_READY)
+        claim_waiting = first(self._TIMER_CLAIM_WAITING)
+        rolls = first(self._TIMER_ROLLS)
+        roll_stock = first(self._TIMER_ROLL_STOCK)
+        vote = first(self._TIMER_VOTE)
+        daily = first(self._TIMER_DAILY)
+        power = first(self._TIMER_POWER)
+        power_cost = first(self._TIMER_POWER_COST)
+        soulmate_cost = first(self._TIMER_SOULMATE_COST)
+        stock = first(self._TIMER_STOCK)
+        gold_key_stock = first(self._TIMER_GOLD_KEY_STOCK)
+        bku_probability = first(self._TIMER_BKU_PROBABILITY)
+        ouro = first(self._TIMER_OURO)
+        ouro_refill = first(self._TIMER_OURO_REFILL)
+        recognized_categories = (
+            claim_ready,
+            claim_waiting,
+            rolls,
+            roll_stock,
+            vote,
+            daily,
+            power,
+            stock,
+            ouro,
+        )
+        if not any(recognized_categories):
+            raise MudaeParseError("Expected at least one recognizable Mudae $tu timer category.")
+
+        if claim_ready is not None:
+            can_claim_now: bool | None = True
+            claim_reset_minutes = self._duration_minutes(claim_ready.group("duration"))
+        elif claim_waiting is not None:
+            can_claim_now = False
+            claim_reset_minutes = self._duration_minutes(claim_waiting.group("duration"))
+        else:
+            can_claim_now = None
+            claim_reset_minutes = None
+        return TimerStateSnapshot(
+            can_claim_now=can_claim_now,
+            claim_reset_minutes=claim_reset_minutes,
+            rolls_left=int(rolls.group("rolls")) if rolls else None,
+            rolls_reset_minutes=(self._duration_minutes(rolls.group("duration")) if rolls else None),
+            rolls_reset_stock=int(roll_stock.group("value")) if roll_stock else None,
+            vote_reset_minutes=(self._duration_minutes(vote.group("duration")) if vote else None),
+            daily_reset_minutes=(self._duration_minutes(daily.group("duration")) if daily else None),
+            daily_kakera_ready=(
+                True
+                if "$dk is ready!" in text.casefold()
+                else False
+                if "next $dk in" in text.casefold()
+                else None
+            ),
+            rt_available=(
+                True
+                if "$rt is available!" in text.casefold()
+                else False
+                if "next $rt" in text.casefold()
+                else None
+            ),
+            can_react_kakera_now=(
+                True if "can react to kakera right now!" in text.casefold() else None
+            ),
+            reaction_power_percent=int(power.group("value")) if power else None,
+            kakera_button_power_cost_percent=(int(power_cost.group("value")) if power_cost else None),
+            soulmate_button_power_cost_percent=(
+                int(soulmate_cost.group("value")) if soulmate_cost else None
+            ),
+            kakera_stock=self._number(stock.group("value")) if stock else None,
+            gold_key_stock_remaining=(
+                self._number(gold_key_stock.group("value")) if gold_key_stock else None
+            ),
+            gold_key_reset_minutes=(
+                self._duration_minutes(gold_key_stock.group("duration")) if gold_key_stock else None
+            ),
+            bku_reset_probability_percent=(
+                int(bku_probability.group("value")) if bku_probability else None
+            ),
+            oh_remaining=int(ouro.group("oh")) if ouro else None,
+            oc_remaining=int(ouro.group("oc")) if ouro else None,
+            oq_remaining=int(ouro.group("oq")) if ouro else None,
+            oq_stored=int(ouro.group("stored")) if ouro and ouro.group("stored") else 0 if ouro else None,
+            ot_remaining=int(ouro.group("ot")) if ouro else None,
+            ouro_refill_minutes=(
+                self._duration_minutes(ouro_refill.group("duration")) if ouro_refill else None
+            ),
+        )
 
     def parse_tower_state(self, text: str) -> TowerStateSnapshot:
         """Parse current level, cost, balance, and owned floors from a copied `$kt` response."""
