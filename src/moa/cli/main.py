@@ -82,6 +82,10 @@ def account_activity(
     overview = AccountOverviewService().overview(server, account)
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
+    try:
+        keyfarm = KeyFarmService().recommend(server, account)
+    except ValueError:
+        keyfarm = ()
     table = Table(title=f"{account} - activity dashboard")
     table.add_column("Area", style="green")
     table.add_column("Imported state")
@@ -107,6 +111,14 @@ def account_activity(
         "Not imported" if overview.disable_slots_used is None else f"{overview.disable_slots_used}/{overview.disable_slots_capacity} slots used",
     )
     table.add_row("Keyed harem", f"{overview.keyed_harem_count:,} imported characters")
+    if keyfarm:
+        target = keyfarm[0]
+        table.add_row(
+            "Top key-farm target",
+            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_type.title()} {target.key_count} | {target.wishlist_status}",
+        )
+    else:
+        table.add_row("Top key-farm target", "No eligible valued harem entry imported")
     console.print(table)
     if readiness.upcoming_events:
         console.print("[dim]Upcoming: " + " · ".join(f"{name} in {minutes} min" for name, minutes in readiness.upcoming_events) + "[/dim]")
