@@ -447,7 +447,8 @@ class RollStatistics(MOAModel):
     server_name: str
     account_name: str
     roll_count: int
-    ranked_roll_count: int
+    best_claim_rank: int | None
+    average_claim_rank: float | None
     average_kakera_value: float | None
     highest_kakera_value: int | None
 

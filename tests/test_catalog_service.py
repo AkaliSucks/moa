@@ -519,3 +519,24 @@ def test_import_roll_keeps_rankless_and_ranked_observations_in_history(tmp_path)
     assert rolls[0].character.name == "Chisato Nishikigi"
     assert rolls[0].claim_rank == 484
     assert rolls[1].claim_rank is None
+
+
+def test_roll_statistics_describe_only_imported_roll_observations(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    rankless = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
+    ranked = "Chisato Nishikigi\nLycoris Recoil\nClaims: #484\n209:kakera:"
+
+    service.import_roll(
+        MudaeTextParser().parse_roll(rankless), "Lake", "ernieuuu", rankless, "clipboard"
+    )
+    service.import_roll(
+        MudaeTextParser().parse_roll(ranked), "Lake", "ernieuuu", ranked, "clipboard"
+    )
+
+    statistics = service.roll_statistics("Lake", "ernieuuu")
+
+    assert statistics.roll_count == 2
+    assert statistics.best_claim_rank == 484
+    assert statistics.average_claim_rank == 484.0
+    assert statistics.average_kakera_value == 119.5
+    assert statistics.highest_kakera_value == 209

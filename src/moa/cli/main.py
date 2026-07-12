@@ -248,6 +248,41 @@ def recent_rolls(
     console.print(table)
 
 
+@roll_app.command("stats")
+def roll_statistics(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose rolls to summarize."),
+) -> None:
+    """Summarize imported roll history without estimating probabilities."""
+    statistics = CatalogService().roll_statistics(server, account)
+    if statistics.roll_count == 0:
+        console.print("[yellow]No rolls imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+
+    table = Table(title=f"{account} - imported roll statistics")
+    table.add_column("Metric", style="green")
+    table.add_column("Observed value", justify="right", style="cyan")
+    table.add_row("Imported rolls", f"{statistics.roll_count:,}")
+    table.add_row("Lowest (best) claim rank", _format_optional_rank(statistics.best_claim_rank))
+    table.add_row(
+        "Average claim rank",
+        "-" if statistics.average_claim_rank is None else f"#{statistics.average_claim_rank:,.1f}",
+    )
+    table.add_row(
+        "Average Kakera value",
+        "-" if statistics.average_kakera_value is None else f"{statistics.average_kakera_value:,.1f}",
+    )
+    table.add_row(
+        "Highest Kakera value",
+        _format_optional_number(statistics.highest_kakera_value),
+    )
+    console.print(table)
+    console.print(
+        "[dim]These are descriptive results from stored rolls only. They are not a full roll-pool "
+        "or probability estimate.[/dim]"
+    )
+
+
 @loot_app.command("next")
 def next_loot_spending_step(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),

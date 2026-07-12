@@ -24,6 +24,7 @@ from moa.models.catalog import (
     RollabilityImportResult,
     UnavailableCharacterObservation,
     RollImportResult,
+    RollStatistics,
     StoredRollObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
@@ -94,6 +95,8 @@ class CatalogRepositoryProtocol(Protocol):
     def recent_rolls(
         self, server_name: str, account_name: str, limit: int
     ) -> tuple[StoredRollObservation, ...]: ...
+
+    def roll_statistics(self, server_name: str, account_name: str) -> RollStatistics: ...
 
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]: ...
 
@@ -479,6 +482,35 @@ class CatalogRepository:
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
+        )
+
+    def roll_statistics(self, server_name: str, account_name: str) -> RollStatistics:
+        """Return descriptive statistics for imported rolls in one account context."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS roll_count,
+                    MIN(claim_rank) AS best_claim_rank,
+                    AVG(claim_rank) AS average_claim_rank,
+                    AVG(kakera_value) AS average_kakera_value,
+                    MAX(kakera_value) AS highest_kakera_value
+                FROM roll_observations
+                JOIN account_contexts ON account_contexts.id = roll_observations.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        return RollStatistics(
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            roll_count=row["roll_count"],
+            best_claim_rank=row["best_claim_rank"],
+            average_claim_rank=row["average_claim_rank"],
+            average_kakera_value=row["average_kakera_value"],
+            highest_kakera_value=row["highest_kakera_value"],
         )
 
     def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]:
