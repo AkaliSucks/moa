@@ -43,6 +43,22 @@ class RollAnalysisService:
             if keyed_entry is not None
             else "No keyed-harem entry imported"
         )
+
+        rollability_state = "Observed rolling now (available at import time)"
+
+        timer_state = self._catalog.timer_state(server_name, account_name)
+        if timer_state is None or timer_state.snapshot.can_claim_now is None:
+            claim_window_state = "No imported claim-window state"
+        elif timer_state.snapshot.can_claim_now:
+            claim_window_state = "Claim was ready in the latest $tu snapshot"
+        else:
+            minutes = timer_state.snapshot.claim_reset_minutes
+            claim_window_state = (
+                "Claim window unavailable in latest $tu snapshot"
+                if minutes is None
+                else f"Claim window was {minutes} min away in the latest $tu snapshot"
+            )
+
         return RollAnalysis(
             server_name=server_name.strip(),
             account_name=account_name.strip(),
@@ -52,4 +68,6 @@ class RollAnalysisService:
             kakera_value=roll.kakera_value,
             wishlist_state=wishlist_state,
             keyed_harem_state=keyed_harem_state,
+            rollability_state=rollability_state,
+            claim_window_state=claim_window_state,
         )

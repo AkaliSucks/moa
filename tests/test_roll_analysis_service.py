@@ -43,6 +43,9 @@ class InMemoryRollAnalysisCatalog:
             ),
         )
 
+    def timer_state(self, server_name: str, account_name: str) -> None:
+        return None
+
 
 def test_roll_analysis_combines_direct_roll_with_imported_wishlist_and_key_context() -> None:
     analysis = RollAnalysisService(InMemoryRollAnalysisCatalog()).analyze(
@@ -53,4 +56,6 @@ def test_roll_analysis_combines_direct_roll_with_imported_wishlist_and_key_conte
 
     assert analysis.wishlist_state == "Starwish"
     assert analysis.keyed_harem_state == "Silver key (5)"
+    assert analysis.rollability_state == "Observed rolling now (available at import time)"
+    assert analysis.claim_window_state == "No imported claim-window state"
     assert analysis.kakera_value == 1448

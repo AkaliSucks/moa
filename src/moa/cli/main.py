@@ -715,7 +715,7 @@ def analyze_roll(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Explain a copied roll using imported wishlist and keyed-harem context."""
+    """Explain a copied roll using directly imported account context."""
     try:
         roll = MudaeTextParser().parse_roll(_read_message_source(path, clipboard))
     except MudaeParseError as error:
@@ -730,10 +730,12 @@ def analyze_roll(
     table.add_row("This roll's Kakera", _format_optional_number(analysis.kakera_value))
     table.add_row("Wishlist", analysis.wishlist_state)
     table.add_row("Keyed harem", analysis.keyed_harem_state)
+    table.add_row("Rollability", analysis.rollability_state)
+    table.add_row("Claim window", analysis.claim_window_state)
     console.print(table)
     console.print(
         "[dim]This is factual roll context, not a claim/skip recommendation. "
-        "A missing keyed entry does not prove the character is unowned.[/dim]"
+        "A missing keyed entry does not prove the character is unowned, and $tu state is not live.[/dim]"
     )
 
 

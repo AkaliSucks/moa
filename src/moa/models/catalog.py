@@ -412,6 +412,8 @@ class RollAnalysis(MOAModel):
     kakera_value: int | None
     wishlist_state: str
     keyed_harem_state: str
+    rollability_state: str
+    claim_window_state: str
 
 
 class AutomaticImportResult(MOAModel):
