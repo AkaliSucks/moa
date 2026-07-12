@@ -82,6 +82,7 @@ def account_activity(
     overview = AccountOverviewService().overview(server, account)
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
+    recent_reactions = CatalogService().kakera_reactions(server, account, 1)
     roll_stats = CatalogService().roll_statistics(server, account)
     recent_gains = CatalogService().recent_key_gains(server, account, 1)
     try:
@@ -95,6 +96,14 @@ def account_activity(
     table.add_row("Timer status", readiness.status)
     table.add_row("Available actions", ", ".join(readiness.available_actions) or "None / refresh $tu")
     table.add_row("Reaction receipts", f"{reactions.receipt_count:,} | +{reactions.total_kakera_earned:,} Kakera")
+    if recent_reactions:
+        latest_reaction = recent_reactions[0]
+        table.add_row(
+            "Latest reaction",
+            f"+{latest_reaction.kakera_earned:,} Kakera | {latest_reaction.reaction_label}",
+        )
+    else:
+        table.add_row("Latest reaction", "None imported")
     table.add_row(
         "Roll sample",
         "Not imported" if roll_stats.roll_count == 0 else f"{roll_stats.roll_count:,} rolls | avg {roll_stats.average_kakera_value:,.1f} Kakera | best {_format_optional_rank(roll_stats.best_claim_rank)}",

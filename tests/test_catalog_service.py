@@ -532,6 +532,10 @@ def test_kakera_reaction_summary_groups_receipts_and_scopes_account(tmp_path) ->
     assert summary.average_kakera_earned == pytest.approx(305.3333333333)
     assert summary.highest_kakera_earned == 497
     assert summary.by_reaction == ((":kakeraG:", 1, 497), (":kakeraY:", 2, 419))
+    latest = service.kakera_reactions(lake, "ernieuuu", 1)
+    assert [(entry.reaction_label, entry.kakera_earned) for entry in latest] == [
+        (":kakeraY:", 100)
+    ]
 
 
 def test_import_roll_keeps_rankless_and_ranked_observations_in_history(tmp_path) -> None:
