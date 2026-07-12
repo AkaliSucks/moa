@@ -500,3 +500,22 @@ def test_import_timer_state_persists_a_short_lived_account_snapshot(tmp_path) ->
     assert state is not None
     assert state.snapshot.claim_reset_minutes == 152
     assert state.snapshot.kakera_stock == 12114
+
+
+def test_import_roll_keeps_rankless_and_ranked_observations_in_history(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    rankless = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
+    ranked = "Chisato Nishikigi\nLycoris Recoil\nClaims: #484\n209:kakera:"
+
+    service.import_roll(
+        MudaeTextParser().parse_roll(rankless), "Lake", "ernieuuu", rankless, "clipboard"
+    )
+    service.import_roll(
+        MudaeTextParser().parse_roll(ranked), "Lake", "ernieuuu", ranked, "clipboard"
+    )
+    rolls = service.recent_rolls("Lake", "ernieuuu")
+
+    assert len(rolls) == 2
+    assert rolls[0].character.name == "Chisato Nishikigi"
+    assert rolls[0].claim_rank == 484
+    assert rolls[1].claim_rank is None

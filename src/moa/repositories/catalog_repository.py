@@ -23,6 +23,8 @@ from moa.models.catalog import (
     DisableListObservation,
     RollabilityImportResult,
     UnavailableCharacterObservation,
+    RollImportResult,
+    StoredRollObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
     KakeraProgressPoint,
@@ -55,6 +57,7 @@ from moa.models.character import (
     TimerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
+    RollObservation,
     UnavailableCharacterPage,
     WishlistSnapshot,
 )
@@ -78,6 +81,19 @@ class CatalogRepositoryProtocol(Protocol):
     def character_count(self) -> int: ...
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None: ...
+
+    def import_roll(
+        self,
+        roll: RollObservation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollImportResult: ...
+
+    def recent_rolls(
+        self, server_name: str, account_name: str, limit: int
+    ) -> tuple[StoredRollObservation, ...]: ...
 
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]: ...
 
@@ -358,6 +374,111 @@ class CatalogRepository:
             character_id=character_id,
             server_name=server_name.strip(),
             observed_at=observed_at,
+        )
+
+    def import_roll(
+        self,
+        roll: RollObservation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollImportResult:
+        """Store one roll and preserve any directly displayed rank/value observations."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("roll", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            character_id = self._upsert_character(
+                connection,
+                name=roll.name,
+                series=roll.series,
+                gender=None,
+                roulette=None,
+                observed_at=observed_at,
+            ).fetchone()["id"]
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO roll_observations (
+                    account_context_id, character_id, claim_rank, kakera_value, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    character_id,
+                    roll.claim_rank,
+                    roll.kakera_value,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+            if roll.claim_rank is not None:
+                connection.execute(
+                    """
+                    INSERT INTO rank_snapshots (
+                        character_id, claim_rank, like_rank, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (character_id, roll.claim_rank, None, observed_at.isoformat(), import_event_id),
+                )
+            if roll.kakera_value is not None:
+                connection.execute(
+                    """
+                    INSERT INTO server_character_observations (
+                        server_context_id, character_id, kakera_value, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (server_id, character_id, roll.kakera_value, observed_at.isoformat(), import_event_id),
+                )
+        return RollImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            character_id=character_id,
+            observed_at=observed_at,
+        )
+
+    def recent_rolls(
+        self, server_name: str, account_name: str, limit: int
+    ) -> tuple[StoredRollObservation, ...]:
+        """Return recent observed rolls, newest first."""
+        if limit <= 0:
+            raise ValueError("Roll limit must be positive.")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT roll_observations.*, characters.id AS character_id, characters.name,
+                       characters.series, characters.gender, characters.roulette
+                FROM roll_observations
+                JOIN account_contexts ON account_contexts.id = roll_observations.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN characters ON characters.id = roll_observations.character_id
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                ORDER BY roll_observations.observed_at DESC, roll_observations.id DESC
+                LIMIT ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name), limit),
+            ).fetchall()
+        return tuple(
+            StoredRollObservation(
+                character=CatalogCharacter(
+                    id=row["character_id"],
+                    name=row["name"],
+                    series=row["series"],
+                    gender=row["gender"],
+                    roulette=row["roulette"],
+                ),
+                claim_rank=row["claim_rank"],
+                kakera_value=row["kakera_value"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
         )
 
     def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]:
@@ -1722,6 +1843,16 @@ class CatalogRepository:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(server_context_id, normalized_name)
+                );
+
+                CREATE TABLE IF NOT EXISTS roll_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    character_id INTEGER NOT NULL REFERENCES characters(id),
+                    claim_rank INTEGER,
+                    kakera_value INTEGER,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS harem_key_observations (

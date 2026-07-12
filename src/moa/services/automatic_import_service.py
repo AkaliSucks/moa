@@ -30,8 +30,6 @@ class AutomaticImportService:
         kind = self._router.detect(raw_message).kind
         if kind == "unknown":
             raise ValueError("This message is not a supported Mudae import format.")
-        if kind == "roll":
-            raise ValueError("Roll cards are analyzed with `moa analyze-roll`; they are not persisted yet.")
         if kind == "top":
             result = self._catalog.import_top_page(self._parser.parse_top_page(raw_message), raw_message, source)
             return AutomaticImportResult(
@@ -41,6 +39,12 @@ class AutomaticImportService:
             )
 
         server = self._require(server_name, "server", kind)
+        if kind == "roll":
+            account = self._require(account_name, "account", kind)
+            result = self._catalog.import_roll(
+                self._parser.parse_roll(raw_message), server, account, raw_message, source
+            )
+            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported roll observation.")
         if kind == "im":
             result = self._catalog.import_character_details(
                 self._parser.parse_character_details(raw_message), server, raw_message, source

@@ -25,9 +25,15 @@ def test_automatic_import_requires_context_only_for_account_scoped_messages(tmp_
         service.import_message(message, "test")
 
 
-def test_automatic_import_does_not_persist_rolls_before_roll_history_exists(tmp_path) -> None:
-    service = AutomaticImportService(CatalogService(CatalogRepository(tmp_path / "catalog.db")))
+def test_automatic_import_persists_rankless_rolls_for_future_history(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    service = AutomaticImportService(catalog)
     message = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 
-    with pytest.raises(ValueError, match="analyze-roll"):
-        service.import_message(message, "test", "Lake", "ernieuuu")
+    result = service.import_message(message, "test", "Lake", "ernieuuu")
+    rolls = catalog.recent_rolls("Lake", "ernieuuu")
+
+    assert result.kind == "roll"
+    assert result.imported_count == 1
+    assert rolls[0].character.name == "Hips"
+    assert rolls[0].claim_rank is None

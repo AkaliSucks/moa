@@ -29,6 +29,7 @@ badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 key_app = typer.Typer(help="Character key reference commands")
+roll_app = typer.Typer(help="Browse imported roll observations")
 account_app = typer.Typer(help="Imported account-state summary commands")
 action_app = typer.Typer(help="Use fresh imported timers to show available actions")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
@@ -44,6 +45,7 @@ app.add_typer(badge_app, name="badge")
 app.add_typer(reaction_app, name="reaction")
 app.add_typer(loot_app, name="loot")
 app.add_typer(key_app, name="key")
+app.add_typer(roll_app, name="roll")
 app.add_typer(account_app, name="account")
 app.add_typer(action_app, name="action")
 app.add_typer(parse_app, name="parse")
@@ -216,6 +218,34 @@ def show_loot(loot_id: str) -> None:
     console.print(f"[bold]Unlocks after:[/bold] {', '.join(loot.unlock_prerequisites)}")
     console.print(f"[bold]Details:[/bold] {loot.description}")
     console.print(f"[bold]Progression:[/bold] {loot.progression_note}")
+
+
+@roll_app.command("recent")
+def recent_rolls(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose rolls to show."),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Maximum number of recent rolls."),
+) -> None:
+    """Show raw roll observations imported for one account context."""
+    rolls = CatalogService().recent_rolls(server, account, limit)
+    if not rolls:
+        console.print("[yellow]No rolls imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{account} - recent imported rolls")
+    table.add_column("Observed (UTC)")
+    table.add_column("Character", style="green")
+    table.add_column("Series")
+    table.add_column("Claim rank", justify="right")
+    table.add_column("Kakera", justify="right", style="cyan")
+    for roll in rolls:
+        table.add_row(
+            roll.observed_at.strftime("%Y-%m-%d %H:%M"),
+            roll.character.name,
+            roll.character.series,
+            _format_optional_rank(roll.claim_rank),
+            _format_optional_number(roll.kakera_value),
+        )
+    console.print(table)
 
 
 @loot_app.command("next")

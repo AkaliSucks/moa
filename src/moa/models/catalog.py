@@ -422,6 +422,36 @@ class AutomaticImportResult(MOAModel):
     message: str
 
 
+class RollImportResult(MOAModel):
+    """Summary of one persisted raw Mudae roll."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    character_id: int
+    observed_at: datetime
+
+
+class StoredRollObservation(MOAModel):
+    """One timestamped Mudae roll stored for an account context."""
+
+    character: CatalogCharacter
+    claim_rank: int | None
+    kakera_value: int | None
+    observed_at: datetime
+
+
+class RollStatistics(MOAModel):
+    """Simple descriptive statistics from stored roll observations."""
+
+    server_name: str
+    account_name: str
+    roll_count: int
+    ranked_roll_count: int
+    average_kakera_value: float | None
+    highest_kakera_value: int | None
+
+
 class AccountOverview(MOAModel):
     """A non-destructive summary of the latest imported account state."""
 

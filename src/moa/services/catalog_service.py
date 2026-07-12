@@ -15,6 +15,8 @@ from moa.models.catalog import (
     DisableListObservation,
     RollabilityImportResult,
     UnavailableCharacterObservation,
+    RollImportResult,
+    StoredRollObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
     KakeraProgressPoint,
@@ -46,6 +48,7 @@ from moa.models.character import (
     TimerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
+    RollObservation,
     WishlistSnapshot,
     UnavailableCharacterPage,
 )
@@ -75,6 +78,21 @@ class CatalogService:
 
     def character_count(self) -> int:
         return self._repository.character_count()
+
+    def import_roll(
+        self,
+        roll: RollObservation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RollImportResult:
+        return self._repository.import_roll(roll, server_name, account_name, raw_message, source)
+
+    def recent_rolls(
+        self, server_name: str, account_name: str, limit: int = 20
+    ) -> tuple[StoredRollObservation, ...]:
+        return self._repository.recent_rolls(server_name, account_name, limit)
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None:
         return self._repository.get_profile(name, series)
