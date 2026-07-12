@@ -37,3 +37,19 @@ def test_automatic_import_persists_rankless_rolls_for_future_history(tmp_path) -
     assert result.imported_count == 1
     assert rolls[0].character.name == "Hips"
     assert rolls[0].claim_rank is None
+
+
+def test_automatic_import_routes_keyed_harem_pages(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    service = AutomaticImportService(catalog)
+    message = "ernieuuu's harem\nAlbedo \u00b7 :goldkey:  (7) 1,453 ka\nPage 1 / 6"
+
+    result = service.import_message(message, "test", "Lake", "ernieuuu")
+
+    assert result.kind == "harem"
+    assert result.imported_count == 1
+    assert "page 1/6" in result.message
+    entries = catalog.harem_keys("Lake", "ernieuuu")
+    assert [(entry.character_name, entry.key_count, entry.kakera_value) for entry in entries] == [
+        ("Albedo", 7, 1453)
+    ]

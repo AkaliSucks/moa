@@ -25,6 +25,14 @@ def test_router_detects_a_kakera_reaction_receipt() -> None:
     assert detection.kind == "reaction_receipt"
 
 
+def test_router_detects_keyed_harem_pages() -> None:
+    detection = MudaeMessageRouter().detect(
+        "ernieuuu's harem\nAlbedo \u00b7 :goldkey:  (7) 1,453 ka\nPage 1 / 6"
+    )
+
+    assert detection.kind == "harem"
+
+
 def test_router_keeps_ambiguous_messages_unknown() -> None:
     detection = MudaeMessageRouter().detect("Mudae is online. Have fun!")
 

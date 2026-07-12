@@ -39,6 +39,10 @@ entry only when its character name resolves uniquely in the local catalog.
 Other entries remain explicitly unresolved until a matching `$im` import
 provides reliable identity metadata.
 
+`moa import auto` also recognizes keyed-harem pages. Pass the same
+`--server` and `--account` context, plus `--scan <id>` when importing pages
+into a multi-page harem scan.
+
 For an accurate full-harem snapshot, begin a scan before copying pages:
 
 ```powershell

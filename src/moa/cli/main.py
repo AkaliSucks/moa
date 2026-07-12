@@ -1156,6 +1156,7 @@ def parse_settings(
 def import_auto(
     server: str | None = typer.Option(None, "--server", "-s", help="Server label when the message needs one."),
     account: str | None = typer.Option(None, "--account", "-a", help="Account name when the message needs one."),
+    scan: int | None = typer.Option(None, "--scan", help="Optional harem scan ID for a keyed-harem page."),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
@@ -1163,7 +1164,9 @@ def import_auto(
     raw_message = _read_message_source(path, clipboard)
     source = "clipboard" if clipboard else f"file:{path}"
     try:
-        result = AutomaticImportService().import_message(raw_message, source, server, account)
+        result = AutomaticImportService().import_message(
+            raw_message, source, server, account, harem_scan_id=scan
+        )
     except (MudaeParseError, ValueError) as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
