@@ -414,6 +414,14 @@ class RollAnalysis(MOAModel):
     keyed_harem_state: str
 
 
+class AutomaticImportResult(MOAModel):
+    """Result of routing one recognized raw Mudae message into MOA."""
+
+    kind: str
+    imported_count: int
+    message: str
+
+
 class AccountOverview(MOAModel):
     """A non-destructive summary of the latest imported account state."""
 

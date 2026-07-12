@@ -10,6 +10,7 @@ from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
 from moa.services.action_service import ActionService
+from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
@@ -888,6 +889,27 @@ def parse_settings(
         f"{settings.rolls_per_hour} rolls/hour | claim reset {settings.claim_reset_minutes} min\n"
         f"Claim timer: {settings.claim_reaction_expiry_seconds}s | rare multiplier: "
         f"{settings.claimed_character_rarity_multiplier} | premium: {settings.server_premium}"
+    )
+
+
+@import_app.command("auto")
+def import_auto(
+    server: str | None = typer.Option(None, "--server", "-s", help="Server label when the message needs one."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account name when the message needs one."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Detect and import one supported Mudae response using the existing import rules."""
+    raw_message = _read_message_source(path, clipboard)
+    source = "clipboard" if clipboard else f"file:{path}"
+    try:
+        result = AutomaticImportService().import_message(raw_message, source, server, account)
+    except (MudaeParseError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[green]Detected {result.kind} and imported {result.imported_count} item(s).[/green] "
+        f"{result.message}"
     )
 
 
