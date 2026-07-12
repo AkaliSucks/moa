@@ -115,7 +115,7 @@ def account_activity(
         target = keyfarm[0]
         table.add_row(
             "Top key-farm target",
-            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_type.title()} {target.key_count} | {target.wishlist_status}",
+            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_count} — {target.key_type.title()} | {target.wishlist_status}",
         )
     else:
         table.add_row("Top key-farm target", "No eligible valued harem entry imported")
@@ -796,8 +796,10 @@ def analyze_roll(
     table.add_row("Series", analysis.series)
     table.add_row("Claim rank", _format_optional_rank(analysis.claim_rank))
     table.add_row("This roll's Kakera", _format_optional_number(analysis.kakera_value))
+    if analysis.displayed_key_count is not None:
+        table.add_row("Displayed keys", f"{analysis.displayed_key_count} — {analysis.displayed_key_type.title()}")
     table.add_row("Wishlist", analysis.wishlist_state)
-    table.add_row("Keyed harem", analysis.keyed_harem_state)
+    table.add_row("Saved key state", analysis.keyed_harem_state)
     table.add_row("Rollability", analysis.rollability_state)
     table.add_row("Claim window", analysis.claim_window_state)
     console.print(table)
@@ -1717,7 +1719,7 @@ def recommend_keyfarm(
             str(index),
             entry.character_name,
             f"{entry.kakera_value:,}",
-            f"{entry.key_type.title()} {entry.key_count}",
+            f"{entry.key_count} — {entry.key_type.title()}",
             entry.wishlist_status,
             f"{entry.relative_spawn_multiplier:.2f}x",
             f"+{entry.additional_key_chance_percent}%",

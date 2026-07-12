@@ -843,7 +843,7 @@ class CatalogRepository:
         """Return latest key observations for one account in one server context."""
         with self._connection() as connection:
             active_scan_id = self._active_harem_scan_id(connection, server_name, account_name)
-            scan_filter = "harem_key_observations.harem_scan_id = ?" if active_scan_id else (
+            scan_filter = "(harem_key_observations.harem_scan_id = ? OR harem_key_observations.harem_scan_id IS NULL)" if active_scan_id else (
                 "harem_key_observations.harem_scan_id IS NULL"
             )
             scan_params: tuple[object, ...] = (active_scan_id,) if active_scan_id else ()
@@ -867,6 +867,7 @@ class CatalogRepository:
                     FROM harem_key_observations AS observations
                     WHERE observations.account_context_id = account_contexts.id
                       AND observations.normalized_character_name = harem_key_observations.normalized_character_name
+                      AND (observations.harem_scan_id = ? OR observations.harem_scan_id IS NULL)
                     ORDER BY observations.id DESC
                     LIMIT 1
                 )
@@ -887,7 +888,7 @@ class CatalogRepository:
                          harem_key_observations.key_count DESC,
                          harem_key_observations.character_name COLLATE NOCASE
                 """,
-                (self._normalize(server_name), self._normalize(account_name), *scan_params),
+                (active_scan_id, self._normalize(server_name), self._normalize(account_name), *scan_params),
             ).fetchall()
 
         return tuple(

@@ -410,6 +410,8 @@ class RollAnalysis(MOAModel):
     series: str
     claim_rank: int | None
     kakera_value: int | None
+    displayed_key_type: str | None
+    displayed_key_count: int | None
     wishlist_state: str
     keyed_harem_state: str
     rollability_state: str

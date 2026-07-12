@@ -39,9 +39,9 @@ class RollAnalysisService:
             None,
         )
         keyed_harem_state = (
-            f"{keyed_entry.key_type.title()} key ({keyed_entry.key_count})"
+            f"{keyed_entry.key_count} — {keyed_entry.key_type.title()}"
             if keyed_entry is not None
-            else "No keyed-harem entry imported"
+            else "No saved key record imported"
         )
 
         rollability_state = "Observed rolling now (available at import time)"
@@ -66,6 +66,8 @@ class RollAnalysisService:
             series=roll.series,
             claim_rank=roll.claim_rank,
             kakera_value=roll.kakera_value,
+            displayed_key_type=roll.displayed_key_type,
+            displayed_key_count=roll.displayed_key_count,
             wishlist_state=wishlist_state,
             keyed_harem_state=keyed_harem_state,
             rollability_state=rollability_state,
