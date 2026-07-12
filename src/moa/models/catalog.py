@@ -243,6 +243,18 @@ class KeyFarmRecommendation(MOAModel):
     value_weighted_opportunity_index: float
 
 
+class KeyProgressObservation(MOAModel):
+    """An imported harem key count interpreted through universal key rules."""
+
+    character_name: str
+    key_count: int
+    current_tier: str
+    next_milestone_key_count: int | None
+    keys_until_next_milestone: int | None
+    next_effects: tuple[str, ...]
+    kakera_value: int | None
+
+
 class KakeraStateImportResult(MOAModel):
     """Summary of one persisted `$k` account-state snapshot."""
 

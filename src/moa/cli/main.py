@@ -9,6 +9,7 @@ from moa.services.badge_service import BadgeService
 from moa.services.catalog_service import CatalogService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
+from moa.services.key_progress_service import KeyProgressService
 from moa.services.loot_service import KakeralootService
 from moa.services.reaction_service import ReactionService
 from moa.services.tower_service import TowerService
@@ -950,6 +951,39 @@ def catalog_keyfarm(
     console.print(
         "[dim]Ordered by the current Mudae values you imported. This is a factual shortlist, "
         "not yet an expected-value recommendation.[/dim]"
+    )
+
+
+@catalog_app.command("keyprogress")
+def catalog_keyprogress(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose key progress to show."),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of entries to display."),
+) -> None:
+    """Show each imported harem character's next universal key unlock."""
+    progress = KeyProgressService().progress(server, account)
+    if not progress:
+        console.print("[yellow]No keyed harem entries imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{account} - next key milestones")
+    table.add_column("Character", style="green")
+    table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Tier")
+    table.add_column("Next", justify="right")
+    table.add_column("Away", justify="right")
+    table.add_column("Next unlock")
+    for entry in progress[:limit]:
+        table.add_row(
+            entry.character_name,
+            str(entry.key_count),
+            entry.current_tier,
+            str(entry.next_milestone_key_count) if entry.next_milestone_key_count is not None else "-",
+            str(entry.keys_until_next_milestone) if entry.keys_until_next_milestone is not None else "-",
+            "\n".join(entry.next_effects),
+        )
+    console.print(table)
+    console.print(
+        "[dim]This explains the next key unlock only; it does not yet estimate how often each character rolls.[/dim]"
     )
 
 
