@@ -73,6 +73,45 @@ def detect_mudae_message(
     console.print(f"[dim]{detection.reason}[/dim]")
 
 
+@account_app.command("activity")
+def account_activity(
+    server: str = typer.Option(..., "--server", "-s"),
+    account: str = typer.Option(..., "--account", "-a"),
+) -> None:
+    """Show current imported activity signals without making spending decisions."""
+    overview = AccountOverviewService().overview(server, account)
+    readiness = ActionService().readiness(server, account)
+    reactions = CatalogService().kakera_reaction_summary(server, account)
+    table = Table(title=f"{account} - activity dashboard")
+    table.add_column("Area", style="green")
+    table.add_column("Imported state")
+    table.add_row("Kakera balance", "Not imported" if overview.kakera_balance is None else f"{overview.kakera_balance:,} ($k)")
+    table.add_row("Timer status", readiness.status)
+    table.add_row("Available actions", ", ".join(readiness.available_actions) or "None / refresh $tu")
+    table.add_row("Reaction receipts", f"{reactions.receipt_count:,} | +{reactions.total_kakera_earned:,} Kakera")
+    table.add_row(
+        "Badges",
+        "Not imported" if overview.kakera_balance is None else f"{overview.max_badge_count}/7 maxed",
+    )
+    table.add_row("Tower", "Not imported" if overview.tower_level is None else f"Level {overview.tower_level}; next floor shortfall {overview.tower_shortfall:,} Kakera")
+    table.add_row(
+        "Wishlist",
+        "Not imported" if overview.wishlist_count is None else f"{overview.wishlist_count}/{overview.wishlist_capacity} wishes; {overview.starwish_count}/{overview.starwish_capacity} Starwishes",
+    )
+    table.add_row(
+        "Kakeraloots",
+        "Not imported" if overview.quantity_level is None else f"Quantity {overview.quantity_level}; Quality {overview.quality_level}; {overview.loot_usage_count:,} uses",
+    )
+    table.add_row(
+        "Disable list",
+        "Not imported" if overview.disable_slots_used is None else f"{overview.disable_slots_used}/{overview.disable_slots_capacity} slots used",
+    )
+    table.add_row("Keyed harem", f"{overview.keyed_harem_count:,} imported characters")
+    console.print(table)
+    if readiness.upcoming_events:
+        console.print("[dim]Upcoming: " + " · ".join(f"{name} in {minutes} min" for name, minutes in readiness.upcoming_events) + "[/dim]")
+
+
 @server_app.command("compare")
 def compare_servers(
     left: str = typer.Option(..., "--left", help="First imported server label."),
