@@ -370,3 +370,20 @@ class ServerSettingsObservation(MOAModel):
     channel_instance: int
     metrics: tuple[ServerSettingMetric, ...]
     observed_at: datetime
+
+
+class ServerSettingComparison(MOAModel):
+    """One directly comparable setting from two imported server snapshots."""
+
+    label: str
+    left_value: str
+    right_value: str
+    matches: bool
+
+
+class ServerSettingsComparison(MOAModel):
+    """A factual comparison of two latest `$settings` snapshots."""
+
+    left_server_name: str
+    right_server_name: str
+    entries: tuple[ServerSettingComparison, ...]
