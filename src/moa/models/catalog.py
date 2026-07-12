@@ -382,6 +382,19 @@ class ActionReadiness(MOAModel):
     upcoming_events: tuple[tuple[str, int], ...]
 
 
+class RollAnalysis(MOAModel):
+    """Imported-account context for one freshly copied Mudae roll."""
+
+    server_name: str
+    account_name: str
+    character_name: str
+    series: str
+    claim_rank: int | None
+    kakera_value: int | None
+    wishlist_state: str
+    keyed_harem_state: str
+
+
 class AccountOverview(MOAModel):
     """A non-destructive summary of the latest imported account state."""
 

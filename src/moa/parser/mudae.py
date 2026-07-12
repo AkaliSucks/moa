@@ -265,8 +265,26 @@ class MudaeTextParser:
             (index for index, line in enumerate(lines) if self._ROLL_CLAIMS.match(line)),
             None,
         )
-        if claims_index is None or claims_index < 2:
-            raise MudaeParseError("Expected a Mudae roll card with a Claims line.")
+        if claims_index is None:
+            kakera_index = next(
+                (index for index, line in enumerate(lines) if self._KAKERA.match(line)),
+                None,
+            )
+            if kakera_index is None or kakera_index < 2:
+                raise MudaeParseError(
+                    "Expected a Mudae roll card with either a Claims line or a Kakera value."
+                )
+            kakera = self._KAKERA.match(lines[kakera_index])
+            if kakera is None:
+                raise MudaeParseError("Could not parse the Mudae Kakera value.")
+            return RollObservation(
+                name=lines[kakera_index - 2],
+                series=lines[kakera_index - 1],
+                claim_rank=None,
+                kakera_value=self._number(kakera.group("value")),
+            )
+        if claims_index < 2:
+            raise MudaeParseError("Expected character name and series before the Mudae Claims line.")
 
         claims_line = self._ROLL_CLAIMS.match(lines[claims_index])
         if claims_line is None:

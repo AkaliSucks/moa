@@ -147,6 +147,19 @@ def test_parse_roll_from_copied_mudae_output() -> None:
     assert roll.kakera_value == 27
 
 
+def test_parse_roll_without_claim_rank_when_rank_display_is_disabled() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Hips\n"
+        "Dekoboko Majo no Oyako Jijou\n"
+        "30:kakera:"
+    )
+
+    assert roll.name == "Hips"
+    assert roll.series == "Dekoboko Majo no Oyako Jijou"
+    assert roll.claim_rank is None
+    assert roll.kakera_value == 30
+
+
 def test_parse_keyed_harem_page_from_mmy_output() -> None:
     page = MudaeTextParser().parse_harem_key_page(HAREM_KEY_PAGE)
 

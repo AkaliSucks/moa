@@ -16,6 +16,7 @@ from moa.services.key_progress_service import KeyProgressService
 from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
 from moa.services.reaction_service import ReactionService
+from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.tower_service import TowerService
 
@@ -536,6 +537,35 @@ def parse_roll(
     console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
     console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
+
+
+@app.command("analyze-roll")
+def analyze_roll(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account deciding what to do with this roll."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Explain a copied roll using imported wishlist and keyed-harem context."""
+    try:
+        roll = MudaeTextParser().parse_roll(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    analysis = RollAnalysisService().analyze(roll, server, account)
+    table = Table(title=f"{analysis.character_name} - roll context")
+    table.add_column("Signal", style="green")
+    table.add_column("Imported/direct value")
+    table.add_row("Series", analysis.series)
+    table.add_row("Claim rank", _format_optional_rank(analysis.claim_rank))
+    table.add_row("This roll's Kakera", _format_optional_number(analysis.kakera_value))
+    table.add_row("Wishlist", analysis.wishlist_state)
+    table.add_row("Keyed harem", analysis.keyed_harem_state)
+    console.print(table)
+    console.print(
+        "[dim]This is factual roll context, not a claim/skip recommendation. "
+        "A missing keyed entry does not prove the character is unowned.[/dim]"
+    )
 
 
 @parse_app.command("mm")
