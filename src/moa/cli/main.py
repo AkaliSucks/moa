@@ -757,6 +757,8 @@ def parse_roll(
     console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
     console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
+    if roll.displayed_key_count is not None:
+        console.print(f"[bold]Displayed keys:[/bold] {roll.displayed_key_count} — {roll.displayed_key_type.title()}")
 
 
 @parse_app.command("reaction")

@@ -55,6 +55,7 @@ class MudaeTextParser:
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _KAKERA = re.compile(r"^\+?(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _ROLL_KEY = re.compile(r":(?P<key_type>[a-z]+)key:\s*\((?P<count>\d+)\)", re.IGNORECASE)
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
         re.IGNORECASE,
@@ -266,6 +267,7 @@ class MudaeTextParser:
     def parse_roll(self, text: str) -> RollObservation:
         """Parse the key fields from a copied standard Mudae roll card."""
         lines = self._lines(text)
+        key = next((self._ROLL_KEY.search(line) for line in lines if self._ROLL_KEY.search(line)), None)
         claims_index = next(
             (index for index, line in enumerate(lines) if self._ROLL_CLAIMS.match(line)),
             None,
@@ -287,6 +289,8 @@ class MudaeTextParser:
                 series=lines[kakera_index - 1],
                 claim_rank=None,
                 kakera_value=self._number(kakera.group("value")),
+                displayed_key_type=key.group("key_type").lower() if key else None,
+                displayed_key_count=int(key.group("count")) if key else None,
             )
         if claims_index < 2:
             raise MudaeParseError("Expected character name and series before the Mudae Claims line.")
@@ -304,6 +308,8 @@ class MudaeTextParser:
             series=lines[claims_index - 1],
             claim_rank=self._number(claims_line.group("rank")),
             kakera_value=self._number(kakera.group("value")) if kakera else None,
+            displayed_key_type=key.group("key_type").lower() if key else None,
+            displayed_key_count=int(key.group("count")) if key else None,
         )
 
     def parse_kakera_reaction_receipt(self, text: str) -> KakeraReactionReceipt:

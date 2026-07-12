@@ -39,6 +39,8 @@ class RollObservation(MOAModel):
     series: str
     claim_rank: int | None
     kakera_value: int | None
+    displayed_key_type: str | None = None
+    displayed_key_count: int | None = None
 
 
 class KakeraReactionReceipt(MOAModel):
