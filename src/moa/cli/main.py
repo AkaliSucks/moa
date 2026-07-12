@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import typer
@@ -83,6 +84,7 @@ def account_activity(
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
     recent_reactions = CatalogService().kakera_reactions(server, account, 1)
+    recent_rolls = CatalogService().recent_rolls(server, account, 1)
     roll_stats = CatalogService().roll_statistics(server, account)
     recent_gains = CatalogService().recent_key_gains(server, account, 1)
     try:
@@ -94,16 +96,35 @@ def account_activity(
     table.add_column("Imported state")
     table.add_row("Kakera balance", "Not imported" if overview.kakera_balance is None else f"{overview.kakera_balance:,} ($k)")
     table.add_row("Timer status", readiness.status)
+    if readiness.observed_at is None:
+        table.add_row("Timer snapshot", "Not imported")
+    else:
+        age = (
+            "age unavailable"
+            if readiness.snapshot_age_seconds is None
+            else f"{_format_age_seconds(readiness.snapshot_age_seconds)} old"
+        )
+        table.add_row("Timer snapshot", f"{age} | {_format_observed_at(readiness.observed_at)}")
     table.add_row("Available actions", ", ".join(readiness.available_actions) or "None / refresh $tu")
     table.add_row("Reaction receipts", f"{reactions.receipt_count:,} | +{reactions.total_kakera_earned:,} Kakera")
     if recent_reactions:
         latest_reaction = recent_reactions[0]
         table.add_row(
             "Latest reaction",
-            f"+{latest_reaction.kakera_earned:,} Kakera | {latest_reaction.reaction_label}",
+            f"+{latest_reaction.kakera_earned:,} Kakera | {latest_reaction.reaction_label} | "
+            f"{_format_observed_at(latest_reaction.observed_at)}",
         )
     else:
         table.add_row("Latest reaction", "None imported")
+    if recent_rolls:
+        latest_roll = recent_rolls[0]
+        table.add_row(
+            "Latest roll",
+            f"{latest_roll.character.name} | {_format_optional_number(latest_roll.kakera_value)} Kakera | "
+            f"{_format_optional_rank(latest_roll.claim_rank)} | {_format_observed_at(latest_roll.observed_at)}",
+        )
+    else:
+        table.add_row("Latest roll", "None imported")
     table.add_row(
         "Roll sample",
         "Not imported" if roll_stats.roll_count == 0 else f"{roll_stats.roll_count:,} rolls | avg {roll_stats.average_kakera_value:,.1f} Kakera | best {_format_optional_rank(roll_stats.best_claim_rank)}",
@@ -136,7 +157,11 @@ def account_activity(
         table.add_row("Top key-farm target", "No eligible valued harem entry imported")
     if recent_gains:
         gain = recent_gains[0]
-        table.add_row("Latest key observation", f"{gain.character_name} | {gain.key_count} - {gain.key_type.title()}")
+        table.add_row(
+            "Latest key observation",
+            f"{gain.character_name} | {gain.key_count} - {gain.key_type.title()} | "
+            f"{_format_observed_at(gain.observed_at)}",
+        )
     else:
         table.add_row("Latest key observation", "None imported from rolls")
     console.print(table)
@@ -703,6 +728,28 @@ def _read_message_source(path: Path | None, clipboard: bool) -> str:
 
 def _format_optional_number(value: int | None) -> str:
     return "-" if value is None else f"{value:,}"
+
+
+def _format_observed_at(observed_at: datetime) -> str:
+    """Render imported timestamps consistently as UTC in compact CLI output."""
+    if observed_at.tzinfo is not None:
+        observed_at = observed_at.astimezone(timezone.utc)
+    return observed_at.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_age_seconds(seconds: int) -> str:
+    """Render a non-negative snapshot age compactly for the activity dashboard."""
+    remaining = max(0, seconds)
+    minutes, seconds = divmod(remaining, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
 
 
 def _format_optional_rank(value: int | None) -> str:
