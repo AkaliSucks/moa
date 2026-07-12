@@ -25,6 +25,8 @@ from moa.models.catalog import (
     UnavailableCharacterObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
+    ServerSettingsImportResult,
+    ServerSettingsObservation,
     KakeralootStateImportResult,
     KakeralootStateObservation,
     TowerStateImportResult,
@@ -39,6 +41,7 @@ from moa.models.character import (
     HaremKeyPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    ServerSettingsSnapshot,
     TowerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
@@ -168,6 +171,16 @@ class CatalogRepositoryProtocol(Protocol):
     def kakeraloot_state(
         self, server_name: str, account_name: str
     ) -> KakeralootStateObservation | None: ...
+
+    def import_server_settings(
+        self,
+        settings: ServerSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ServerSettingsImportResult: ...
+
+    def server_settings(self, server_name: str) -> ServerSettingsObservation | None: ...
 
 
 class CatalogRepository:
@@ -1271,6 +1284,94 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_server_settings(
+        self,
+        settings: ServerSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ServerSettingsImportResult:
+        """Store a complete server-scoped `$settings` snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("server_settings", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO server_settings_observations (
+                    server_context_id, server_premium, prefix, language, claim_reset_minutes,
+                    reset_minute, reset_shift_minutes, rolls_per_hour, claim_reaction_expiry_seconds,
+                    claimed_character_rarity_multiplier, kakera_bonus_percent, sphere_bonus_percent,
+                    game_mode, channel_instance, metrics_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    server_id,
+                    int(settings.server_premium),
+                    settings.prefix,
+                    settings.language,
+                    settings.claim_reset_minutes,
+                    settings.reset_minute,
+                    settings.reset_shift_minutes,
+                    settings.rolls_per_hour,
+                    settings.claim_reaction_expiry_seconds,
+                    settings.claimed_character_rarity_multiplier,
+                    settings.kakera_bonus_percent,
+                    settings.sphere_bonus_percent,
+                    settings.game_mode,
+                    settings.channel_instance,
+                    json.dumps([metric.model_dump() for metric in settings.metrics]),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return ServerSettingsImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def server_settings(self, server_name: str) -> ServerSettingsObservation | None:
+        """Return the latest `$settings` snapshot for one server."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT server_settings_observations.*, server_contexts.name AS server_name
+                FROM server_contexts
+                JOIN server_settings_observations ON server_settings_observations.id = (
+                    SELECT observations.id FROM server_settings_observations AS observations
+                    WHERE observations.server_context_id = server_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name),),
+            ).fetchone()
+        if row is None:
+            return None
+        return ServerSettingsObservation(
+            server_name=row["server_name"],
+            server_premium=bool(row["server_premium"]),
+            prefix=row["prefix"],
+            language=row["language"],
+            claim_reset_minutes=row["claim_reset_minutes"],
+            reset_minute=row["reset_minute"],
+            reset_shift_minutes=row["reset_shift_minutes"],
+            rolls_per_hour=row["rolls_per_hour"],
+            claim_reaction_expiry_seconds=row["claim_reaction_expiry_seconds"],
+            claimed_character_rarity_multiplier=row["claimed_character_rarity_multiplier"],
+            kakera_bonus_percent=row["kakera_bonus_percent"],
+            sphere_bonus_percent=row["sphere_bonus_percent"],
+            game_mode=row["game_mode"],
+            channel_instance=row["channel_instance"],
+            metrics=tuple(json.loads(row["metrics_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def delete_import_event(self, import_event_id: int) -> bool:
         """Delete one raw import and all observations derived from it.
 
@@ -1488,6 +1589,27 @@ class CatalogRepository:
                     quality_level INTEGER NOT NULL,
                     usage_count INTEGER NOT NULL,
                     kakera_balance INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS server_settings_observations (
+                    id INTEGER PRIMARY KEY,
+                    server_context_id INTEGER NOT NULL REFERENCES server_contexts(id),
+                    server_premium INTEGER NOT NULL,
+                    prefix TEXT NOT NULL,
+                    language TEXT NOT NULL,
+                    claim_reset_minutes INTEGER NOT NULL,
+                    reset_minute TEXT NOT NULL,
+                    reset_shift_minutes INTEGER NOT NULL,
+                    rolls_per_hour INTEGER NOT NULL,
+                    claim_reaction_expiry_seconds INTEGER NOT NULL,
+                    claimed_character_rarity_multiplier INTEGER NOT NULL,
+                    kakera_bonus_percent INTEGER NOT NULL,
+                    sphere_bonus_percent INTEGER NOT NULL,
+                    game_mode INTEGER NOT NULL,
+                    channel_instance INTEGER NOT NULL,
+                    metrics_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

@@ -404,3 +404,36 @@ def test_import_kakeraloot_state_persists_when_mudae_reports_no_loots(tmp_path) 
     assert state is not None
     assert not state.has_kakeraloots
     assert state.quantity_level is None
+
+
+def test_import_server_settings_persists_server_scoped_configuration(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    text = (
+        "(Server not premium)\n"
+        "· Prefix: $ ($prefix)\n"
+        "· Lang: en ($lang)\n"
+        "· Claim reset: every 180 min. ($setclaim)\n"
+        "· Exact minute of the reset: xx:14 ($setinterval)\n"
+        "· Reset shifted: by +0 min. ($shifthour)\n"
+        "· Rolls per hour: 10 ($setrolls)\n"
+        "· Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "· Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "· % kakera bonus: +0 ($setkakerabonus)\n"
+        "· % sphere bonus: +0 ($setspherebonus)\n"
+        "· Game mode: 1 ($gamemode)\n"
+        "· This channel instance: 1 ($channelinstance)"
+    )
+
+    result = service.import_server_settings(
+        MudaeTextParser().parse_server_settings(text),
+        "Lake Arrowhead 2025",
+        text,
+        "clipboard",
+    )
+    settings = service.server_settings("Lake Arrowhead 2025")
+
+    assert result.server_name == "Lake Arrowhead 2025"
+    assert settings is not None
+    assert settings.game_mode == 1
+    assert settings.rolls_per_hour == 10
+    assert not settings.server_premium

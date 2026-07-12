@@ -8,6 +8,7 @@ from moa.models.character import (
     DisableListEntry,
     KakeralootStateSnapshot,
     PlayerBonusMetric,
+    ServerSettingMetric,
     WishlistEntry,
 )
 
@@ -340,3 +341,32 @@ class AccountOverview(MOAModel):
     disable_slots_used: int | None
     disable_slots_capacity: int | None
     keyed_harem_count: int
+
+
+class ServerSettingsImportResult(MOAModel):
+    """Summary of one persisted `$settings` snapshot."""
+
+    import_event_id: int
+    server_name: str
+    observed_at: datetime
+
+
+class ServerSettingsObservation(MOAModel):
+    """The latest imported `$settings` snapshot for one server."""
+
+    server_name: str
+    server_premium: bool
+    prefix: str
+    language: str
+    claim_reset_minutes: int
+    reset_minute: str
+    reset_shift_minutes: int
+    rolls_per_hour: int
+    claim_reaction_expiry_seconds: int
+    claimed_character_rarity_multiplier: int
+    kakera_bonus_percent: int
+    sphere_bonus_percent: int
+    game_mode: int
+    channel_instance: int
+    metrics: tuple[ServerSettingMetric, ...]
+    observed_at: datetime

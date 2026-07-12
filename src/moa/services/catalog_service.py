@@ -17,6 +17,8 @@ from moa.models.catalog import (
     UnavailableCharacterObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
+    ServerSettingsImportResult,
+    ServerSettingsObservation,
     KakeralootStateImportResult,
     KakeralootStateObservation,
     TowerStateImportResult,
@@ -30,6 +32,7 @@ from moa.models.character import (
     HaremKeyPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    ServerSettingsSnapshot,
     TowerStateSnapshot,
     PlayerBonusSnapshot,
     TopPage,
@@ -205,3 +208,15 @@ class CatalogService:
         self, server_name: str, account_name: str
     ) -> KakeralootStateObservation | None:
         return self._repository.kakeraloot_state(server_name, account_name)
+
+    def import_server_settings(
+        self,
+        settings: ServerSettingsSnapshot,
+        server_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ServerSettingsImportResult:
+        return self._repository.import_server_settings(settings, server_name, raw_message, source)
+
+    def server_settings(self, server_name: str) -> ServerSettingsObservation | None:
+        return self._repository.server_settings(server_name)

@@ -189,3 +189,29 @@ class KakeralootStateSnapshot(MOAModel):
     quality_level: int | None = None
     usage_count: int | None = None
     kakera_balance: int | None = None
+
+
+class ServerSettingMetric(MOAModel):
+    """One labelled option reported by Mudae's `$settings` command."""
+
+    label: str
+    value: str
+
+
+class ServerSettingsSnapshot(MOAModel):
+    """Server-scoped settings parsed from one `$settings` response."""
+
+    server_premium: bool
+    prefix: str
+    language: str
+    claim_reset_minutes: int
+    reset_minute: str
+    reset_shift_minutes: int
+    rolls_per_hour: int
+    claim_reaction_expiry_seconds: int
+    claimed_character_rarity_multiplier: int
+    kakera_bonus_percent: int
+    sphere_bonus_percent: int
+    game_mode: int
+    channel_instance: int
+    metrics: tuple[ServerSettingMetric, ...]

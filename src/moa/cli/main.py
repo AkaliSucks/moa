@@ -584,6 +584,25 @@ def parse_lootstate(
     )
 
 
+@parse_app.command("settings")
+def parse_settings(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $settings response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied Mudae `$settings` response."""
+    try:
+        settings = MudaeTextParser().parse_server_settings(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[bold cyan]Server settings[/bold cyan] | Gamemode {settings.game_mode} | "
+        f"{settings.rolls_per_hour} rolls/hour | claim reset {settings.claim_reset_minutes} min\n"
+        f"Claim timer: {settings.claim_reaction_expiry_seconds}s | rare multiplier: "
+        f"{settings.claimed_character_rarity_multiplier} | premium: {settings.server_premium}"
+    )
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -832,6 +851,27 @@ def import_lootstate(
     console.print(
         f"[green]Imported Kakeraloot state for {result.account_name}.[/green] "
         f"Quantity [cyan]{state.quantity_level}[/cyan] · Quality [cyan]{state.quality_level}[/cyan]."
+    )
+
+
+@import_app.command("settings")
+def import_settings(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $settings response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one `$settings` response as server-scoped configuration."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        settings = MudaeTextParser().parse_server_settings(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_server_settings(settings, server, raw_message, source)
+    console.print(
+        f"[green]Imported {len(settings.metrics)} server settings for {result.server_name}.[/green] "
+        f"Gamemode [cyan]{settings.game_mode}[/cyan] | rolls/hour [cyan]{settings.rolls_per_hour}[/cyan]."
     )
 
 
@@ -1268,6 +1308,28 @@ def catalog_lootstate(
     table.add_row("Star branches", f"{state.star_branches} (+{state.starwish_slots_from_branches} $sw)")
     console.print(table)
     console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+
+
+@catalog_app.command("settings")
+def catalog_settings(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+) -> None:
+    """Show the latest imported `$settings` snapshot for one server."""
+    settings = CatalogService().server_settings(server)
+    if settings is None:
+        console.print("[yellow]No $settings snapshot imported for this server yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{settings.server_name} - server settings")
+    table.add_column("Setting", style="green")
+    table.add_column("Mudae value")
+    for metric in settings.metrics:
+        table.add_row(metric.label, metric.value)
+    console.print(table)
+    console.print(
+        f"[dim]Core: Gamemode {settings.game_mode} | {settings.rolls_per_hour} rolls/hour | "
+        f"claim reset {settings.claim_reset_minutes} min | observed "
+        f"{settings.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
+    )
 
 
 @catalog_app.command("imports")

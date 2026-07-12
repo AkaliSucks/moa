@@ -346,6 +346,33 @@ def test_parse_kakeraloot_state_accepts_the_no_loots_message() -> None:
     assert state.quantity_level is None
 
 
+def test_parse_server_settings_reads_core_rules_and_visible_options() -> None:
+    settings = MudaeTextParser().parse_server_settings(
+        "🛠️ Server Settings 🛠️\n"
+        "(Server not premium)\n"
+        "· Prefix: $ ($prefix)\n"
+        "· Lang: en ($lang)\n"
+        "· Claim reset: every 180 min. ($setclaim)\n"
+        "· Exact minute of the reset: xx:14 ($setinterval)\n"
+        "· Reset shifted: by +0 min. ($shifthour)\n"
+        "· Rolls per hour: 10 ($setrolls)\n"
+        "· Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "· Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "· % kakera bonus: +0 ($setkakerabonus)\n"
+        "· % sphere bonus: +0 ($setspherebonus)\n"
+        "· Game mode: 1 ($gamemode)\n"
+        "· This channel instance: 1 ($channelinstance)\n"
+        "· Slash commands: enabled ($toggleslash)"
+    )
+
+    assert not settings.server_premium
+    assert settings.prefix == "$"
+    assert settings.claim_reset_minutes == 180
+    assert settings.rolls_per_hour == 10
+    assert settings.game_mode == 1
+    assert len(settings.metrics) == 13
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")
