@@ -373,6 +373,15 @@ def test_parse_server_settings_reads_core_rules_and_visible_options() -> None:
     assert len(settings.metrics) == 13
 
 
+def test_parse_personal_rare_reads_the_account_override() -> None:
+    state = MudaeTextParser().parse_personal_rare(
+        "Current $setrare value for your server (admin command): 4\n"
+        "Your current $personalrare: 1"
+    )
+
+    assert state.personal_rare_multiplier == 1
+
+
 def test_parse_top_page_rejects_unrecognized_text() -> None:
     with pytest.raises(MudaeParseError, match="No ranked characters"):
         MudaeTextParser().parse_top_page("not a Mudae message")

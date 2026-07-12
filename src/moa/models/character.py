@@ -160,6 +160,12 @@ class KakeraStateSnapshot(MOAModel):
     badges: tuple[BadgeLevel, ...]
 
 
+class PersonalRareSnapshot(MOAModel):
+    """Account-specific claimed-character rarity setting parsed from `$persr`."""
+
+    personal_rare_multiplier: int
+
+
 class TowerStateSnapshot(MOAModel):
     """Account-scoped Kakera Tower state parsed from `$kt`."""
 

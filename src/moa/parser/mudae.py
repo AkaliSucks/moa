@@ -11,6 +11,7 @@ from moa.models.character import (
     BadgeLevel,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    PersonalRareSnapshot,
     ServerSettingMetric,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
@@ -85,6 +86,9 @@ class MudaeTextParser:
         r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
     )
     _KAKERA_BALANCE = re.compile(r"^You have\s+(?P<value>[\d,]+):kakera:!?$", re.IGNORECASE)
+    _PERSONAL_RARE = re.compile(
+        r"(?:Your\s+)?current\s+\$personalrare:\s*(?P<value>\d+)", re.IGNORECASE
+    )
     _BADGE_LEVEL = re.compile(
         r"(?P<name>Bronze|Silver|Gold|Sapphire|Ruby|Emerald|Diamond)\s+"
         r"(?P<level>I|II|III|IV)\s*[·\u00b7]\s*(?P<status>.+)$",
@@ -456,6 +460,13 @@ class MudaeTextParser:
         return KakeraStateSnapshot(
             kakera_balance=self._number(balance.group("value")), badges=tuple(badges)
         )
+
+    def parse_personal_rare(self, text: str) -> PersonalRareSnapshot:
+        """Parse the account-scoped `$personalrare` value from `$persr` output."""
+        match = self._PERSONAL_RARE.search(text)
+        if match is None:
+            raise MudaeParseError("Expected a Mudae $persr response with a current $personalrare value.")
+        return PersonalRareSnapshot(personal_rare_multiplier=int(match.group("value")))
 
     def parse_tower_state(self, text: str) -> TowerStateSnapshot:
         """Parse current level, cost, balance, and owned floors from a copied `$kt` response."""

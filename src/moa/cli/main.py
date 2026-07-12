@@ -256,6 +256,25 @@ def account_overview(
         else "Not imported"
     )
     table.add_row("Kakera balance", balance)
+    if overview.personal_rare_multiplier is None:
+        rare_state = "Not imported"
+    elif overview.personal_rare_multiplier == 0:
+        rare_state = (
+            f"0 (uses server $setrare {overview.server_rare_multiplier})"
+            if overview.server_rare_multiplier is not None
+            else "0 (uses server $setrare; server settings not imported)"
+        )
+    else:
+        server_value = (
+            str(overview.server_rare_multiplier)
+            if overview.server_rare_multiplier is not None
+            else "not imported"
+        )
+        rare_state = (
+            f"{overview.personal_rare_multiplier} ($personalrare override; "
+            f"server $setrare {server_value})"
+        )
+    table.add_row("Claimed-roll rarity", rare_state)
     table.add_row("Badges", f"{overview.max_badge_count}/{overview.badge_count} maxed" if overview.badge_count else "Not imported")
     if overview.tower_level is None:
         table.add_row("Tower", "Not imported")
@@ -571,6 +590,24 @@ def parse_kakera(
     console.print(table)
 
 
+@parse_app.command("personalrare")
+def parse_personalrare(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $persr response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse the account-scoped `$personalrare` value from `$persr`."""
+    try:
+        state = MudaeTextParser().parse_personal_rare(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "server $setrare" if state.personal_rare_multiplier == 0 else "$personalrare override"
+    console.print(
+        f"[bold cyan]Personal rare multiplier:[/bold cyan] {state.personal_rare_multiplier} "
+        f"([dim]{source}[/dim])"
+    )
+
+
 @parse_app.command("towerstate")
 def parse_towerstate(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $kt response."),
@@ -830,6 +867,28 @@ def import_kakera(
     result = CatalogService().import_kakera_state(state, server, account, raw_message, source)
     console.print(
         f"[green]Imported {state.kakera_balance:,} Kakera and {len(state.badges)} badge levels for "
+        f"{result.account_name}.[/green]"
+    )
+
+
+@import_app.command("personalrare")
+def import_personalrare(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose personal rarity is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $persr response."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Persist one `$persr` response as account-scoped roll configuration."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        state = MudaeTextParser().parse_personal_rare(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_personal_rare(state, server, account, raw_message, source)
+    console.print(
+        f"[green]Imported $personalrare {state.personal_rare_multiplier} for "
         f"{result.account_name}.[/green]"
     )
 

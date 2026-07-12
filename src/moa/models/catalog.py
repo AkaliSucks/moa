@@ -275,6 +275,24 @@ class KakeraStateObservation(MOAModel):
     observed_at: datetime
 
 
+class PersonalRareImportResult(MOAModel):
+    """Summary of one persisted `$persr` import."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class PersonalRareObservation(MOAModel):
+    """The latest account-specific claimed-character rarity setting."""
+
+    server_name: str
+    account_name: str
+    personal_rare_multiplier: int
+    observed_at: datetime
+
+
 class TowerStateImportResult(MOAModel):
     """Summary of one persisted `$kt` account-state snapshot."""
 
@@ -321,6 +339,10 @@ class AccountOverview(MOAModel):
     account_name: str
     kakera_balance: int | None
     kakera_balance_source: str | None
+    personal_rare_multiplier: int | None
+    server_rare_multiplier: int | None
+    effective_rare_multiplier: int | None
+    rare_multiplier_source: str | None
     badge_count: int
     max_badge_count: int
     tower_level: int | None

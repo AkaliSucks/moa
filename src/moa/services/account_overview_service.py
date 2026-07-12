@@ -13,6 +13,8 @@ class AccountOverviewService:
     def overview(self, server_name: str, account_name: str) -> AccountOverview:
         """Return one summary using `$k` as the canonical Kakera balance source."""
         kakera = self._catalog.kakera_state(server_name, account_name)
+        personal_rare = self._catalog.personal_rare(server_name, account_name)
+        server_settings = self._catalog.server_settings(server_name)
         tower = self._catalog.tower_state(server_name, account_name)
         loots = self._catalog.kakeraloot_state(server_name, account_name)
         wishlist = self._catalog.wishlist(server_name, account_name)
@@ -39,11 +41,30 @@ class AccountOverviewService:
             )
             kakeraloots_unlocked = not missing_kakeraloot_prerequisites
 
+        server_rare_multiplier = (
+            server_settings.claimed_character_rarity_multiplier if server_settings is not None else None
+        )
+        if personal_rare is None:
+            effective_rare_multiplier = None
+            rare_multiplier_source = None
+        elif personal_rare.personal_rare_multiplier == 0:
+            effective_rare_multiplier = server_rare_multiplier
+            rare_multiplier_source = "$setrare" if server_rare_multiplier is not None else None
+        else:
+            effective_rare_multiplier = personal_rare.personal_rare_multiplier
+            rare_multiplier_source = "$personalrare"
+
         return AccountOverview(
             server_name=server_name.strip(),
             account_name=account_name.strip(),
             kakera_balance=balance,
             kakera_balance_source=source,
+            personal_rare_multiplier=(
+                personal_rare.personal_rare_multiplier if personal_rare is not None else None
+            ),
+            server_rare_multiplier=server_rare_multiplier,
+            effective_rare_multiplier=effective_rare_multiplier,
+            rare_multiplier_source=rare_multiplier_source,
             badge_count=7 if kakera is not None else 0,
             max_badge_count=(
                 sum(badge.max_reached for badge in kakera.badges) if kakera is not None else 0

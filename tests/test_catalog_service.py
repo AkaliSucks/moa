@@ -437,3 +437,21 @@ def test_import_server_settings_persists_server_scoped_configuration(tmp_path) -
     assert settings.game_mode == 1
     assert settings.rolls_per_hour == 10
     assert not settings.server_premium
+
+
+def test_import_personal_rare_persists_an_account_scoped_override(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    raw_message = "Your current $personalrare: 1"
+
+    result = service.import_personal_rare(
+        MudaeTextParser().parse_personal_rare(raw_message),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        raw_message,
+        "clipboard",
+    )
+    state = service.personal_rare("Lake Arrowhead 2025", "ernieuuu")
+
+    assert result.account_name == "ernieuuu"
+    assert state is not None
+    assert state.personal_rare_multiplier == 1

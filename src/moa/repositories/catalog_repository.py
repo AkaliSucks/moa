@@ -25,6 +25,8 @@ from moa.models.catalog import (
     UnavailableCharacterObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
+    PersonalRareImportResult,
+    PersonalRareObservation,
     ServerSettingsImportResult,
     ServerSettingsObservation,
     KakeralootStateImportResult,
@@ -41,6 +43,7 @@ from moa.models.character import (
     HaremKeyPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
+    PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
     PlayerBonusSnapshot,
@@ -147,6 +150,19 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> KakeraStateImportResult: ...
 
     def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None: ...
+
+    def import_personal_rare(
+        self,
+        state: PersonalRareSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> PersonalRareImportResult: ...
+
+    def personal_rare(
+        self, server_name: str, account_name: str
+    ) -> PersonalRareObservation | None: ...
 
     def import_tower_state(
         self,
@@ -1107,6 +1123,69 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_personal_rare(
+        self,
+        state: PersonalRareSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> PersonalRareImportResult:
+        """Store one account-scoped `$persr` observation."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("personal_rare", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO personal_rare_observations (
+                    account_context_id, personal_rare_multiplier, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (account_id, state.personal_rare_multiplier, observed_at.isoformat(), import_event_id),
+            )
+        return PersonalRareImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def personal_rare(
+        self, server_name: str, account_name: str
+    ) -> PersonalRareObservation | None:
+        """Return the latest `$persr` state for one server/account pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT personal_rare_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN personal_rare_observations ON personal_rare_observations.id = (
+                    SELECT observations.id FROM personal_rare_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return PersonalRareObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            personal_rare_multiplier=row["personal_rare_multiplier"],
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def import_tower_state(
         self,
         state: TowerStateSnapshot,
@@ -1554,6 +1633,14 @@ class CatalogRepository:
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
                     kakera_balance INTEGER NOT NULL,
                     badges_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS personal_rare_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    personal_rare_multiplier INTEGER NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

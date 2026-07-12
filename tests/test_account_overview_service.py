@@ -5,10 +5,12 @@ from moa.models.catalog import (
     HaremKeyObservation,
     KakeraStateObservation,
     KakeralootStateObservation,
+    PersonalRareObservation,
+    ServerSettingsObservation,
     TowerStateObservation,
     WishlistObservation,
 )
-from moa.models.character import BadgeLevel
+from moa.models.character import BadgeLevel, ServerSettingMetric
 from moa.services.account_overview_service import AccountOverviewService
 
 
@@ -58,6 +60,30 @@ class InMemoryCatalogService:
             kakera_balance=9210,
             observed_at=now,
         )
+        self._personal_rare = PersonalRareObservation(
+            server_name="Lake Arrowhead 2025",
+            account_name="ernieuuu",
+            personal_rare_multiplier=1,
+            observed_at=now,
+        )
+        self._settings = ServerSettingsObservation(
+            server_name="Lake Arrowhead 2025",
+            server_premium=False,
+            prefix="$",
+            language="en",
+            claim_reset_minutes=180,
+            reset_minute="xx:14",
+            reset_shift_minutes=0,
+            rolls_per_hour=10,
+            claim_reaction_expiry_seconds=45,
+            claimed_character_rarity_multiplier=4,
+            kakera_bonus_percent=0,
+            sphere_bonus_percent=0,
+            game_mode=1,
+            channel_instance=1,
+            metrics=(ServerSettingMetric(label="Prefix", value="$"),),
+            observed_at=now,
+        )
 
     def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation:
         return self._kakera
@@ -67,6 +93,12 @@ class InMemoryCatalogService:
 
     def kakeraloot_state(self, server_name: str, account_name: str) -> KakeralootStateObservation:
         return self._loots
+
+    def personal_rare(self, server_name: str, account_name: str) -> PersonalRareObservation | None:
+        return self._personal_rare
+
+    def server_settings(self, server_name: str) -> ServerSettingsObservation | None:
+        return self._settings
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
         return None
@@ -89,6 +121,9 @@ def test_overview_uses_only_the_canonical_kakera_balance_and_computes_tower_gap(
     assert overview.quantity_level == 23
     assert overview.kakeraloots_unlocked
     assert overview.missing_kakeraloot_prerequisites == ()
+    assert overview.personal_rare_multiplier == 1
+    assert overview.server_rare_multiplier == 4
+    assert overview.effective_rare_multiplier == 1
 
 
 def test_overview_reports_only_unmet_kakeraloot_badge_prerequisites() -> None:
