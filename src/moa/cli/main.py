@@ -1965,6 +1965,26 @@ def catalog_reactions(
     console.print(table)
 
 
+@catalog_app.command("reaction-summary")
+def catalog_reaction_summary(
+    server: str = typer.Option(..., "--server", "-s"),
+    account: str = typer.Option(..., "--account", "-a"),
+) -> None:
+    """Summarize Kakera-reaction receipts stored for one account."""
+    summary = CatalogService().kakera_reaction_summary(server, account)
+    if summary.receipt_count == 0:
+        console.print("[yellow]No reaction receipts imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    console.print(f"[bold cyan]{account} - Kakera reaction summary[/bold cyan]\nReceipts: {summary.receipt_count:,} | Total: +{summary.total_kakera_earned:,} | Average: +{summary.average_kakera_earned:,.1f} | Highest: +{summary.highest_kakera_earned:,}")
+    table = Table()
+    table.add_column("Reaction")
+    table.add_column("Receipts", justify="right")
+    table.add_column("Kakera", justify="right", style="cyan")
+    for label, count, total in summary.by_reaction:
+        table.add_row(label, str(count), f"+{total:,}")
+    console.print(table)
+
+
 @catalog_app.command("rank-history")
 def catalog_rank_history(
     name: str = typer.Argument(..., help="Character name."),

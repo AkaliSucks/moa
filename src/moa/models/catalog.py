@@ -451,6 +451,16 @@ class KakeraReactionObservation(MOAModel):
     observed_at: datetime
 
 
+class KakeraReactionSummary(MOAModel):
+    """Descriptive totals from standalone Kakera-reaction receipts."""
+
+    receipt_count: int
+    total_kakera_earned: int
+    average_kakera_earned: float | None
+    highest_kakera_earned: int | None
+    by_reaction: tuple[tuple[str, int, int], ...]
+
+
 class StoredRollObservation(MOAModel):
     """One timestamped Mudae roll stored for an account context."""
 

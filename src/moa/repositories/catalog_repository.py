@@ -27,6 +27,7 @@ from moa.models.catalog import (
     RollImportResult,
     KakeraReactionImportResult,
     KakeraReactionObservation,
+    KakeraReactionSummary,
     RollStatistics,
     StoredRollObservation,
     KakeraStateImportResult,
@@ -111,6 +112,8 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> KakeraReactionImportResult: ...
 
     def kakera_reactions(self, server_name: str, account_name: str, limit: int) -> tuple[KakeraReactionObservation, ...]: ...
+
+    def kakera_reaction_summary(self, server_name: str, account_name: str) -> KakeraReactionSummary: ...
 
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]: ...
 
@@ -549,6 +552,14 @@ class CatalogRepository:
                 (self._normalize(server_name), self._normalize(account_name), limit),
             ).fetchall()
         return tuple(KakeraReactionObservation(reaction_label=row["reaction_label"], kakera_earned=row["kakera_earned"], observed_at=datetime.fromisoformat(row["observed_at"])) for row in rows)
+
+    def kakera_reaction_summary(self, server_name, account_name):
+        query = " FROM kakera_reaction_observations JOIN account_contexts ON account_contexts.id = kakera_reaction_observations.account_context_id JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id WHERE server_contexts.normalized_name = ? AND account_contexts.normalized_name = ?"
+        params = (self._normalize(server_name), self._normalize(account_name))
+        with self._connection() as connection:
+            totals = connection.execute("SELECT COUNT(*) AS count, COALESCE(SUM(kakera_earned), 0) AS total, AVG(kakera_earned) AS average, MAX(kakera_earned) AS highest" + query, params).fetchone()
+            rows = connection.execute("SELECT reaction_label, COUNT(*) AS count, SUM(kakera_earned) AS total" + query + " GROUP BY reaction_label ORDER BY total DESC", params).fetchall()
+        return KakeraReactionSummary(receipt_count=totals["count"], total_kakera_earned=totals["total"], average_kakera_earned=totals["average"], highest_kakera_earned=totals["highest"], by_reaction=tuple((row["reaction_label"], row["count"], row["total"]) for row in rows))
 
     def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]:
         """Return characters ordered by their most recently imported claim rank."""

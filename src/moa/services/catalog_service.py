@@ -19,6 +19,7 @@ from moa.models.catalog import (
     RollImportResult,
     KakeraReactionImportResult,
     KakeraReactionObservation,
+    KakeraReactionSummary,
     RollStatistics,
     StoredRollObservation,
     KakeraStateImportResult,
@@ -107,6 +108,9 @@ class CatalogService:
 
     def kakera_reactions(self, server_name: str, account_name: str, limit: int = 20) -> tuple[KakeraReactionObservation, ...]:
         return self._repository.kakera_reactions(server_name, account_name, limit)
+
+    def kakera_reaction_summary(self, server_name: str, account_name: str) -> KakeraReactionSummary:
+        return self._repository.kakera_reaction_summary(server_name, account_name)
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None:
         return self._repository.get_profile(name, series)
