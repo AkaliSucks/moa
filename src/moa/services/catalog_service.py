@@ -3,6 +3,7 @@
 from moa.models.catalog import (
     CharacterDetailsImportResult,
     CharacterProfile,
+    CatalogRankSnapshot,
     HaremKeyImportResult,
     HaremKeyObservation,
     HaremScanProgress,
@@ -100,6 +101,11 @@ class CatalogService:
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None:
         return self._repository.get_profile(name, series)
+
+    def rank_history(
+        self, name: str, series: str, limit: int = 20
+    ) -> tuple[CatalogRankSnapshot, ...]:
+        return self._repository.rank_history(name, series, limit)
 
     def recent_imports(self, limit: int = 20) -> tuple[ImportEventSummary, ...]:
         return self._repository.recent_imports(limit)

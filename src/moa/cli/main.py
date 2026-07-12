@@ -1912,6 +1912,31 @@ def catalog_imports(
     console.print(table)
 
 
+@catalog_app.command("rank-history")
+def catalog_rank_history(
+    name: str = typer.Argument(..., help="Character name."),
+    series: str = typer.Option(..., "--series", help="Exact character series."),
+    limit: int = typer.Option(20, "--limit", "-n", min=1, help="Maximum observations to display."),
+) -> None:
+    """Show MOA's directly imported global-rank history for one character."""
+    history = CatalogService().rank_history(name, series, limit)
+    if not history:
+        console.print("[yellow]No rank observations imported for that character/series yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{name} - imported rank history")
+    table.add_column("Observed (UTC)")
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Like rank", justify="right", style="magenta")
+    for observation in history:
+        table.add_row(
+            observation.observed_at.strftime("%Y-%m-%d %H:%M"),
+            _format_optional_rank(observation.claim_rank),
+            _format_optional_rank(observation.like_rank),
+        )
+    console.print(table)
+    console.print("[dim]Only ranks MOA imported from Mudae are shown; this is not a complete rank timeline.[/dim]")
+
+
 @catalog_app.command("delete-import")
 def catalog_delete_import(import_event_id: int) -> None:
     """Delete one mistaken import while preserving all other catalog data."""

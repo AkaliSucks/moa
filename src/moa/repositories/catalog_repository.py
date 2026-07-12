@@ -9,6 +9,7 @@ from typing import Protocol
 from moa.database.sqlite import connect
 from moa.models.catalog import (
     CatalogCharacter,
+    CatalogRankSnapshot,
     CharacterDetailsImportResult,
     CharacterProfile,
     HaremKeyImportResult,
@@ -82,6 +83,10 @@ class CatalogRepositoryProtocol(Protocol):
     def character_count(self) -> int: ...
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None: ...
+
+    def rank_history(
+        self, name: str, series: str, limit: int
+    ) -> tuple[CatalogRankSnapshot, ...]: ...
 
     def import_roll(
         self,
@@ -627,6 +632,36 @@ class CatalogRepository:
                 )
                 for row in server_rows
             ),
+        )
+
+    def rank_history(
+        self, name: str, series: str, limit: int
+    ) -> tuple[CatalogRankSnapshot, ...]:
+        """Return direct global rank observations for one canonical character, newest first."""
+        if limit <= 0:
+            raise ValueError("Rank-history limit must be positive.")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT rank_snapshots.character_id, rank_snapshots.claim_rank, rank_snapshots.like_rank,
+                       rank_snapshots.observed_at, rank_snapshots.import_event_id
+                FROM rank_snapshots
+                JOIN characters ON characters.id = rank_snapshots.character_id
+                WHERE characters.normalized_name = ? AND characters.normalized_series = ?
+                ORDER BY rank_snapshots.observed_at DESC, rank_snapshots.id DESC
+                LIMIT ?
+                """,
+                (self._normalize(name), self._normalize(series), limit),
+            ).fetchall()
+        return tuple(
+            CatalogRankSnapshot(
+                character_id=row["character_id"],
+                claim_rank=row["claim_rank"],
+                like_rank=row["like_rank"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+                import_event_id=row["import_event_id"],
+            )
+            for row in rows
         )
 
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]:

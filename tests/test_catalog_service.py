@@ -540,3 +540,26 @@ def test_roll_statistics_describe_only_imported_roll_observations(tmp_path) -> N
     assert statistics.average_claim_rank == 484.0
     assert statistics.average_kakera_value == 119.5
     assert statistics.highest_kakera_value == 209
+
+
+def test_rank_history_keeps_direct_rank_observations_for_one_character(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    first = (
+        "Mai Sakurajima\nSeishun Buta Yarou\nAnimanga roulette · 900:kakera:\n"
+        "Claim Rank: #10\nLike Rank: #20"
+    )
+    second = (
+        "Mai Sakurajima\nSeishun Buta Yarou\nAnimanga roulette · 900:kakera:\n"
+        "Claim Rank: #9\nLike Rank: #19"
+    )
+
+    service.import_character_details(
+        MudaeTextParser().parse_character_details(first), "Lake", first, "clipboard"
+    )
+    service.import_character_details(
+        MudaeTextParser().parse_character_details(second), "Lake", second, "clipboard"
+    )
+
+    history = service.rank_history("Mai Sakurajima", "Seishun Buta Yarou")
+
+    assert [(point.claim_rank, point.like_rank) for point in history] == [(9, 19), (10, 20)]
