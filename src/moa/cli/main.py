@@ -82,6 +82,7 @@ def account_activity(
     overview = AccountOverviewService().overview(server, account)
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
+    roll_stats = CatalogService().roll_statistics(server, account)
     recent_gains = CatalogService().recent_key_gains(server, account, 1)
     try:
         keyfarm = KeyFarmService().recommend(server, account)
@@ -94,6 +95,10 @@ def account_activity(
     table.add_row("Timer status", readiness.status)
     table.add_row("Available actions", ", ".join(readiness.available_actions) or "None / refresh $tu")
     table.add_row("Reaction receipts", f"{reactions.receipt_count:,} | +{reactions.total_kakera_earned:,} Kakera")
+    table.add_row(
+        "Roll sample",
+        "Not imported" if roll_stats.roll_count == 0 else f"{roll_stats.roll_count:,} rolls | avg {roll_stats.average_kakera_value:,.1f} Kakera | best {_format_optional_rank(roll_stats.best_claim_rank)}",
+    )
     table.add_row(
         "Badges",
         "Not imported" if overview.kakera_balance is None else f"{overview.max_badge_count}/7 maxed",
