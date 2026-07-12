@@ -1,0 +1,56 @@
+[
+  {
+    "id": "BRONZE",
+    "name": "Bronze Key",
+    "minimum_key_count": 1,
+    "maximum_key_count": 2,
+    "description": "The first two keys on a character.",
+    "milestones": [
+      {"key_count": 1, "effects": ["Unlock $embedcolor <character>$#<color hex code> for the character."]},
+      {"key_count": 2, "effects": ["+10% Kakera value."]}
+    ]
+  },
+  {
+    "id": "SILVER",
+    "name": "Silver Key",
+    "minimum_key_count": 3,
+    "maximum_key_count": 5,
+    "description": "Keys three through five on a character.",
+    "milestones": [
+      {"key_count": 3, "effects": ["Teal and Green Kakera on this character are replaced by Orange Kakera."]},
+      {"key_count": 4, "effects": ["+10% Kakera value."]},
+      {"key_count": 5, "effects": ["+10% Kakera value."]}
+    ]
+  },
+  {
+    "id": "GOLD",
+    "name": "Gold Key",
+    "minimum_key_count": 6,
+    "maximum_key_count": 9,
+    "description": "Keys six through nine on a character.",
+    "milestones": [
+      {"key_count": 6, "effects": ["Earn the character's Kakera value when rolling it, subject to the $bku cap."]},
+      {"key_count": 7, "effects": ["+10% Kakera value."]},
+      {"key_count": 8, "effects": ["+10% Kakera value."]},
+      {"key_count": 9, "effects": ["+10% Kakera value."]}
+    ]
+  },
+  {
+    "id": "CHAOS",
+    "name": "Chaos Key",
+    "minimum_key_count": 10,
+    "maximum_key_count": null,
+    "description": "Keys ten and above on a character; key count 10 also makes the character a Soulmate.",
+    "milestones": [
+      {"key_count": 10, "effects": ["Kakera reactions on the character cost half power for the owner.", "Character becomes a Soulmate."]},
+      {"key_count": 11, "effects": ["Each additional key grants +5% Kakera value."]},
+      {"key_count": 25, "effects": ["Second Kakera reaction: 25% chance."]},
+      {"key_count": 50, "effects": ["Purple, Red, and Rainbow reactions give +75% Kakera on this character."]},
+      {"key_count": 100, "effects": ["Second Kakera reaction: 50% chance."]},
+      {"key_count": 200, "effects": ["Purple, Red, and Rainbow reactions give +75% more Kakera (total +150%)."]},
+      {"key_count": 300, "effects": ["Second Kakera reaction: 75% chance."]},
+      {"key_count": 400, "effects": ["Purple, Red, and Rainbow reactions give +100% more Kakera (total +250%)."]},
+      {"key_count": 500, "effects": ["Second Kakera reaction: 100% chance."]}
+    ]
+  }
+]
