@@ -437,6 +437,26 @@ class CatalogRepository:
                     import_event_id,
                 ),
             )
+            if roll.displayed_key_count is not None and roll.displayed_key_type is not None:
+                connection.execute(
+                    """
+                    INSERT INTO harem_key_observations (
+                        account_context_id, character_id, character_name, normalized_character_name,
+                        key_type, key_count, kakera_value, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        character_id,
+                        roll.name,
+                        self._normalize(roll.name),
+                        roll.displayed_key_type,
+                        roll.displayed_key_count,
+                        roll.kakera_value,
+                        observed_at.isoformat(),
+                        import_event_id,
+                    ),
+                )
             if roll.claim_rank is not None:
                 connection.execute(
                     """
