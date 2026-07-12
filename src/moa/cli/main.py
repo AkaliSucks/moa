@@ -1051,6 +1051,25 @@ def import_auto(
     )
 
 
+@import_app.command("reaction")
+def import_reaction(
+    server: str = typer.Option(..., "--server", "-s"),
+    path: Path | None = typer.Argument(None),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c"),
+) -> None:
+    """Parse and persist one standalone Mudae Kakera-reaction receipt."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        receipt = MudaeTextParser().parse_kakera_reaction_receipt(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    result = CatalogService().import_kakera_reaction(
+        receipt, server, raw_message, "clipboard" if clipboard else f"file:{path}"
+    )
+    console.print(f"[green]Imported +{receipt.kakera_earned:,} Kakera for {result.account_name}.[/green]")
+
+
 @import_app.command("top")
 def import_top(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
@@ -1924,6 +1943,25 @@ def catalog_imports(
             import_event.source,
             import_event.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
+    console.print(table)
+
+
+@catalog_app.command("reactions")
+def catalog_reactions(
+    server: str = typer.Option(..., "--server", "-s"),
+    account: str = typer.Option(..., "--account", "-a"),
+) -> None:
+    """Show recent standalone Kakera payouts reported by Mudae."""
+    reactions = CatalogService().kakera_reactions(server, account)
+    if not reactions:
+        console.print("[yellow]No reaction receipts imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{account} - Kakera reaction payouts")
+    table.add_column("Observed (UTC)")
+    table.add_column("Reaction")
+    table.add_column("Kakera", justify="right", style="cyan")
+    for reaction in reactions:
+        table.add_row(reaction.observed_at.strftime("%Y-%m-%d %H:%M"), reaction.reaction_label, f"+{reaction.kakera_earned:,}")
     console.print(table)
 
 

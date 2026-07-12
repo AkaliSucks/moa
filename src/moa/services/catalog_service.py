@@ -17,6 +17,8 @@ from moa.models.catalog import (
     RollabilityImportResult,
     UnavailableCharacterObservation,
     RollImportResult,
+    KakeraReactionImportResult,
+    KakeraReactionObservation,
     RollStatistics,
     StoredRollObservation,
     KakeraStateImportResult,
@@ -51,6 +53,7 @@ from moa.models.character import (
     PlayerBonusSnapshot,
     TopPage,
     RollObservation,
+    KakeraReactionReceipt,
     WishlistSnapshot,
     UnavailableCharacterPage,
 )
@@ -98,6 +101,12 @@ class CatalogService:
 
     def roll_statistics(self, server_name: str, account_name: str) -> RollStatistics:
         return self._repository.roll_statistics(server_name, account_name)
+
+    def import_kakera_reaction(self, receipt: KakeraReactionReceipt, server_name: str, raw_message: str, source: str) -> KakeraReactionImportResult:
+        return self._repository.import_kakera_reaction(receipt, server_name, raw_message, source)
+
+    def kakera_reactions(self, server_name: str, account_name: str, limit: int = 20) -> tuple[KakeraReactionObservation, ...]:
+        return self._repository.kakera_reactions(server_name, account_name, limit)
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None:
         return self._repository.get_profile(name, series)

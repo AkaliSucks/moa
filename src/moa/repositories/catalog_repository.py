@@ -25,6 +25,8 @@ from moa.models.catalog import (
     RollabilityImportResult,
     UnavailableCharacterObservation,
     RollImportResult,
+    KakeraReactionImportResult,
+    KakeraReactionObservation,
     RollStatistics,
     StoredRollObservation,
     KakeraStateImportResult,
@@ -60,6 +62,7 @@ from moa.models.character import (
     PlayerBonusSnapshot,
     TopPage,
     RollObservation,
+    KakeraReactionReceipt,
     UnavailableCharacterPage,
     WishlistSnapshot,
 )
@@ -102,6 +105,12 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> tuple[StoredRollObservation, ...]: ...
 
     def roll_statistics(self, server_name: str, account_name: str) -> RollStatistics: ...
+
+    def import_kakera_reaction(
+        self, receipt: KakeraReactionReceipt, server_name: str, raw_message: str, source: str
+    ) -> KakeraReactionImportResult: ...
+
+    def kakera_reactions(self, server_name: str, account_name: str, limit: int) -> tuple[KakeraReactionObservation, ...]: ...
 
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]: ...
 
@@ -517,6 +526,29 @@ class CatalogRepository:
             average_kakera_value=row["average_kakera_value"],
             highest_kakera_value=row["highest_kakera_value"],
         )
+
+    def import_kakera_reaction(self, receipt, server_name, raw_message, source):
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            event_id = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("kakera_reaction", source, observed_at.isoformat(), raw_message),
+            ).lastrowid
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, receipt.account_name, observed_at)
+            connection.execute(
+                "INSERT INTO kakera_reaction_observations (account_context_id, reaction_label, kakera_earned, observed_at, import_event_id) VALUES (?, ?, ?, ?, ?)",
+                (account_id, receipt.reaction_label, receipt.kakera_earned, observed_at.isoformat(), event_id),
+            )
+        return KakeraReactionImportResult(import_event_id=event_id, server_name=server_name.strip(), account_name=receipt.account_name, observed_at=observed_at)
+
+    def kakera_reactions(self, server_name, account_name, limit):
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT reaction_label, kakera_earned, observed_at FROM kakera_reaction_observations JOIN account_contexts ON account_contexts.id = kakera_reaction_observations.account_context_id JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id WHERE server_contexts.normalized_name = ? AND account_contexts.normalized_name = ? ORDER BY kakera_reaction_observations.id DESC LIMIT ?",
+                (self._normalize(server_name), self._normalize(account_name), limit),
+            ).fetchall()
+        return tuple(KakeraReactionObservation(reaction_label=row["reaction_label"], kakera_earned=row["kakera_earned"], observed_at=datetime.fromisoformat(row["observed_at"])) for row in rows)
 
     def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]:
         """Return characters ordered by their most recently imported claim rank."""
@@ -1920,6 +1952,15 @@ class CatalogRepository:
                     kakera_value INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS kakera_reaction_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL,
+                    reaction_label TEXT NOT NULL,
+                    kakera_earned INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS harem_key_observations (

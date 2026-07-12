@@ -434,6 +434,23 @@ class RollImportResult(MOAModel):
     observed_at: datetime
 
 
+class KakeraReactionImportResult(MOAModel):
+    """Summary of one persisted standalone Kakera-reaction receipt."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class KakeraReactionObservation(MOAModel):
+    """One Kakera payout directly reported by Mudae after a reaction."""
+
+    reaction_label: str
+    kakera_earned: int
+    observed_at: datetime
+
+
 class StoredRollObservation(MOAModel):
     """One timestamped Mudae roll stored for an account context."""
 
