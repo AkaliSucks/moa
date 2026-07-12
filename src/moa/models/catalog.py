@@ -276,6 +276,25 @@ class KakeraStateObservation(MOAModel):
     observed_at: datetime
 
 
+class KakeraProgressPoint(MOAModel):
+    """One historical `$k` observation used for progression measurement."""
+
+    kakera_balance: int
+    max_badge_count: int
+    observed_at: datetime
+
+
+class KakeraProgressSummary(MOAModel):
+    """Measured Kakera progression from imported `$k` snapshots."""
+
+    server_name: str
+    account_name: str
+    observations: tuple[KakeraProgressPoint, ...]
+    kakera_change: int | None
+    elapsed_seconds: int | None
+    kakera_per_day: float | None
+
+
 class PersonalRareImportResult(MOAModel):
     """Summary of one persisted `$persr` import."""
 

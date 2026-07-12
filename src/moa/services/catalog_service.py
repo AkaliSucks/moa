@@ -17,6 +17,7 @@ from moa.models.catalog import (
     UnavailableCharacterObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
+    KakeraProgressPoint,
     PersonalRareImportResult,
     PersonalRareObservation,
     ServerSettingsImportResult,
@@ -185,6 +186,11 @@ class CatalogService:
 
     def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None:
         return self._repository.kakera_state(server_name, account_name)
+
+    def kakera_history(
+        self, server_name: str, account_name: str
+    ) -> tuple[KakeraProgressPoint, ...]:
+        return self._repository.kakera_history(server_name, account_name)
 
     def import_personal_rare(
         self,

@@ -25,6 +25,7 @@ from moa.models.catalog import (
     UnavailableCharacterObservation,
     KakeraStateImportResult,
     KakeraStateObservation,
+    KakeraProgressPoint,
     PersonalRareImportResult,
     PersonalRareObservation,
     ServerSettingsImportResult,
@@ -156,6 +157,10 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> KakeraStateImportResult: ...
 
     def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None: ...
+
+    def kakera_history(
+        self, server_name: str, account_name: str
+    ) -> tuple[KakeraProgressPoint, ...]: ...
 
     def import_personal_rare(
         self,
@@ -1148,6 +1153,33 @@ class CatalogRepository:
             kakera_balance=row["kakera_balance"],
             badges=tuple(json.loads(row["badges_json"])),
             observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    def kakera_history(
+        self, server_name: str, account_name: str
+    ) -> tuple[KakeraProgressPoint, ...]:
+        """Return every imported `$k` snapshot in chronological order."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT kakera_state_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM kakera_state_observations
+                JOIN account_contexts ON account_contexts.id = kakera_state_observations.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                ORDER BY kakera_state_observations.observed_at ASC, kakera_state_observations.id ASC
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchall()
+        return tuple(
+            KakeraProgressPoint(
+                kakera_balance=row["kakera_balance"],
+                max_badge_count=sum(badge["max_reached"] for badge in json.loads(row["badges_json"])),
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
         )
 
     def import_personal_rare(

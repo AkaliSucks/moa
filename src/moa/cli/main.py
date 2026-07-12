@@ -16,6 +16,7 @@ from moa.services.key_progress_service import KeyProgressService
 from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
 from moa.services.reaction_service import ReactionService
+from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.tower_service import TowerService
@@ -394,6 +395,39 @@ def account_compare(
         table.add_row(row.label, row.left_value, row.right_value)
     console.print(table)
     console.print("[dim]Only imported state is compared; 'Not imported' is never treated as zero.[/dim]")
+
+
+@account_app.command("progress")
+def account_progress(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose imported $k history to measure."),
+) -> None:
+    """Measure Kakera progression from the account's timestamped `$k` imports."""
+    progress = ProgressService().kakera_progress(server, account)
+    if not progress.observations:
+        console.print("[yellow]No $k snapshots imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{progress.account_name} - Kakera progression")
+    table.add_column("Observed (UTC)")
+    table.add_column("Kakera", justify="right", style="cyan")
+    table.add_column("Max badges", justify="right")
+    for point in progress.observations:
+        table.add_row(
+            point.observed_at.strftime("%Y-%m-%d %H:%M"),
+            f"{point.kakera_balance:,}",
+            str(point.max_badge_count),
+        )
+    console.print(table)
+    if progress.kakera_change is None:
+        console.print("[dim]Import another $k snapshot later to measure a change rate.[/dim]")
+        return
+    hours, remaining_seconds = divmod(progress.elapsed_seconds or 0, 3_600)
+    minutes = remaining_seconds // 60
+    rate = f"{progress.kakera_per_day:,.1f} Kakera/day" if progress.kakera_per_day is not None else "N/A"
+    console.print(
+        f"[bold]Change:[/bold] {progress.kakera_change:+,} Kakera over {hours}h {minutes} min | "
+        f"[bold]Measured rate:[/bold] {rate}"
+    )
 
 
 @action_app.command("now")
