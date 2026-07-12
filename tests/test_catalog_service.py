@@ -542,6 +542,19 @@ def test_roll_statistics_describe_only_imported_roll_observations(tmp_path) -> N
     assert statistics.highest_kakera_value == 209
 
 
+def test_recent_key_gains_uses_only_key_states_displayed_on_rolls(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    raw = "Mai Sakurajima\nSeishun Buta Yarou\n+1,386:kakera:\n:goldkey: (7) +10% kakera value"
+    service.import_roll(MudaeTextParser().parse_roll(raw), "Lake", "ernieuuu", raw, "clipboard")
+
+    gains = service.recent_key_gains("Lake", "ernieuuu")
+
+    assert len(gains) == 1
+    assert gains[0].character_name == "Mai Sakurajima"
+    assert gains[0].key_count == 7
+    assert gains[0].key_type == "gold"
+
+
 def test_rank_history_keeps_direct_rank_observations_for_one_character(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     first = (

@@ -142,6 +142,11 @@ class CatalogService:
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
         return self._repository.harem_keys(server_name, account_name)
 
+    def recent_key_gains(
+        self, server_name: str, account_name: str, limit: int = 20
+    ) -> tuple[HaremKeyObservation, ...]:
+        return self._repository.recent_key_gains(server_name, account_name, limit)
+
     def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress:
         return self._repository.begin_harem_scan(server_name, account_name)
 

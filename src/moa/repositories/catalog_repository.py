@@ -131,6 +131,10 @@ class CatalogRepositoryProtocol(Protocol):
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]: ...
 
+    def recent_key_gains(
+        self, server_name: str, account_name: str, limit: int
+    ) -> tuple[HaremKeyObservation, ...]: ...
+
     def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress: ...
 
     def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None: ...
@@ -907,6 +911,50 @@ class CatalogRepository:
                 ),
                 key_type=row["key_type"],
                 key_count=row["key_count"],
+                kakera_value=row["kakera_value"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
+        )
+
+    def recent_key_gains(
+        self, server_name: str, account_name: str, limit: int
+    ) -> tuple[HaremKeyObservation, ...]:
+        """Return key states directly observed on imported rolls, newest first."""
+        if limit <= 0:
+            raise ValueError("Key-gain limit must be positive.")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT observations.character_name, observations.key_type,
+                       observations.key_count, observations.kakera_value,
+                       observations.observed_at, characters.id AS character_id,
+                       characters.name, characters.series, characters.gender,
+                       characters.roulette
+                FROM harem_key_observations AS observations
+                JOIN import_events ON import_events.id = observations.import_event_id
+                JOIN account_contexts ON account_contexts.id = observations.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                LEFT JOIN characters ON characters.id = observations.character_id
+                WHERE import_events.kind = 'roll'
+                  AND server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                ORDER BY observations.id DESC
+                LIMIT ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name), limit),
+            ).fetchall()
+        return tuple(
+            HaremKeyObservation(
+                character_name=row["character_name"],
+                character=(
+                    CatalogCharacter(
+                        id=row["character_id"], name=row["name"], series=row["series"],
+                        gender=row["gender"], roulette=row["roulette"]
+                    )
+                    if row["character_id"] is not None else None
+                ),
+                key_type=row["key_type"], key_count=row["key_count"],
                 kakera_value=row["kakera_value"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )

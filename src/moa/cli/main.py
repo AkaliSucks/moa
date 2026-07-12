@@ -1689,6 +1689,34 @@ def catalog_keyprogress(
     )
 
 
+@catalog_app.command("key-gains")
+def catalog_key_gains(
+    server: str = typer.Option(..., "--server", "-s"),
+    account: str = typer.Option(..., "--account", "-a"),
+    limit: int = typer.Option(20, "--limit", "-n", min=1),
+) -> None:
+    """Show recent key states directly observed on imported rolls."""
+    observations = CatalogService().recent_key_gains(server, account, limit)
+    if not observations:
+        console.print("[yellow]No key gains imported from rolls for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    table = Table(title=f"{account} - recent key gains")
+    table.add_column("Observed (UTC)")
+    table.add_column("Character", style="green")
+    table.add_column("Keys", justify="right", style="cyan")
+    table.add_column("Tier")
+    table.add_column("Kakera", justify="right", style="magenta")
+    for observation in observations:
+        table.add_row(
+            observation.observed_at.strftime("%Y-%m-%d %H:%M"),
+            observation.character_name,
+            str(observation.key_count),
+            observation.key_type.title(),
+            _format_optional_number(observation.kakera_value),
+        )
+    console.print(table)
+
+
 @recommend_app.command("keyfarm")
 def recommend_keyfarm(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
