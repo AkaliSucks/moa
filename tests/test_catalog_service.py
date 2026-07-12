@@ -502,6 +502,38 @@ def test_import_timer_state_persists_a_short_lived_account_snapshot(tmp_path) ->
     assert state.snapshot.kakera_stock == 12114
 
 
+def test_kakera_reaction_summary_groups_receipts_and_scopes_account(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    parser = MudaeTextParser()
+    lake = "Lake Arrowhead 2025"
+
+    for raw_message in (
+        ":kakeraY: ernieuuu +319 ($k)",
+        ":kakeraG: ernieuuu +497 ($k)",
+        ":kakeraY: ernieuuu +100 ($k)",
+    ):
+        service.import_kakera_reaction(
+            parser.parse_kakera_reaction_receipt(raw_message),
+            lake,
+            raw_message,
+            "clipboard",
+        )
+    service.import_kakera_reaction(
+        parser.parse_kakera_reaction_receipt(":kakeraG: cute_beagle_91130 +999 ($k)"),
+        lake,
+        ":kakeraG: cute_beagle_91130 +999 ($k)",
+        "clipboard",
+    )
+
+    summary = service.kakera_reaction_summary(lake, "ernieuuu")
+
+    assert summary.receipt_count == 3
+    assert summary.total_kakera_earned == 916
+    assert summary.average_kakera_earned == pytest.approx(305.3333333333)
+    assert summary.highest_kakera_earned == 497
+    assert summary.by_reaction == ((":kakeraG:", 1, 497), (":kakeraY:", 2, 419))
+
+
 def test_import_roll_keeps_rankless_and_ranked_observations_in_history(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     rankless = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
