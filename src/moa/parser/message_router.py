@@ -17,6 +17,12 @@ class MudaeMessageRouter:
     def detect(self, text: str) -> MudaeMessageDetection:
         """Return a supported kind or `unknown`; never force a best guess."""
         normalized = text.casefold()
+        try:
+            self._parser.parse_kakera_reaction_receipt(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("reaction_receipt", "Mudae Kakera reaction amount and recipient found.")
         if "server settings" in normalized and "$setclaim" in normalized:
             return self._detected("settings", "Mudae server-settings header and configuration commands found.")
         if "each $kl costs" in normalized and "quantity or quality costs" in normalized:

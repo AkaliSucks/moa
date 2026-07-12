@@ -41,6 +41,14 @@ class RollObservation(MOAModel):
     kakera_value: int | None
 
 
+class KakeraReactionReceipt(MOAModel):
+    """One standalone Kakera amount reported after a player reacts."""
+
+    reaction_label: str
+    account_name: str
+    kakera_earned: int
+
+
 class MudaeMessageDetection(MOAModel):
     """A conservative classification for one raw Mudae message."""
 

@@ -160,6 +160,16 @@ def test_parse_roll_without_claim_rank_when_rank_display_is_disabled() -> None:
     assert roll.kakera_value == 30
 
 
+def test_parse_kakera_reaction_receipt() -> None:
+    receipt = MudaeTextParser().parse_kakera_reaction_receipt(
+        ":kakeraY: cute_beagle_91130 +497 ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraY:"
+    assert receipt.account_name == "cute_beagle_91130"
+    assert receipt.kakera_earned == 497
+
+
 def test_parse_keyed_harem_page_from_mmy_output() -> None:
     page = MudaeTextParser().parse_harem_key_page(HAREM_KEY_PAGE)
 

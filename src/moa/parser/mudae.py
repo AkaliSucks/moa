@@ -8,6 +8,7 @@ import re
 
 from moa.models.character import (
     CharacterDetails,
+    KakeraReactionReceipt,
     BadgeLevel,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
@@ -54,6 +55,10 @@ class MudaeTextParser:
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _KAKERA = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _KAKERA_REACTION_RECEIPT = re.compile(
+        r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
+        re.IGNORECASE,
+    )
     _HAREM_KEY_ENTRY = re.compile(
         r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
         r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
@@ -299,6 +304,21 @@ class MudaeTextParser:
             series=lines[claims_index - 1],
             claim_rank=self._number(claims_line.group("rank")),
             kakera_value=self._number(kakera.group("value")) if kakera else None,
+        )
+
+    def parse_kakera_reaction_receipt(self, text: str) -> KakeraReactionReceipt:
+        """Parse the standalone Mudae message shown after a Kakera reaction."""
+        lines = self._lines(text)
+        receipt = next(
+            (self._KAKERA_REACTION_RECEIPT.match(line) for line in lines if self._KAKERA_REACTION_RECEIPT.match(line)),
+            None,
+        )
+        if receipt is None:
+            raise MudaeParseError("Expected a Mudae Kakera reaction receipt such as `:kakeraY: user +497 ($k)`.")
+        return KakeraReactionReceipt(
+            reaction_label=receipt.group("reaction"),
+            account_name=receipt.group("account").strip(),
+            kakera_earned=self._number(receipt.group("value")),
         )
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:

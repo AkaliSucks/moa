@@ -19,6 +19,12 @@ def test_router_detects_rankless_rolls_after_more_specific_formats() -> None:
     assert detection.kind == "roll"
 
 
+def test_router_detects_a_kakera_reaction_receipt() -> None:
+    detection = MudaeMessageRouter().detect(":kakeraY: cute_beagle_91130 +497 ($k)")
+
+    assert detection.kind == "reaction_receipt"
+
+
 def test_router_keeps_ambiguous_messages_unknown() -> None:
     detection = MudaeMessageRouter().detect("Mudae is online. Have fun!")
 

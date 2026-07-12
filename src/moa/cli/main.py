@@ -708,6 +708,21 @@ def parse_roll(
     console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
 
 
+@parse_app.command("reaction")
+def parse_kakera_reaction(
+    path: Path | None = typer.Argument(None, help="Text file containing one Mudae reaction receipt."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse a standalone Mudae Kakera-reaction receipt."""
+    try:
+        receipt = MudaeTextParser().parse_kakera_reaction_receipt(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(f"[bold cyan]{receipt.account_name}[/bold cyan] received [green]+{receipt.kakera_earned:,} Kakera[/green]")
+    console.print(f"Reaction label: {receipt.reaction_label}")
+
+
 @app.command("analyze-roll")
 def analyze_roll(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
