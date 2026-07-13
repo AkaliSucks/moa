@@ -10,7 +10,7 @@ from typing import Any
 import discord
 
 from moa.core.config import ConfigAccount, ConfigService
-from moa.parser.mudae import MudaeTextParser
+from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
@@ -24,6 +24,7 @@ class DiscordCommandContext:
     user_id: str
     identity: ConfigAccount
     captured_at: float
+    expected_kind: str | None = None
 
 
 class DiscordListenerService:
@@ -117,6 +118,7 @@ class DiscordListenerService:
             user_id=str(message.author.id),
             identity=identity,
             captured_at=time.monotonic(),
+            expected_kind=self._expected_kind_for_command(content.split(maxsplit=1)[0]),
         )
         self._logger.info(
             "Tracking Discord command %s for %s / %s",
@@ -149,8 +151,8 @@ class DiscordListenerService:
         raw_message = self.extract_message_text(message)
         if not raw_message:
             return
-        detection = self._router.detect(raw_message)
-        if detection.kind == "unknown":
+        kind = self._resolve_message_kind(context.expected_kind, raw_message)
+        if kind is None:
             return
         payload_key = (message.id, raw_message)
         if payload_key in self._seen_payloads:
@@ -160,7 +162,7 @@ class DiscordListenerService:
             self._seen_payloads = set(list(self._seen_payloads)[-1000:])
 
         scan_id = self._scan_id_for_page(
-            detection.kind,
+            kind,
             raw_message,
             context.identity,
         )
@@ -174,6 +176,7 @@ class DiscordListenerService:
                 context.identity.server,
                 context.identity.account,
                 harem_scan_id=scan_id,
+                detected_kind=kind,
             )
         except Exception as error:  # Keep one malformed Discord payload from stopping the listener.
             self._logger.warning("Could not import Mudae message %s: %s", message.id, error)
@@ -184,11 +187,48 @@ class DiscordListenerService:
             result.message,
         )
         self._complete_scan_if_last_page(
-            detection.kind,
+            kind,
             raw_message,
             context.identity,
             scan_id,
         )
+
+    def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
+        detected_kind = self._router.detect(raw_message).kind
+        if expected_kind is None or expected_kind == detected_kind:
+            return None if detected_kind == "unknown" else detected_kind
+        if expected_kind not in self._SCAN_KINDS:
+            return None if detected_kind == "unknown" else detected_kind
+        try:
+            self._parse_scan_page(expected_kind, raw_message)
+        except MudaeParseError:
+            self._logger.debug(
+                "Ignoring Mudae response classified as %s while expecting %s",
+                detected_kind,
+                expected_kind,
+            )
+            return None
+        return expected_kind
+
+    def _parse_scan_page(self, kind: str, raw_message: str) -> object:
+        if kind == "harem":
+            return self._parser.parse_harem_key_page(raw_message)
+        if kind == "ranked_harem":
+            return self._parser.parse_ranked_harem_page(raw_message)
+        if kind == "antidisable":
+            return self._parser.parse_antidisable_page(raw_message)
+        raise MudaeParseError(f"Unsupported listener scan kind: {kind}")
+
+    @staticmethod
+    def _expected_kind_for_command(command: str) -> str | None:
+        normalized = command.casefold().lstrip("$/")
+        if normalized.startswith("mmr"):
+            return "ranked_harem"
+        if normalized.startswith("mmy") or normalized == "mm":
+            return "harem"
+        if normalized.startswith("adl"):
+            return "antidisable"
+        return None
 
     def _identity_for_ids(self, server_id: str, user_id: str) -> ConfigAccount | None:
         return self._config.identity_for_discord_ids(server_id, user_id, self._profile_name)
@@ -277,6 +317,10 @@ class DiscordListenerService:
         if content and content.strip():
             parts.append(content.strip())
         for embed in getattr(message, "embeds", ()) or ():
+            author = getattr(embed, "author", None)
+            author_name = getattr(author, "name", None)
+            if author_name and author_name.strip():
+                parts.append(author_name.strip())
             for value in (
                 getattr(embed, "title", None),
                 getattr(embed, "description", None),

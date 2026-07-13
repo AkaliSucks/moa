@@ -12,6 +12,7 @@ def test_extract_message_text_flattens_discord_embed_content() -> None:
         content="",
         embeds=(
             SimpleNamespace(
+                author=SimpleNamespace(name="ernieuuu's harem"),
                 title="Mudae",
                 description="#1 - Zero Two - DARLING in the FRANXX",
                 fields=(SimpleNamespace(name="Page", value="1 / 67"),),
@@ -22,7 +23,10 @@ def test_extract_message_text_flattens_discord_embed_content() -> None:
 
     text = DiscordListenerService.extract_message_text(message)
 
-    assert text == "Mudae\n#1 - Zero Two - DARLING in the FRANXX\nPage\n1 / 67\nMudae"
+    assert text == (
+        "ernieuuu's harem\nMudae\n#1 - Zero Two - DARLING in the FRANXX\n"
+        "Page\n1 / 67\nMudae"
+    )
 
 
 def test_listener_page_metadata_reads_supported_scan_pages(tmp_path) -> None:
@@ -49,6 +53,12 @@ def test_listener_rejects_example_bot_token(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Replace YOUR_DISCORD_BOT_TOKEN"):
         listener.run("YOUR_DISCORD_BOT_TOKEN")
+
+
+def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
+    assert DiscordListenerService._expected_kind_for_command("$mmrkty+") == "ranked_harem"
+    assert DiscordListenerService._expected_kind_for_command("$mmyk") == "harem"
+    assert DiscordListenerService._expected_kind_for_command("$adl") == "antidisable"
 
 
 def test_listener_presence_uses_watching_status_and_truncates_custom_text(tmp_path) -> None:

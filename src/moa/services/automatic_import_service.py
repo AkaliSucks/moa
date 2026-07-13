@@ -26,9 +26,10 @@ class AutomaticImportService:
         server_name: str | None = None,
         account_name: str | None = None,
         harem_scan_id: int | None = None,
+        detected_kind: str | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
-        kind = self._router.detect(raw_message).kind
+        kind = detected_kind or self._router.detect(raw_message).kind
         if kind == "unknown":
             raise ValueError("This message is not a supported Mudae import format.")
         if kind == "top":
