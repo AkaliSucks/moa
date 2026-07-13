@@ -414,6 +414,12 @@ class DiscordListenerService:
             except MudaeParseError:
                 return None
             return "lootstate"
+        if expected_kind == "im":
+            try:
+                self._parser.parse_character_details(raw_message)
+            except MudaeParseError:
+                return None
+            return "im"
         if expected_kind in {"settings", "bonus"}:
             return expected_kind if detected_kind == expected_kind else None
         if expected_kind == "reaction_receipt":
@@ -495,6 +501,8 @@ class DiscordListenerService:
             return "towerstate"
         if normalized in {"lk", "kakeraloots"}:
             return "lootstate"
+        if normalized in {"im", "info"}:
+            return "im"
         if normalized.startswith("dl"):
             return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:

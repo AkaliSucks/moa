@@ -95,6 +95,7 @@ class CatalogRepositoryProtocol(Protocol):
         server_name: str,
         raw_message: str,
         source: str,
+        account_name: str | None = None,
     ) -> CharacterDetailsImportResult: ...
 
     def top(self, limit: int | None) -> tuple[RankedCatalogCharacter, ...]: ...
@@ -106,6 +107,8 @@ class CatalogRepositoryProtocol(Protocol):
     def character_count(self) -> int: ...
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None: ...
+
+    def server_kakera_values(self, server_name: str) -> dict[int, int | None]: ...
 
     def rank_history(
         self, name: str, series: str, limit: int
@@ -497,6 +500,7 @@ class CatalogRepository:
         server_name: str,
         raw_message: str,
         source: str,
+        account_name: str | None = None,
     ) -> CharacterDetailsImportResult:
         """Upsert one `$im` response and preserve its server-specific value."""
         observed_at = datetime.now(timezone.utc)
@@ -568,6 +572,27 @@ class CatalogRepository:
                     import_event_id,
                 ),
             )
+            if account_name and details.key_type is not None and details.key_count is not None:
+                account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+                connection.execute(
+                    """
+                    INSERT INTO harem_key_observations (
+                        account_context_id, character_id, character_name, normalized_character_name,
+                        key_type, key_count, kakera_value, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        character_id,
+                        details.name,
+                        self._normalize(details.name),
+                        details.key_type,
+                        details.key_count,
+                        details.kakera_value,
+                        observed_at.isoformat(),
+                        import_event_id,
+                    ),
+                )
 
         return CharacterDetailsImportResult(
             import_event_id=import_event_id,
@@ -927,6 +952,28 @@ class CatalogRepository:
                 for row in server_rows
             ),
         )
+
+    def server_kakera_values(self, server_name: str) -> dict[int, int | None]:
+        """Return the newest server-scoped Kakera value for each character."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT observations.character_id, observations.kakera_value
+                FROM server_character_observations AS observations
+                JOIN server_contexts ON server_contexts.id = observations.server_context_id
+                WHERE server_contexts.normalized_name = ?
+                  AND observations.id = (
+                      SELECT latest.id
+                      FROM server_character_observations AS latest
+                      WHERE latest.server_context_id = observations.server_context_id
+                        AND latest.character_id = observations.character_id
+                      ORDER BY latest.id DESC
+                      LIMIT 1
+                  )
+                """,
+                (self._normalize(server_name),),
+            ).fetchall()
+        return {int(row["character_id"]): row["kakera_value"] for row in rows}
 
     def rank_history(
         self, name: str, series: str, limit: int
@@ -2510,6 +2557,26 @@ class CatalogRepository:
                 "DELETE FROM server_character_observations WHERE import_event_id = ?",
                 (import_event_id,),
             )
+            for table in (
+                "roll_observations",
+                "kakera_reaction_observations",
+                "player_bonus_observations",
+                "wishlist_observations",
+                "disablelist_observations",
+                "unavailable_character_observations",
+                "kakera_state_observations",
+                "personal_rare_observations",
+                "tower_state_observations",
+                "timer_state_observations",
+                "sphere_result_observations",
+                "kakeraloot_state_observations",
+                "kakeraloot_settings_observations",
+                "server_settings_observations",
+            ):
+                connection.execute(
+                    f"DELETE FROM {table} WHERE import_event_id = ?",
+                    (import_event_id,),
+                )
             connection.execute(
                 "DELETE FROM harem_key_observations WHERE import_event_id = ?",
                 (import_event_id,),

@@ -70,7 +70,9 @@ class TopSearchService:
         topo_owner_names: dict[str, str | None] | None = None
         wishlist_names: set[str] | None = None
         antidisable_series_names: set[str] | None = None
+        server_kakera_values: dict[int, int | None] = {}
         if scoped:
+            server_kakera_values = self._catalog.server_kakera_values(server_name)
             self_account_names = {
                 account.casefold()
                 for account in (owned_account_names or (account_name,))
@@ -181,6 +183,11 @@ class TopSearchService:
                 if scoped
                 else None
             )
+            kakera_value = (
+                key_observation.kakera_value
+                if key_observation is not None and key_observation.kakera_value is not None
+                else server_kakera_values.get(entry.character.id)
+            )
             if owned_only and not owned:
                 continue
             if unowned_only and owned:
@@ -205,7 +212,7 @@ class TopSearchService:
                     rollability_status=rollability_status,
                     key_type=key_observation.key_type if key_observation else None,
                     key_count=key_observation.key_count if key_observation else None,
-                    kakera_value=key_observation.kakera_value if key_observation else None,
+                    kakera_value=kakera_value,
                     roulette_types=(owned_observation.roulette_types if owned_observation else ()),
                 )
             )

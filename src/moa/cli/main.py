@@ -1146,6 +1146,8 @@ def parse_im(
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(character.claim_rank)}")
     console.print(f"[bold]Like rank:[/bold] {_format_optional_rank(character.like_rank)}")
     console.print(f"[bold]Kakera value:[/bold] {format_mudae_kakera(character.kakera_value)}")
+    console.print(f"[bold]Gender:[/bold] {format_mudae_gender(character.gender)}")
+    console.print(f"[bold]Key:[/bold] {format_mudae_key_marker(character.key_type, character.key_count)}")
 
 
 @parse_app.command("roll")
@@ -1611,6 +1613,7 @@ def import_top(
 @import_app.command("im")
 def import_im(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the server this $im came from."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account that ran `$im`, if key evidence should be account-scoped."),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $im response."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
@@ -1623,7 +1626,7 @@ def import_im(
         raise typer.Exit(1) from error
 
     source = "clipboard" if clipboard else f"file:{path}"
-    result = CatalogService().import_character_details(details, server, raw_message, source)
+    result = CatalogService().import_character_details(details, server, raw_message, source, account)
     console.print(
         f"[green]Imported {details.name} for {result.server_name}.[/green] "
         f"Recorded [cyan]{format_mudae_kakera(details.kakera_value)}[/cyan]."

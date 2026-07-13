@@ -68,6 +68,7 @@ class InMemoryTopCatalog:
         )
         self._owned_scan_complete = owned_scan_complete
         self._wishlist = None
+        self._server_values = {2: 648}
 
     def top(self, limit: int | None):
         return self._top if limit is None else self._top[:limit]
@@ -101,6 +102,9 @@ class InMemoryTopCatalog:
             if entry.owner_name
         )
 
+    def server_kakera_values(self, server_name: str):
+        return self._server_values
+
 
 def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     service = TopSearchService(InMemoryTopCatalog())
@@ -119,6 +123,7 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert unavailable[0].rollability_status == "Unavailable ($togglewestern)"
     assert unavailable[0].unavailable_reason == "$togglewestern"
     assert unavailable[0].roulette_types == ("wa",)
+    assert unavailable[0].kakera_value == 648
 
 
 def test_top_search_uses_topo_owner_as_unavailable_reason() -> None:

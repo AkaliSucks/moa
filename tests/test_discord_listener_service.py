@@ -71,6 +71,7 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$oq") == "sphere_result"
     assert DiscordListenerService._expected_kind_for_command("$kt") == "towerstate"
     assert DiscordListenerService._expected_kind_for_command("$lk") == "lootstate"
+    assert DiscordListenerService._expected_kind_for_command("$im") == "im"
 
 
 def test_extract_message_text_normalizes_discord_custom_emojis() -> None:
@@ -144,6 +145,21 @@ def test_listener_classifies_sphere_result_for_oq_context(tmp_path) -> None:
     raw_message = ":sp: +158\n:spG: +43 (Stock: 3,655)"
 
     assert listener._resolve_message_kind("sphere_result", raw_message) == "sphere_result"
+
+
+def test_listener_classifies_character_details_for_im_context(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+    raw_message = (
+        "Kaede Azusagawa\n"
+        "Seishun Buta Yarou :female:\n"
+        "Animanga roulette · 238:kakera: · :bronzekey: (**1**)\n"
+        "Claim Rank: #505\n"
+        "Like Rank: #735"
+    )
+
+    assert listener._resolve_message_kind("im", raw_message) == "im"
 
 
 def test_listener_tracks_configured_user_reactions(tmp_path) -> None:

@@ -152,6 +152,39 @@ def test_parse_character_details_from_copied_im_output() -> None:
     assert character.like_rank == 19
 
 
+def test_parse_character_details_accepts_discord_custom_emojis_and_same_line_key() -> None:
+    character = MudaeTextParser().parse_character_details(
+        "Kaede Azusagawa\n"
+        "Seishun Buta Yarou <:female:1>\n"
+        "Animanga roulette · 238<:kakera:2> · <:bronzekey:3> (**1**)\n"
+        "Claim Rank: #505\n"
+        "Like Rank: #735"
+    )
+
+    assert character.gender == "female"
+    assert character.kakera_value == 238
+    assert character.key_type == "bronze"
+    assert character.key_count == 1
+
+
+def test_parse_im_layout_with_game_and_animanga_gender_and_no_key() -> None:
+    character = MudaeTextParser().parse_character_details(
+        "Hatsune Miku\n"
+        "VOCALOID :female:\n"
+        "Game & Animanga · 1,195:kakera:\n"
+        "Claim Rank: #1\n"
+        "Like Rank: #3\n"
+    )
+
+    assert character.name == "Hatsune Miku"
+    assert character.series == "VOCALOID"
+    assert character.gender == "female"
+    assert character.roulette == "game & animanga"
+    assert character.kakera_value == 1195
+    assert character.key_type is None
+    assert character.key_count is None
+
+
 def test_parse_character_details_accepts_ambiguous_gender_markers() -> None:
     character = MudaeTextParser().parse_character_details(
         "Kirby\n"
@@ -174,6 +207,7 @@ def test_parse_current_im_layout_with_visual_kakera_and_key_icons() -> None:
     assert character.kakera_value == 1385
     assert character.claim_rank == 9
     assert character.like_rank == 19
+    assert character.key_count == 6
 
 
 def test_parse_im_layout_without_the_word_roulette() -> None:

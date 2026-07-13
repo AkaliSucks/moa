@@ -123,8 +123,13 @@ class AutomaticImportService:
                 message=f"Imported roll observation{key_note}.",
             )
         if kind == "im":
+            account = account_name.strip() if account_name else None
             result = self._catalog.import_character_details(
-                self._parser.parse_character_details(raw_message), server, raw_message, source
+                self._parser.parse_character_details(raw_message),
+                server,
+                raw_message,
+                source,
+                account,
             )
             return AutomaticImportResult(kind=kind, imported_count=1, message="Imported one character profile.")
         if kind == "settings":

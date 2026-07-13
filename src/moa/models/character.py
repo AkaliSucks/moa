@@ -31,6 +31,8 @@ class CharacterDetails(MOAModel):
     kakera_value: int | None
     claim_rank: int | None
     like_rank: int | None
+    key_type: str | None = None
+    key_count: int | None = None
 
 
 class RollObservation(MOAModel):

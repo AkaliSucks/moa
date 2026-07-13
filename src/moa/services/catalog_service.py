@@ -91,8 +91,11 @@ class CatalogService:
         server_name: str,
         raw_message: str,
         source: str,
+        account_name: str | None = None,
     ) -> CharacterDetailsImportResult:
-        return self._repository.import_character_details(details, server_name, raw_message, source)
+        return self._repository.import_character_details(
+            details, server_name, raw_message, source, account_name
+        )
 
     def top(self, limit: int | None = 15) -> tuple[RankedCatalogCharacter, ...]:
         return self._repository.top(limit)
@@ -134,6 +137,9 @@ class CatalogService:
 
     def get_profile(self, name: str, series: str) -> CharacterProfile | None:
         return self._repository.get_profile(name, series)
+
+    def server_kakera_values(self, server_name: str) -> dict[int, int | None]:
+        return self._repository.server_kakera_values(server_name)
 
     def rank_history(
         self, name: str, series: str, limit: int = 20

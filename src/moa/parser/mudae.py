@@ -54,27 +54,41 @@ class MudaeTextParser:
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = re.compile(
         r"^(?P<roulette>.+?)(?:\s+roulette)?(?:\s*[\u00b7\u2022]\s*|\s+)"
-        r"(?P<value>[\d,]+)\s*(?::kakera:|\bkakera\b)(?:\D.*)?$",
+        r"\*{0,2}(?P<value>[\d,]+)\*{0,2}\s*"
+        r"(?::kakera[a-z0-9_]*:|\bkakera\b)(?:\D.*)?$",
         re.IGNORECASE,
     )
     _CLAIM_RANK = re.compile(r"^Claim Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _KAKERA = re.compile(r"^\+?(?P<value>[\d,]+)\s*:kakera:$", re.IGNORECASE)
-    _ROLL_KEY = re.compile(r":(?P<key_type>[a-z]+)key:\s*\((?P<count>\d+)\)", re.IGNORECASE)
+    _KAKERA = re.compile(
+        r"^\s*\*{0,2}\+?(?P<value>[\d,]+)\*{0,2}\s*"
+        r"(?::kakera[a-z0-9_]*:|\bkakera\b)\s*$",
+        re.IGNORECASE,
+    )
+    _ROLL_KEY = re.compile(
+        r":(?P<key_type>[a-z]+)key:\s*\(\*{0,2}(?P<count>\d+)\*{0,2}\)",
+        re.IGNORECASE,
+    )
+    _GENERIC_KEY_COUNT = re.compile(
+        r"\bkeys?\s*\(\*{0,2}(?P<count>\d+)\*{0,2}\)",
+        re.IGNORECASE,
+    )
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
         re.IGNORECASE,
     )
     _HAREM_KEY_ENTRY = re.compile(
         r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
-        r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
+        r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\)"
+        r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
     _RANKED_HAREM_ENTRY = re.compile(
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
         r"(?:\s*[\u00b7\u2022]\s*\((?P<roulette_types>\$?[a-z]+(?:\s*,\s*\$?[a-z]+)*)\))?"
-        r"(?:\s*(?:[-\u00b7\u2022]\s*)?:(?P<key_type>[a-z]+)key:\s*\((?P<key_count>\d+)\))?"
+        r"(?:\s*(?:[-\u00b7\u2022]\s*)?:(?P<key_type>[a-z]+)key:\s*"
+        r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\))?"
         r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
@@ -231,7 +245,8 @@ class MudaeTextParser:
 
     @staticmethod
     def _lines(text: str) -> list[str]:
-        return [line.strip().replace("\u200b", "") for line in text.splitlines() if line.strip()]
+        normalized = re.sub(r"<a?:(?P<name>[A-Za-z0-9_]+):\d+>", r":\g<name>:", text)
+        return [line.strip().replace("\u200b", "") for line in normalized.splitlines() if line.strip()]
 
     @staticmethod
     def _number(value: str) -> int:
@@ -296,6 +311,8 @@ class MudaeTextParser:
 
         gender_match = self._GENDER.search(lines[roulette_index - 1])
         series = self._GENDER.sub("", lines[roulette_index - 1]).strip()
+        key = self._ROLL_KEY.search(lines[roulette_index])
+        generic_key = self._GENERIC_KEY_COUNT.search(lines[roulette_index])
 
         claim_rank = self._first_number(lines, self._CLAIM_RANK)
         like_rank = self._first_number(lines, self._LIKE_RANK)
@@ -314,6 +331,14 @@ class MudaeTextParser:
             kakera_value=self._number(roulette_line.group("value")),
             claim_rank=claim_rank,
             like_rank=like_rank,
+            key_type=(key.group("key_type").lower() if key else None),
+            key_count=(
+                int(key.group("count"))
+                if key
+                else int(generic_key.group("count"))
+                if generic_key
+                else None
+            ),
         )
 
     def parse_roll(self, text: str) -> RollObservation:

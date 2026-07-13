@@ -136,6 +136,30 @@ def test_import_im_enriches_global_character_and_keeps_kakera_value_per_server(t
     ]
 
 
+def test_import_im_can_persist_tiered_key_for_account_and_server_value_lookup(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    details = MudaeTextParser().parse_character_details(
+        "Kaede Azusagawa\n"
+        "Seishun Buta Yarou :female:\n"
+        "Animanga roulette · 238:kakera: · :bronzekey: (**1**)\n"
+        "Claim Rank: #505\n"
+        "Like Rank: #735"
+    )
+
+    service.import_character_details(
+        details, "Lake Arrowhead 2025", "Kaede details", "test", "ernieuuu"
+    )
+
+    profile = service.get_profile("Kaede Azusagawa", "Seishun Buta Yarou")
+    keys = service.harem_keys("Lake Arrowhead 2025", "ernieuuu")
+
+    assert profile is not None
+    assert profile.server_observations[0].kakera_value == 238
+    assert keys[0].key_type == "bronze"
+    assert keys[0].key_count == 1
+
+
 def test_delete_import_removes_only_its_derived_observations(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     service = CatalogService(CatalogRepository(database_path))
