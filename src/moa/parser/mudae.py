@@ -595,14 +595,7 @@ class MudaeTextParser:
             ),
             None,
         )
-        totals = next(
-            (
-                self._DISABLELIST_TOTALS.search(line)
-                for line in lines
-                if self._DISABLELIST_TOTALS.search(line)
-            ),
-            None,
-        )
+        totals = self._DISABLELIST_TOTALS.search(" ".join(lines))
         if header is None or totals is None:
             raise MudaeParseError("Expected a Mudae $dl header and disabled-pool totals.")
 

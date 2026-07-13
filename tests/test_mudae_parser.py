@@ -390,6 +390,18 @@ def test_parse_disablelist_reads_pool_limits_toggles_and_bundles() -> None:
     ]
 
 
+def test_parse_disablelist_accepts_totals_split_across_embed_lines() -> None:
+    disablelist = MudaeTextParser().parse_disablelist(
+        "ernieuuu's Disablelist (13/16)\n"
+        "107,529 disabled\n"
+        "41,247 $wa, 42,438 $ha, 20,996 $wg, 14,789 $hg\n"
+    )
+
+    assert disablelist.total_disabled == 107529
+    assert disablelist.disabled_wa == 41247
+    assert disablelist.disabled_hg == 14789
+
+
 def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:
     page = MudaeTextParser().parse_unavailable_characters(
         "🏆 TOP 1000\n"

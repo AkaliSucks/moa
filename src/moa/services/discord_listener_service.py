@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -271,7 +272,7 @@ class DiscordListenerService:
                     context.identity.account,
                 )
                 return
-        payload_key = (message.id, raw_message)
+        payload_key = (message.id, self._dedupe_payload_key(kind, raw_message))
         if payload_key in self._seen_payloads:
             return
         self._seen_payloads.add(payload_key)
@@ -353,32 +354,70 @@ class DiscordListenerService:
 
     def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
         detected_kind = self._router.detect(raw_message).kind
-        if detected_kind == "unknown":
-            return None
-        if expected_kind is None or expected_kind == detected_kind:
-            return detected_kind
         if expected_kind == "roll":
             try:
                 self._parser.parse_roll(raw_message)
             except MudaeParseError:
                 return None
             return "roll"
+        if expected_kind == "kakera":
+            try:
+                self._parser.parse_kakera_state(raw_message)
+            except MudaeParseError:
+                return None
+            return "kakera"
+        if expected_kind == "disablelist":
+            try:
+                self._parser.parse_disablelist(raw_message)
+            except MudaeParseError:
+                return None
+            return "disablelist"
         if expected_kind == "reaction_receipt":
             return None
-        if expected_kind not in self._SCAN_KINDS:
-            return detected_kind
-        if detected_kind == "roll":
-            return detected_kind
-        try:
-            self._parse_scan_page(expected_kind, raw_message)
-        except MudaeParseError:
-            self._logger.debug(
-                "Ignoring Mudae response classified as %s while expecting %s",
-                detected_kind,
-                expected_kind,
-            )
+        if expected_kind in self._SCAN_KINDS:
+            try:
+                self._parse_scan_page(expected_kind, raw_message)
+            except MudaeParseError:
+                self._logger.debug(
+                    "Ignoring Mudae response classified as %s while expecting %s",
+                    detected_kind,
+                    expected_kind,
+                )
+                return None
+            return expected_kind
+        if detected_kind == "unknown":
             return None
-        return expected_kind
+        return detected_kind
+
+    def _dedupe_payload_key(self, kind: str, raw_message: str) -> str:
+        """Deduplicate embed edits without collapsing distinct scan pages."""
+        try:
+            if kind == "roll":
+                roll = self._parser.parse_roll(raw_message)
+                return "roll|" + "|".join(
+                    str(value)
+                    for value in (
+                        roll.name,
+                        roll.series,
+                        roll.claim_rank,
+                        roll.kakera_value,
+                        roll.displayed_key_type,
+                        roll.displayed_key_count,
+                    )
+                )
+            if kind == "reaction_receipt":
+                receipt = self._parser.parse_kakera_reaction_receipt(raw_message)
+                return "reaction|" + "|".join(
+                    str(value)
+                    for value in (
+                        receipt.account_name,
+                        receipt.reaction_label,
+                        receipt.kakera_earned,
+                    )
+                )
+        except MudaeParseError:
+            pass
+        return raw_message
 
     def _parse_scan_page(self, kind: str, raw_message: str) -> object:
         if kind == "harem":
@@ -398,6 +437,10 @@ class DiscordListenerService:
             return "harem"
         if normalized.startswith("adl"):
             return "antidisable"
+        if normalized in {"k", "kakera"}:
+            return "kakera"
+        if normalized.startswith("dl"):
+            return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:
             return "roll"
         return None
@@ -487,30 +530,36 @@ class DiscordListenerService:
         parts: list[str] = []
         content = getattr(message, "content", "")
         if content and content.strip():
-            parts.append(content.strip())
+            parts.append(DiscordListenerService._normalize_discord_text(content))
         for embed in getattr(message, "embeds", ()) or ():
             author = getattr(embed, "author", None)
             author_name = getattr(author, "name", None)
             if author_name and author_name.strip():
-                parts.append(author_name.strip())
+                parts.append(DiscordListenerService._normalize_discord_text(author_name))
             for value in (
                 getattr(embed, "title", None),
                 getattr(embed, "description", None),
             ):
                 if value and value.strip():
-                    parts.append(value.strip())
+                    parts.append(DiscordListenerService._normalize_discord_text(value))
             for field in getattr(embed, "fields", ()) or ():
                 name = getattr(field, "name", "")
                 value = getattr(field, "value", "")
                 if name and name.strip():
-                    parts.append(name.strip())
+                    parts.append(DiscordListenerService._normalize_discord_text(name))
                 if value and value.strip():
-                    parts.append(value.strip())
+                    parts.append(DiscordListenerService._normalize_discord_text(value))
             footer = getattr(embed, "footer", None)
             footer_text = getattr(footer, "text", None)
             if footer_text and footer_text.strip():
-                parts.append(footer_text.strip())
+                parts.append(DiscordListenerService._normalize_discord_text(footer_text))
         return "\n".join(parts)
+
+    @staticmethod
+    def _normalize_discord_text(value: str) -> str:
+        """Convert Discord API custom-emoji markup to Mudae's copied-text markers."""
+        normalized = re.sub(r"<a?:(?P<name>[A-Za-z0-9_]+):\d+>", r":\g<name>:", value)
+        return normalized.strip()
 
     def _client_channel(self, channel_id: int) -> Any:
         client = getattr(self, "_client", None)

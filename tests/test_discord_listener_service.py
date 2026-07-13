@@ -63,6 +63,27 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$adl") == "antidisable"
     assert DiscordListenerService._expected_kind_for_command("$wa") == "roll"
     assert DiscordListenerService._expected_kind_for_command("$m") == "roll"
+    assert DiscordListenerService._expected_kind_for_command("$k") == "kakera"
+    assert DiscordListenerService._expected_kind_for_command("$dl") == "disablelist"
+
+
+def test_extract_message_text_normalizes_discord_custom_emojis() -> None:
+    message = SimpleNamespace(
+        content="",
+        embeds=(
+            SimpleNamespace(
+                author=SimpleNamespace(name="Mudae"),
+                title="You have 12,114 <:kakera:123456789>!",
+                description="<:goldkey:987654321> (7)",
+                fields=(),
+                footer=SimpleNamespace(text=""),
+            ),
+        ),
+    )
+
+    assert DiscordListenerService.extract_message_text(message) == (
+        "Mudae\nYou have 12,114 :kakera:!\n:goldkey: (7)"
+    )
 
 
 def test_listener_classifies_a_ranked_roll_card_as_a_roll(tmp_path) -> None:
@@ -80,6 +101,20 @@ def test_listener_classifies_a_ranked_roll_card_as_a_roll(tmp_path) -> None:
     )
 
     assert listener._resolve_message_kind("roll", raw_message) == "roll"
+
+
+def test_listener_keeps_scan_commands_from_being_misclassified_as_rolls(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+    raw_message = (
+        "ernieuuu's harem\n"
+        "Mai Sakurajima · :goldkey: (7) 1,494 ka\n"
+        "Page 1 / 19"
+    )
+
+    assert listener._resolve_message_kind("harem", raw_message) == "harem"
+    assert listener._resolve_message_kind("harem", "Mai Sakurajima\nSeries\n34:kakera:") is None
 
 
 def test_listener_tracks_configured_user_reactions(tmp_path) -> None:
