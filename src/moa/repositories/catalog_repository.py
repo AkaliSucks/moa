@@ -139,6 +139,7 @@ class CatalogRepositoryProtocol(Protocol):
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> RankedHaremImportResult: ...
 
     def owned_characters(
@@ -151,11 +152,17 @@ class CatalogRepositoryProtocol(Protocol):
         self, server_name: str, account_name: str, limit: int
     ) -> tuple[HaremKeyObservation, ...]: ...
 
-    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress: ...
+    def begin_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> HaremScanProgress: ...
 
     def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None: ...
 
     def complete_harem_scan(self, scan_id: int) -> HaremScanProgress: ...
+
+    def has_complete_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> bool: ...
 
     def import_player_bonus(
         self,
@@ -808,7 +815,7 @@ class CatalogRepository:
             server_id = self._upsert_server(connection, server_name, observed_at)
             account_id = self._upsert_account(connection, server_id, account_name, observed_at)
             if scan_id is not None:
-                self._prepare_harem_scan_page(connection, scan_id, account_id, page)
+                self._prepare_harem_scan_page(connection, scan_id, account_id, page, "keys")
             linked_entries = 0
 
             for entry in page.entries:
@@ -867,6 +874,7 @@ class CatalogRepository:
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> RankedHaremImportResult:
         """Store direct owned-character evidence from one ranked `$mm` page."""
         observed_at = datetime.now(timezone.utc)
@@ -878,6 +886,8 @@ class CatalogRepository:
             import_event_id = int(cursor.lastrowid)
             server_id = self._upsert_server(connection, server_name, observed_at)
             account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            if scan_id is not None:
+                self._prepare_harem_scan_page(connection, scan_id, account_id, page, "owned")
             linked_entries = 0
             for entry in page.entries:
                 normalized_name = self._normalize(entry.name)
@@ -891,8 +901,8 @@ class CatalogRepository:
                     """
                     INSERT INTO owned_character_observations (
                         account_context_id, character_id, character_name, normalized_character_name,
-                        claim_rank, kakera_value, observed_at, import_event_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        claim_rank, kakera_value, observed_at, import_event_id, harem_scan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -903,7 +913,14 @@ class CatalogRepository:
                         entry.kakera_value,
                         observed_at.isoformat(),
                         import_event_id,
+                        scan_id,
                     ),
+                )
+            if scan_id is not None:
+                connection.execute(
+                    "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+                    "VALUES (?, ?, ?)",
+                    (scan_id, page.page_number, import_event_id),
                 )
         return RankedHaremImportResult(
             import_event_id=import_event_id,
@@ -912,6 +929,7 @@ class CatalogRepository:
             entries_imported=len(page.entries),
             entries_linked=linked_entries,
             observed_at=observed_at,
+            scan_id=scan_id,
             page_number=page.page_number,
             page_count=page.page_count,
         )
@@ -921,8 +939,26 @@ class CatalogRepository:
     ) -> tuple[OwnedCharacterObservation, ...]:
         """Return the latest direct owned-character evidence per account/name."""
         with self._connection() as connection:
+            active_scan_id = self._active_harem_scan_id(
+                connection, server_name, account_name, "owned"
+            )
+            latest_scan_filter = (
+                "AND latest.harem_scan_id = ?"
+                if active_scan_id
+                else "AND latest.harem_scan_id IS NULL"
+            )
+            outer_scan_filter = (
+                "AND observations.harem_scan_id = ?"
+                if active_scan_id
+                else "AND observations.harem_scan_id IS NULL"
+            )
+            params: tuple[object, ...] = (
+                (active_scan_id, self._normalize(server_name), self._normalize(account_name), active_scan_id)
+                if active_scan_id
+                else (self._normalize(server_name), self._normalize(account_name))
+            )
             rows = connection.execute(
-                """
+                f"""
                 SELECT observations.character_name, observations.claim_rank,
                        observations.kakera_value, observations.observed_at,
                        characters.id AS character_id, characters.name,
@@ -935,6 +971,7 @@ class CatalogRepository:
                       FROM owned_character_observations AS latest
                       WHERE latest.account_context_id = account_contexts.id
                         AND latest.normalized_character_name = observations.normalized_character_name
+                        {latest_scan_filter}
                       ORDER BY latest.id DESC
                       LIMIT 1
                   )
@@ -950,9 +987,10 @@ class CatalogRepository:
                     )
                 WHERE server_contexts.normalized_name = ?
                   AND account_contexts.normalized_name = ?
+                  {outer_scan_filter}
                 ORDER BY observations.claim_rank ASC, observations.character_name COLLATE NOCASE
                 """,
-                (self._normalize(server_name), self._normalize(account_name)),
+                params,
             ).fetchall()
         return tuple(
             OwnedCharacterObservation(
@@ -978,7 +1016,9 @@ class CatalogRepository:
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
         """Return latest key observations for one account in one server context."""
         with self._connection() as connection:
-            active_scan_id = self._active_harem_scan_id(connection, server_name, account_name)
+            active_scan_id = self._active_harem_scan_id(
+                connection, server_name, account_name, "keys"
+            )
             scan_filter = "(harem_key_observations.harem_scan_id = ? OR harem_key_observations.harem_scan_id IS NULL)" if active_scan_id else (
                 "harem_key_observations.harem_scan_id IS NULL"
             )
@@ -1093,16 +1133,21 @@ class CatalogRepository:
             for row in rows
         )
 
-    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress:
+    def begin_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> HaremScanProgress:
         """Start a multi-page harem import that must be completed before activation."""
+        normalized_kind = scan_kind.strip().casefold()
+        if normalized_kind not in {"keys", "owned"}:
+            raise ValueError("Harem scan kind must be `keys` or `owned`.")
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
             server_id = self._upsert_server(connection, server_name, observed_at)
             account_id = self._upsert_account(connection, server_id, account_name, observed_at)
             cursor = connection.execute(
-                "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at) "
-                "VALUES (?, NULL, ?)",
-                (account_id, observed_at.isoformat()),
+                "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at, scan_kind) "
+                "VALUES (?, NULL, ?, ?)",
+                (account_id, observed_at.isoformat(), normalized_kind),
             )
             scan_id = int(cursor.lastrowid)
         progress = self.harem_scan_progress(scan_id)
@@ -1115,7 +1160,7 @@ class CatalogRepository:
                 """
                 SELECT harem_scans.id, server_contexts.name AS server_name,
                        account_contexts.name AS account_name, harem_scans.expected_page_count,
-                       harem_scans.completed_at
+                       harem_scans.completed_at, harem_scans.scan_kind
                 FROM harem_scans
                 JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
                 JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
@@ -1139,6 +1184,7 @@ class CatalogRepository:
             completed_at=(
                 datetime.fromisoformat(row["completed_at"]) if row["completed_at"] is not None else None
             ),
+            scan_kind=row["scan_kind"],
         )
 
     def complete_harem_scan(self, scan_id: int) -> HaremScanProgress:
@@ -1160,6 +1206,33 @@ class CatalogRepository:
         completed = self.harem_scan_progress(scan_id)
         assert completed is not None
         return completed
+
+    def has_complete_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> bool:
+        normalized_kind = scan_kind.strip().casefold()
+        if normalized_kind not in {"keys", "owned"}:
+            raise ValueError("Harem scan kind must be `keys` or `owned`.")
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM harem_scans
+                JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                  AND harem_scans.scan_kind = ?
+                  AND harem_scans.completed_at IS NOT NULL
+                LIMIT 1
+                """,
+                (
+                    self._normalize(server_name),
+                    self._normalize(account_name),
+                    normalized_kind,
+                ),
+            ).fetchone()
+        return row is not None
 
     def import_player_bonus(
         self,
@@ -2093,6 +2166,10 @@ class CatalogRepository:
                 (import_event_id,),
             )
             connection.execute(
+                "DELETE FROM harem_scan_pages WHERE import_event_id = ?",
+                (import_event_id,),
+            )
+            connection.execute(
                 "DELETE FROM rank_snapshots WHERE import_event_id = ?",
                 (import_event_id,),
             )
@@ -2201,7 +2278,8 @@ class CatalogRepository:
                     claim_rank INTEGER NOT NULL,
                     kakera_value INTEGER,
                     observed_at TEXT NOT NULL,
-                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    harem_scan_id INTEGER REFERENCES harem_scans(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS harem_scans (
@@ -2209,7 +2287,8 @@ class CatalogRepository:
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
                     expected_page_count INTEGER,
                     started_at TEXT NOT NULL,
-                    completed_at TEXT
+                    completed_at TEXT,
+                    scan_kind TEXT NOT NULL DEFAULT 'keys'
                 );
 
                 CREATE TABLE IF NOT EXISTS harem_scan_pages (
@@ -2382,6 +2461,25 @@ class CatalogRepository:
                     "ALTER TABLE harem_key_observations ADD COLUMN harem_scan_id INTEGER "
                     "REFERENCES harem_scans(id)"
                 )
+            scan_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(harem_scans)").fetchall()
+            }
+            if "scan_kind" not in scan_columns:
+                connection.execute(
+                    "ALTER TABLE harem_scans ADD COLUMN scan_kind TEXT NOT NULL DEFAULT 'keys'"
+                )
+            owned_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(owned_character_observations)"
+                ).fetchall()
+            }
+            if "harem_scan_id" not in owned_columns:
+                connection.execute(
+                    "ALTER TABLE owned_character_observations ADD COLUMN harem_scan_id INTEGER "
+                    "REFERENCES harem_scans(id)"
+                )
             loot_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(kakeraloot_state_observations)").fetchall()
@@ -2399,18 +2497,23 @@ class CatalogRepository:
         connection: sqlite3.Connection,
         scan_id: int,
         account_id: int,
-        page: HaremKeyPage,
+        page: HaremKeyPage | RankedHaremPage,
+        scan_kind: str,
     ) -> None:
         if page.page_number is None or page.page_count is None:
             raise ValueError("A scanned harem page must include its Page X / Y indicator.")
         scan = connection.execute(
-            "SELECT account_context_id, expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            "SELECT account_context_id, expected_page_count, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
             (scan_id,),
         ).fetchone()
         if scan is None:
             raise ValueError("Harem scan not found.")
         if scan["account_context_id"] != account_id:
             raise ValueError("Harem scan belongs to a different server or account.")
+        if scan["scan_kind"] != scan_kind:
+            expected = "$mmy" if scan["scan_kind"] == "keys" else "$mmr/$mmrk"
+            raise ValueError(f"This harem scan expects {expected} pages.")
         if scan["completed_at"] is not None:
             raise ValueError("Harem scan is already complete; begin a new scan to refresh it.")
         if scan["expected_page_count"] not in (None, page.page_count):
@@ -2427,7 +2530,11 @@ class CatalogRepository:
         )
 
     def _active_harem_scan_id(
-        self, connection: sqlite3.Connection, server_name: str, account_name: str
+        self,
+        connection: sqlite3.Connection,
+        server_name: str,
+        account_name: str,
+        scan_kind: str = "keys",
     ) -> int | None:
         row = connection.execute(
             """
@@ -2437,11 +2544,12 @@ class CatalogRepository:
             JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
             WHERE server_contexts.normalized_name = ?
               AND account_contexts.normalized_name = ?
+              AND harem_scans.scan_kind = ?
               AND harem_scans.completed_at IS NOT NULL
             ORDER BY harem_scans.completed_at DESC
             LIMIT 1
             """,
-            (self._normalize(server_name), self._normalize(account_name)),
+            (self._normalize(server_name), self._normalize(account_name), scan_kind),
         ).fetchone()
         return int(row["id"]) if row is not None else None
 

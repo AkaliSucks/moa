@@ -13,7 +13,7 @@ from moa.services.top_search_service import TopSearchService
 
 
 class InMemoryTopCatalog:
-    def __init__(self) -> None:
+    def __init__(self, owned_scan_complete: bool = True) -> None:
         observed_at = datetime(2026, 7, 12, tzinfo=timezone.utc)
         self._top = (
             RankedCatalogCharacter(
@@ -62,6 +62,7 @@ class InMemoryTopCatalog:
                 observed_at=observed_at,
             ),
         )
+        self._owned_scan_complete = owned_scan_complete
 
     def top(self, limit: int | None):
         return self._top if limit is None else self._top[:limit]
@@ -74,6 +75,9 @@ class InMemoryTopCatalog:
 
     def owned_characters(self, server_name: str, account_name: str):
         return self._owned
+
+    def has_complete_harem_scan(self, server_name: str, account_name: str, scan_kind: str = "keys"):
+        return scan_kind == "owned" and self._owned_scan_complete
 
 
 def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
@@ -98,6 +102,22 @@ def test_top_search_filters_to_directly_observed_owned_characters() -> None:
     assert owned[0].keyed is False
 
 
+def test_top_search_filters_to_unowned_characters_only_after_complete_scan() -> None:
+    service = TopSearchService(InMemoryTopCatalog())
+
+    unowned = service.search(server_name="Lake", account_name="ernieuuu", unowned_only=True)
+
+    assert [entry.character.name for entry in unowned] == ["Zero Two", "Albedo"]
+    assert all(entry.owned is False for entry in unowned)
+
+
+def test_top_search_rejects_unowned_filter_without_complete_scan() -> None:
+    with pytest.raises(ValueError, match="complete owned harem scan"):
+        TopSearchService(InMemoryTopCatalog(owned_scan_complete=False)).search(
+            server_name="Lake", account_name="ernieuuu", unowned_only=True
+        )
+
+
 def test_top_search_filters_series_and_keeps_unknown_account_state_explicit() -> None:
     service = TopSearchService(InMemoryTopCatalog())
 
@@ -114,3 +134,5 @@ def test_top_search_requires_account_context_for_evidence_filters() -> None:
         TopSearchService(InMemoryTopCatalog()).search(keyed_only=True)
     with pytest.raises(ValueError, match="--server and --account"):
         TopSearchService(InMemoryTopCatalog()).search(owned_only=True)
+    with pytest.raises(ValueError, match="--server and --account"):
+        TopSearchService(InMemoryTopCatalog()).search(unowned_only=True)

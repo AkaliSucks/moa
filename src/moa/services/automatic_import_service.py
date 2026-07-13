@@ -44,7 +44,7 @@ class AutomaticImportService:
             account = self._require(account_name, "account", kind)
             page = self._parser.parse_ranked_harem_page(raw_message)
             result = self._catalog.import_ranked_harem_page(
-                page, server, account, raw_message, source
+                page, server, account, raw_message, source, harem_scan_id
             )
             page_label = (
                 f" page {page.page_number}/{page.page_count}"

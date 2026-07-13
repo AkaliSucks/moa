@@ -52,6 +52,18 @@ the imported `$top` list to characters directly observed in those pages.
 Missing owned evidence is not proof of unownership: a single `$mm` page is
 only a partial observation until every page has been imported.
 
+For a complete ownership snapshot, start an owned scan and import every ranked
+harem page:
+
+```powershell
+uv run moa harem begin --kind owned --server "Lake Arrowhead 2025" --account "ernieuuu"
+uv run moa import mmr --scan <id> --server "Lake Arrowhead 2025" --account "ernieuuu" --clipboard
+uv run moa harem complete <id>
+```
+
+After completion, `moa catalog top --unowned-only --server <label> --account
+<label>` is safe to interpret as absent from that complete imported harem.
+
 For an accurate full-harem snapshot, begin a scan before copying pages:
 
 ```powershell
@@ -78,6 +90,6 @@ help and slot information.
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does
-not yet infer unownership, tags, series aliases, disable-list status, or a
+not yet infer tags, series aliases, disable-list status, or a
 character's permanent global identity. Those need separate, explicit modeling
 instead of being guessed from one message.

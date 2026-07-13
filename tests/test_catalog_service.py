@@ -244,6 +244,42 @@ def test_complete_harem_scan_activates_only_after_every_page_is_imported(tmp_pat
     ]
 
 
+def test_complete_owned_harem_scan_activates_ranked_pages_for_ownership(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    scan = service.begin_harem_scan("Lake Arrowhead 2025", "ernieuuu", "owned")
+    first_page = "ernieuuu's harem\n#2 - Zero Two 1,440 ka\nPage 1 / 2"
+    second_page = "ernieuuu's harem\n#3 - Rem 1,426 ka\nPage 2 / 2"
+
+    service.import_ranked_harem_page(
+        MudaeTextParser().parse_ranked_harem_page(first_page),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        first_page,
+        "clipboard",
+        scan.id,
+    )
+    assert service.owned_characters("Lake Arrowhead 2025", "ernieuuu") == ()
+    with pytest.raises(ValueError, match="incomplete"):
+        service.complete_harem_scan(scan.id)
+
+    service.import_ranked_harem_page(
+        MudaeTextParser().parse_ranked_harem_page(second_page),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        second_page,
+        "clipboard",
+        scan.id,
+    )
+    completed = service.complete_harem_scan(scan.id)
+
+    assert completed.scan_kind == "owned"
+    assert service.has_complete_harem_scan("Lake Arrowhead 2025", "ernieuuu", "owned")
+    assert [entry.character_name for entry in service.owned_characters("Lake Arrowhead 2025", "ernieuuu")] == [
+        "Zero Two",
+        "Rem",
+    ]
+
+
 def test_import_bonus_persists_latest_account_scoped_player_state(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     text = (

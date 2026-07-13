@@ -149,9 +149,10 @@ class CatalogService:
         account_name: str,
         raw_message: str,
         source: str,
+        scan_id: int | None = None,
     ) -> RankedHaremImportResult:
         return self._repository.import_ranked_harem_page(
-            page, server_name, account_name, raw_message, source
+            page, server_name, account_name, raw_message, source, scan_id
         )
 
     def owned_characters(
@@ -167,14 +168,21 @@ class CatalogService:
     ) -> tuple[HaremKeyObservation, ...]:
         return self._repository.recent_key_gains(server_name, account_name, limit)
 
-    def begin_harem_scan(self, server_name: str, account_name: str) -> HaremScanProgress:
-        return self._repository.begin_harem_scan(server_name, account_name)
+    def begin_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> HaremScanProgress:
+        return self._repository.begin_harem_scan(server_name, account_name, scan_kind)
 
     def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None:
         return self._repository.harem_scan_progress(scan_id)
 
     def complete_harem_scan(self, scan_id: int) -> HaremScanProgress:
         return self._repository.complete_harem_scan(scan_id)
+
+    def has_complete_harem_scan(
+        self, server_name: str, account_name: str, scan_kind: str = "keys"
+    ) -> bool:
+        return self._repository.has_complete_harem_scan(server_name, account_name, scan_kind)
 
     def import_player_bonus(
         self,

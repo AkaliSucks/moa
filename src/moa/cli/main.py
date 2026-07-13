@@ -1252,7 +1252,7 @@ def parse_settings(
 def import_auto(
     server: str | None = typer.Option(None, "--server", "-s", help="Server label when the message needs one."),
     account: str | None = typer.Option(None, "--account", "-a", help="Account name when the message needs one."),
-    scan: int | None = typer.Option(None, "--scan", help="Optional harem scan ID for a keyed-harem page."),
+    scan: int | None = typer.Option(None, "--scan", help="Optional harem scan ID for a keyed or owned harem page."),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
@@ -1382,6 +1382,9 @@ def import_mm(
 def import_mmr(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
     account: str = typer.Option(..., "--account", "-a", help="Account whose harem is shown."),
+    scan: int | None = typer.Option(
+        None, "--scan", help="Optional owned-harem scan ID created by `moa harem begin --kind owned`."
+    ),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
@@ -1400,12 +1403,18 @@ def import_mmr(
         account,
         raw_message,
         source,
+        scan,
     )
     console.print(
         f"[green]Imported {result.entries_imported} owned harem entries for "
         f"{result.account_name}.[/green] "
         f"[cyan]{result.entries_linked}[/cyan] linked to the current catalog."
     )
+    if result.scan_id is not None and result.page_number is not None and result.page_count is not None:
+        console.print(
+            f"[cyan]Scan {result.scan_id}:[/cyan] saved page {result.page_number}/{result.page_count}. "
+            f"Keep using [bold]--scan {result.scan_id}[/bold] for every remaining page."
+        )
 
 
 @import_app.command("bonus")
@@ -1662,13 +1671,21 @@ def import_settings(
 def harem_begin(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
     account: str = typer.Option(..., "--account", "-a", help="Account whose harem you are scanning."),
+    scan_kind: str = typer.Option(
+        "keys", "--kind", help="Scan `keys` with $mmy or `owned` with $mmr/$mmrk."
+    ),
 ) -> None:
     """Start a new multi-page harem scan that activates only when complete."""
-    scan = CatalogService().begin_harem_scan(server, account)
+    try:
+        scan = CatalogService().begin_harem_scan(server, account, scan_kind)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    import_command = "mm" if scan.scan_kind == "keys" else "mmr"
     console.print(
-        f"[green]Started harem scan {scan.id}[/green] for [cyan]{scan.account_name}[/cyan].\n"
+        f"[green]Started {scan.scan_kind} harem scan {scan.id}[/green] for [cyan]{scan.account_name}[/cyan].\n"
         "Import each Mudae page with:\n"
-        f"[bold]uv run moa import mm --scan {scan.id} --server {scan.server_name!r} "
+        f"[bold]uv run moa import {import_command} --scan {scan.id} --server {scan.server_name!r} "
         f"--account {scan.account_name!r} --clipboard[/bold]"
     )
 
@@ -1711,6 +1728,7 @@ def catalog_top(
     series: str | None = typer.Option(None, "--series", help="Case-insensitive series text filter."),
     exact_series: bool = typer.Option(False, "--exact-series", help="Require an exact series match."),
     owned_only: bool = typer.Option(False, "--owned-only", help="Only characters directly observed in the account's $mm harem."),
+    unowned_only: bool = typer.Option(False, "--unowned-only", help="Only characters absent from a complete owned-harem scan."),
     keyed_only: bool = typer.Option(False, "--keyed-only", help="Only characters with imported key evidence."),
     unavailable_only: bool = typer.Option(False, "--unavailable-only", help="Only characters observed as unavailable by $topx."),
     sort_by: str = typer.Option("rank", "--sort", help="Sort by rank or name."),
@@ -1723,6 +1741,7 @@ def catalog_top(
             series=series,
             exact_series=exact_series,
             owned_only=owned_only,
+            unowned_only=unowned_only,
             keyed_only=keyed_only,
             unavailable_only=unavailable_only,
             sort_by=sort_by,
@@ -1750,6 +1769,8 @@ def catalog_top(
             if character.owned is None
             else "Owned evidence"
             if character.owned
+            else "Unowned (complete scan)"
+            if unowned_only
             else "No owned evidence"
         )
         key_state = (

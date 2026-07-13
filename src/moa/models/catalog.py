@@ -123,6 +123,7 @@ class RankedHaremImportResult(MOAModel):
     entries_imported: int
     entries_linked: int
     observed_at: datetime
+    scan_id: int | None = None
     page_number: int | None = None
     page_count: int | None = None
 
@@ -157,6 +158,7 @@ class HaremScanProgress(MOAModel):
     expected_page_count: int | None
     imported_pages: tuple[int, ...]
     completed_at: datetime | None
+    scan_kind: str = "keys"
 
     @property
     def is_complete(self) -> bool:

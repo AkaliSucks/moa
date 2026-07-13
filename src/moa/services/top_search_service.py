@@ -20,6 +20,7 @@ class TopSearchService:
         series: str | None = None,
         exact_series: bool = False,
         owned_only: bool = False,
+        unowned_only: bool = False,
         keyed_only: bool = False,
         unavailable_only: bool = False,
         sort_by: str = "rank",
@@ -31,12 +32,21 @@ class TopSearchService:
             raise ValueError("Unknown top sort. Choose from: name, rank.")
         if limit is not None and limit <= 0:
             raise ValueError("Top result limit must be positive.")
+        if owned_only and unowned_only:
+            raise ValueError("--owned-only and --unowned-only cannot be combined.")
 
         scoped = bool(server_name and account_name)
         if bool(server_name) != bool(account_name):
             raise ValueError("--server and --account must be supplied together.")
-        if (owned_only or keyed_only or unavailable_only) and not scoped:
+        if (owned_only or unowned_only or keyed_only or unavailable_only) and not scoped:
             raise ValueError("--server and --account are required for account evidence filters.")
+        if unowned_only and not self._catalog.has_complete_harem_scan(
+            server_name, account_name, "owned"
+        ):
+            raise ValueError(
+                "--unowned-only requires a complete owned harem scan; "
+                "run `moa harem begin --kind owned` and import every `$mmr`/`$mmrk` page."
+            )
 
         owned_names: set[str] | None = None
         keyed_names: set[str] | None = None
@@ -72,6 +82,8 @@ class TopSearchService:
             keyed = name in keyed_names if keyed_names is not None else None
             unavailable = name in unavailable_names if unavailable_names is not None else None
             if owned_only and not owned:
+                continue
+            if unowned_only and owned:
                 continue
             if keyed_only and not keyed:
                 continue
