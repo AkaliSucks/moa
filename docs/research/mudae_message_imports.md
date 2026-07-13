@@ -101,6 +101,10 @@ timestamped `$wl` snapshot. `$wl` is the authoritative source for active
 Starwishes because each Starwish is marked with `⭐`; `$sw` itself only displays
 help and slot information.
 
+The future `$adl` import will store the displayed antidisable entries as
+series-level rollability evidence. `$ad <series>` modifies that list, so MOA
+will not model antidisable state as an individual-character setting.
+
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does

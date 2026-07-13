@@ -57,5 +57,9 @@ Important distinctions for future MOA query features:
   rank-sorted output with rank and Kakera shown; `$mmrk=` changes the ordering
   to Kakera-sorted while retaining both displays.
 - `k-` and `y-` are filters for values/keys, not sort modes.
+- `$adl` displays the series-level antidisable list, while `$ad <series>` adds
+  a series to it. MOA must match an imported antidisable series to the
+  character's catalog series; it must not claim that an individual character
+  was antidisbled.
 - Missing imported harem keys do not prove that a character is unowned. MOA
   must retain an explicit unknown state until ownership evidence is imported.
