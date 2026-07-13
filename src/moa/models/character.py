@@ -137,6 +137,17 @@ class WishlistSnapshot(MOAModel):
     entries: tuple[WishlistEntry, ...]
 
 
+class AntidisablePage(MOAModel):
+    """One page from the account-scoped `$adl` series list."""
+
+    page_number: int | None
+    page_count: int | None
+    slots_used: int
+    slots_capacity: int
+    antidisabled_character_count: int
+    series_names: tuple[str, ...]
+
+
 class DisableListEntry(MOAModel):
     """One disabled Mudae bundle shown by `$dl`."""
 

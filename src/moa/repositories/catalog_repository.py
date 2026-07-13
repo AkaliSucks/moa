@@ -49,11 +49,13 @@ from moa.models.catalog import (
     TimerStateObservation,
     WishlistImportResult,
     WishlistObservation,
+    AntidisableImportResult,
     TopImportResult,
     TopOwnerObservation,
 )
 from moa.models.character import (
     CharacterDetails,
+    AntidisablePage,
     DisableListSnapshot,
     HaremKeyPage,
     RankedHaremPage,
@@ -196,6 +198,26 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> WishlistImportResult: ...
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None: ...
+
+    def import_antidisable_page(
+        self,
+        page: AntidisablePage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+        scan_id: int | None = None,
+    ) -> AntidisableImportResult: ...
+
+    def begin_antidisable_scan(
+        self, server_name: str, account_name: str
+    ) -> HaremScanProgress: ...
+
+    def antidisable_series(
+        self, server_name: str, account_name: str
+    ) -> tuple[str, ...]: ...
+
+    def complete_antidisable_scan(self, scan_id: int) -> HaremScanProgress: ...
 
     def import_disablelist(
         self,
@@ -1504,6 +1526,129 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_antidisable_page(
+        self,
+        page: AntidisablePage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+        scan_id: int | None = None,
+    ) -> AntidisableImportResult:
+        """Store one account-scoped `$adl` series page."""
+        if scan_id is not None and (page.page_number is None or page.page_count is None):
+            raise ValueError("A scanned antidisable page must include its Page X / Y indicator.")
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("antidisable", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            if scan_id is not None:
+                self._prepare_antidisable_scan_page(
+                    connection, scan_id, account_id, page.page_number, page.page_count
+                )
+            for series_name in page.series_names:
+                connection.execute(
+                    """
+                    INSERT INTO antidisable_series_observations (
+                        account_context_id, series_name, normalized_series_name,
+                        antidisabled_character_count, observed_at, import_event_id, harem_scan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        series_name,
+                        self._normalize(series_name),
+                        page.antidisabled_character_count,
+                        observed_at.isoformat(),
+                        import_event_id,
+                        scan_id,
+                    ),
+                )
+            if scan_id is not None:
+                connection.execute(
+                    "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+                    "VALUES (?, ?, ?)",
+                    (scan_id, page.page_number, import_event_id),
+                )
+        return AntidisableImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            series_imported=len(page.series_names),
+            observed_at=observed_at,
+            scan_id=scan_id,
+            page_number=page.page_number,
+            page_count=page.page_count,
+        )
+
+    def begin_antidisable_scan(
+        self, server_name: str, account_name: str
+    ) -> HaremScanProgress:
+        """Start a complete multi-page `$adl` scan."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            cursor = connection.execute(
+                "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at, scan_kind) "
+                "VALUES (?, NULL, ?, 'antidisable')",
+                (account_id, observed_at.isoformat()),
+            )
+            scan_id = int(cursor.lastrowid)
+        progress = self.harem_scan_progress(scan_id)
+        assert progress is not None
+        return progress
+
+    def antidisable_series(
+        self, server_name: str, account_name: str
+    ) -> tuple[str, ...]:
+        """Return series from the latest complete `$adl` scan."""
+        with self._connection() as connection:
+            scan_id = self._active_harem_scan_id(
+                connection, server_name, account_name, "antidisable"
+            )
+            if scan_id is None:
+                return ()
+            rows = connection.execute(
+                """
+                SELECT series_name
+                FROM antidisable_series_observations
+                WHERE harem_scan_id = ?
+                GROUP BY normalized_series_name
+                ORDER BY series_name COLLATE NOCASE
+                """,
+                (scan_id,),
+            ).fetchall()
+        return tuple(row["series_name"] for row in rows)
+
+    def complete_antidisable_scan(self, scan_id: int) -> HaremScanProgress:
+        """Activate a complete `$adl` scan."""
+        progress = self.harem_scan_progress(scan_id)
+        if progress is None:
+            raise ValueError("Antidisable scan not found.")
+        if progress.scan_kind != "antidisable":
+            raise ValueError("The scan is not an antidisable scan.")
+        if not progress.is_complete:
+            expected = progress.expected_page_count or "an unknown number of"
+            raise ValueError(
+                f"Antidisable scan is incomplete: imported pages {list(progress.imported_pages)}; "
+                f"expected {expected} pages."
+            )
+        completed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE harem_scans SET completed_at = ? WHERE id = ?",
+                (completed_at.isoformat(), scan_id),
+            )
+        completed = self.harem_scan_progress(scan_id)
+        assert completed is not None
+        return completed
+
     def import_disablelist(
         self,
         disablelist: DisableListSnapshot,
@@ -2270,6 +2415,10 @@ class CatalogRepository:
                 (import_event_id,),
             )
             connection.execute(
+                "DELETE FROM antidisable_series_observations WHERE import_event_id = ?",
+                (import_event_id,),
+            )
+            connection.execute(
                 "DELETE FROM rank_snapshots WHERE import_event_id = ?",
                 (import_event_id,),
             )
@@ -2410,6 +2559,17 @@ class CatalogRepository:
                     page_number INTEGER NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id),
                     PRIMARY KEY (harem_scan_id, page_number)
+                );
+
+                CREATE TABLE IF NOT EXISTS antidisable_series_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    series_name TEXT NOT NULL,
+                    normalized_series_name TEXT NOT NULL,
+                    antidisabled_character_count INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    harem_scan_id INTEGER REFERENCES harem_scans(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS player_bonus_observations (
@@ -2679,6 +2839,42 @@ class CatalogRepository:
         connection.execute(
             "UPDATE harem_scans SET expected_page_count = ? WHERE id = ?",
             (page.page_count, scan_id),
+        )
+
+    def _prepare_antidisable_scan_page(
+        self,
+        connection: sqlite3.Connection,
+        scan_id: int,
+        account_id: int,
+        page_number: int | None,
+        page_count: int | None,
+    ) -> None:
+        if page_number is None or page_count is None:
+            raise ValueError("A scanned antidisable page must include its Page X / Y indicator.")
+        scan = connection.execute(
+            "SELECT account_context_id, expected_page_count, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+        if scan is None:
+            raise ValueError("Antidisable scan not found.")
+        if scan["account_context_id"] != account_id:
+            raise ValueError("Antidisable scan belongs to a different server or account.")
+        if scan["scan_kind"] != "antidisable":
+            raise ValueError("The scan is not an antidisable scan.")
+        if scan["completed_at"] is not None:
+            raise ValueError("Antidisable scan is already complete; begin a new scan to refresh it.")
+        if scan["expected_page_count"] not in (None, page_count):
+            raise ValueError("Antidisable page count does not match the scan's first imported page.")
+        duplicate = connection.execute(
+            "SELECT 1 FROM harem_scan_pages WHERE harem_scan_id = ? AND page_number = ?",
+            (scan_id, page_number),
+        ).fetchone()
+        if duplicate is not None:
+            raise ValueError("This antidisable scan already contains that page.")
+        connection.execute(
+            "UPDATE harem_scans SET expected_page_count = ? WHERE id = ?",
+            (page_count, scan_id),
         )
 
     def _active_harem_scan_id(

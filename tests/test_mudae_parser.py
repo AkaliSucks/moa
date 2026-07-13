@@ -110,6 +110,23 @@ def test_parse_topo_page_preserves_claimed_owner_names() -> None:
     assert page.characters[1].owner_name == "ernieuuu"
 
 
+def test_parse_antidisable_page_reads_series_slots_count_and_pages() -> None:
+    page = MudaeTextParser().parse_antidisable_page(
+        "ernieuuu's Antidisablelist (83/500)\n"
+        "2,614 antidisabled characters\n"
+        "【OSHI NO KO】\n"
+        "Chainsaw Man\n"
+        "Page 1 / 6"
+    )
+
+    assert page.slots_used == 83
+    assert page.slots_capacity == 500
+    assert page.antidisabled_character_count == 2614
+    assert page.page_number == 1
+    assert page.page_count == 6
+    assert page.series_names == ("OSHI NO KO", "Chainsaw Man")
+
+
 def test_parse_character_details_from_copied_im_output() -> None:
     character = MudaeTextParser().parse_character_details(CHARACTER_DETAILS)
 

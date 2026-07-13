@@ -4,6 +4,14 @@ from moa.models.catalog import CatalogTopSearchEntry
 from moa.services.catalog_service import CatalogService
 
 
+def _normalize_series_name(value: str) -> str:
+    """Normalize catalog and `$adl` series labels for comparison."""
+    normalized = value.strip()
+    if normalized.startswith("【") and normalized.endswith("】"):
+        normalized = normalized[1:-1].strip()
+    return normalized.casefold()
+
+
 class TopSearchService:
     """Search imported `$top` rows without inferring ownership or rollability."""
 
@@ -55,6 +63,7 @@ class TopSearchService:
         self_account_names: set[str] | None = None
         topo_owner_names: dict[str, str | None] | None = None
         wishlist_names: set[str] | None = None
+        antidisable_series_names: set[str] | None = None
         if scoped:
             self_account_names = {
                 account.casefold()
@@ -75,6 +84,10 @@ class TopSearchService:
             wishlist = self._catalog.wishlist(server_name, account_name)
             if wishlist is not None:
                 wishlist_names = {entry.name.casefold() for entry in wishlist.entries}
+            antidisable_series_names = {
+                _normalize_series_name(series)
+                for series in self._catalog.antidisable_series(server_name, account_name)
+            }
             topo_owner_names = {
                 entry.character.name.casefold(): entry.owner_name
                 for entry in self._catalog.top_owner_observations(server_name)
@@ -107,6 +120,11 @@ class TopSearchService:
             wishlist_match = (
                 name in wishlist_names if wishlist_names is not None else None
             )
+            antidisable_match = (
+                _normalize_series_name(entry.character.series) in antidisable_series_names
+                if antidisable_series_names is not None
+                else None
+            )
             owner_is_self = (
                 owner_name.casefold() in self_account_names
                 if owner_name is not None and self_account_names is not None
@@ -116,7 +134,7 @@ class TopSearchService:
                 False
                 if owner_is_self is True
                 else False
-                if wishlist_match is True
+                if antidisable_match is True or wishlist_match is True
                 else True
                 if owner_name
                 else topx_unavailable
@@ -125,7 +143,7 @@ class TopSearchService:
                 None
                 if owner_is_self is True
                 else None
-                if wishlist_match is True
+                if antidisable_match is True or wishlist_match is True
                 else f"claimed by {owner_name}"
                 if owner_name
                 else unavailable_reasons[name]
@@ -135,6 +153,8 @@ class TopSearchService:
             rollability_status = (
                 "Claimed"
                 if owner_name
+                else "Antidisabled"
+                if antidisable_match is True
                 else "Wishlist"
                 if wishlist_match is True
                 else f"Disabled ({unavailable_reasons[name] or 'disabled'})"

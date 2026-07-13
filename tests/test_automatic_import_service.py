@@ -56,6 +56,23 @@ def test_automatic_import_routes_keyed_harem_pages(tmp_path) -> None:
     ]
 
 
+def test_automatic_import_routes_antidisable_pages(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    service = AutomaticImportService(catalog)
+    message = (
+        "ernieuuu's Antidisablelist (1/500)\n"
+        "10 antidisabled characters\n"
+        "Chainsaw Man\n"
+        "Page 1 / 1"
+    )
+
+    result = service.import_message(message, "test", "Lake", "ernieuuu")
+
+    assert result.kind == "antidisable"
+    assert result.imported_count == 1
+    assert "page 1/1" in result.message
+
+
 def test_automatic_import_routes_ranked_harem_pages(tmp_path) -> None:
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     catalog.import_top_page(

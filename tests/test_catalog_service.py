@@ -5,6 +5,7 @@ import pytest
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.catalog_service import CatalogService
+from moa.services.top_search_service import TopSearchService
 
 
 TOP_PAGE = """#1 - Hatsune Miku - VOCALOID
@@ -390,6 +391,79 @@ def test_import_wishlist_persists_starwish_state_per_server_account(tmp_path) ->
         ("Emilia", True),
         ("Saber", False),
     ]
+
+
+def test_import_antidisable_scan_activates_series_only_when_complete(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    scan = service.begin_antidisable_scan("Lake Arrowhead 2025", "ernieuuu")
+    page_one = (
+        "ernieuuu's Antidisablelist (2/500)\n"
+        "20 antidisabled characters\n"
+        "【OSHI NO KO】\n"
+        "Page 1 / 2"
+    )
+    page_two = (
+        "ernieuuu's Antidisablelist (2/500)\n"
+        "20 antidisabled characters\n"
+        "Chainsaw Man\n"
+        "Page 2 / 2"
+    )
+
+    service.import_antidisable_page(
+        MudaeTextParser().parse_antidisable_page(page_one),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        page_one,
+        "clipboard",
+        scan.id,
+    )
+    assert service.antidisable_series("Lake Arrowhead 2025", "ernieuuu") == ()
+    service.import_antidisable_page(
+        MudaeTextParser().parse_antidisable_page(page_two),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        page_two,
+        "clipboard",
+        scan.id,
+    )
+
+    service.complete_antidisable_scan(scan.id)
+
+    assert service.antidisable_series("Lake Arrowhead 2025", "ernieuuu") == (
+        "Chainsaw Man",
+        "OSHI NO KO",
+    )
+
+
+def test_catalog_top_marks_matching_series_antidisabled(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    top_text = "#7 - Power - Chainsaw Man"
+    service.import_top_page(
+        MudaeTextParser().parse_top_page(top_text), top_text, "clipboard"
+    )
+    scan = service.begin_antidisable_scan("Lake Arrowhead 2025", "ernieuuu")
+    adl_text = (
+        "ernieuuu's Antidisablelist (1/500)\n"
+        "10 antidisabled characters\n"
+        "Chainsaw Man\n"
+        "Page 1 / 1"
+    )
+    service.import_antidisable_page(
+        MudaeTextParser().parse_antidisable_page(adl_text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        adl_text,
+        "clipboard",
+        scan.id,
+    )
+    service.complete_antidisable_scan(scan.id)
+
+    power = TopSearchService(service).search(
+        server_name="Lake Arrowhead 2025", account_name="ernieuuu"
+    )[0]
+
+    assert power.character.name == "Power"
+    assert power.rollability_status == "Antidisabled"
 
 
 def test_import_disablelist_persists_account_scoped_roll_pool_state(tmp_path) -> None:

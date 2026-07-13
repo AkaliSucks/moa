@@ -101,9 +101,19 @@ timestamped `$wl` snapshot. `$wl` is the authoritative source for active
 Starwishes because each Starwish is marked with `⭐`; `$sw` itself only displays
 help and slot information.
 
-The future `$adl` import will store the displayed antidisable entries as
-series-level rollability evidence. `$ad <series>` modifies that list, so MOA
-will not model antidisable state as an individual-character setting.
+`$adl` is imported as series-level rollability evidence. Start a complete scan,
+then run `$adl` in Discord, copy the full response, and use the exact command
+MOA prints for each page:
+
+```powershell
+moa adl begin --server "Lake Arrowhead 2025" --account "ernieuuu"
+moa import adl --scan 3 --server "Lake Arrowhead 2025" --account "ernieuuu" --clipboard
+```
+
+The `3` is the scan ID printed by `moa adl begin`; replace it with your actual
+scan ID. `$ad <series>` modifies that list, so MOA matches antidisable state to
+the character's catalog series and does not model it as an individual-character
+setting.
 
 ## Intentional limits
 

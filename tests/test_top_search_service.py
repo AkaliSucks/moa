@@ -86,6 +86,9 @@ class InMemoryTopCatalog:
     def wishlist(self, server_name: str, account_name: str):
         return self._wishlist
 
+    def antidisable_series(self, server_name: str, account_name: str):
+        return getattr(self, "_antidisable_series", ())
+
     def top_owner_observations(self, server_name: str):
         return tuple(
             TopOwnerObservation(
@@ -195,6 +198,22 @@ def test_top_search_marks_wishlist_as_rollability_status_and_overrides_disabled(
     )
 
     assert albedo.rollability_status == "Wishlist"
+    assert albedo.unavailable is False
+
+
+def test_top_search_matches_antidisabled_series_to_catalog_characters() -> None:
+    catalog = InMemoryTopCatalog()
+    catalog._antidisable_series = ("Overlord",)
+
+    albedo = next(
+        entry
+        for entry in TopSearchService(catalog).search(
+            server_name="Lake", account_name="ernieuuu"
+        )
+        if entry.character.name == "Albedo"
+    )
+
+    assert albedo.rollability_status == "Antidisabled"
     assert albedo.unavailable is False
 
 

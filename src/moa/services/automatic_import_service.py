@@ -45,6 +45,22 @@ class AutomaticImportService:
             )
 
         server = self._require(server_name, "server", kind)
+        if kind == "antidisable":
+            account = self._require(account_name, "account", kind)
+            page = self._parser.parse_antidisable_page(raw_message)
+            result = self._catalog.import_antidisable_page(
+                page, server, account, raw_message, source, harem_scan_id
+            )
+            page_label = (
+                f" page {page.page_number}/{page.page_count}"
+                if page.page_number is not None and page.page_count is not None
+                else ""
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=result.series_imported,
+                message=f"Imported {result.series_imported} antidisable series{page_label}.",
+            )
         if kind == "ranked_harem":
             account = self._require(account_name, "account", kind)
             page = self._parser.parse_ranked_harem_page(raw_message)

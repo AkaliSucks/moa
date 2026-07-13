@@ -44,6 +44,13 @@ class MudaeMessageRouter:
             return self._detected("bonus", "Mudae Player Bonuses header found.")
         if "wishlist -" in normalized and "$wl" in normalized:
             return self._detected("wishlist", "Mudae wishlist header found.")
+        if "antidisablelist" in normalized and "antidisabled characters" in normalized:
+            try:
+                self._parser.parse_antidisable_page(text)
+            except MudaeParseError:
+                pass
+            else:
+                return self._detected("antidisable", "Mudae antidisable series list found.")
         if "disablelist (" in normalized and "disabled" in normalized:
             return self._detected("disablelist", "Mudae disablelist header and totals found.")
         if "current $personalrare" in normalized:

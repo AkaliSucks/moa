@@ -8,6 +8,7 @@ import re
 
 from moa.models.character import (
     CharacterDetails,
+    AntidisablePage,
     KakeraReactionReceipt,
     BadgeLevel,
     KakeraStateSnapshot,
@@ -82,6 +83,13 @@ class MudaeTextParser:
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
         r"(?P<starwish_count>\d+)\s*/\s*(?P<starwish_capacity>\d+)\s*\$sw",
         re.IGNORECASE,
+    )
+    _ANTIDISABLE_HEADER = re.compile(
+        r"Antidisablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)",
+        re.IGNORECASE,
+    )
+    _ANTIDISABLED_COUNT = re.compile(
+        r"^(?P<count>[\d,]+)\s+antidisabled\s+characters$", re.IGNORECASE
     )
     _DISABLELIST_HEADER = re.compile(
         r"Disablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)", re.IGNORECASE
@@ -489,6 +497,51 @@ class MudaeTextParser:
             starwish_count=int(header.group("starwish_count")),
             starwish_capacity=int(header.group("starwish_capacity")),
             entries=tuple(entries),
+        )
+
+    def parse_antidisable_page(self, text: str) -> AntidisablePage:
+        """Parse one copied `$adl` page as a series-level list."""
+        lines = self._lines(text)
+        header = next(
+            (
+                self._ANTIDISABLE_HEADER.search(line)
+                for line in lines
+                if self._ANTIDISABLE_HEADER.search(line)
+            ),
+            None,
+        )
+        count = next(
+            (
+                self._ANTIDISABLED_COUNT.match(line)
+                for line in lines
+                if self._ANTIDISABLED_COUNT.match(line)
+            ),
+            None,
+        )
+        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
+        if header is None or count is None:
+            raise MudaeParseError(
+                "Expected a Mudae `$adl` header with slot counts and antidisabled character count."
+            )
+
+        header_line = header.group(0)
+        series_names: list[str] = []
+        for line in lines:
+            if header_line in line or self._ANTIDISABLED_COUNT.match(line) or self._PAGE.match(line):
+                continue
+            name = line.strip().strip("*").strip("【】").strip()
+            if name:
+                series_names.append(name)
+
+        if not series_names:
+            raise MudaeParseError("No antidisable series found in the Mudae `$adl` page.")
+        return AntidisablePage(
+            page_number=int(page.group("page")) if page else None,
+            page_count=int(page.group("pages")) if page else None,
+            slots_used=int(header.group("used")),
+            slots_capacity=int(header.group("capacity")),
+            antidisabled_character_count=self._number(count.group("count")),
+            series_names=tuple(series_names),
         )
 
     def parse_disablelist(self, text: str) -> DisableListSnapshot:

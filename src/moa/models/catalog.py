@@ -234,6 +234,19 @@ class WishlistObservation(MOAModel):
     observed_at: datetime
 
 
+class AntidisableImportResult(MOAModel):
+    """Summary of one persisted `$adl` series-list page."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    series_imported: int
+    observed_at: datetime
+    scan_id: int | None = None
+    page_number: int | None = None
+    page_count: int | None = None
+
+
 class DisableListImportResult(MOAModel):
     """Summary of one persisted `$dl` account-state snapshot."""
 

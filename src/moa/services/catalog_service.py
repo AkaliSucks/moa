@@ -42,6 +42,7 @@ from moa.models.catalog import (
     TimerStateObservation,
     WishlistImportResult,
     WishlistObservation,
+    AntidisableImportResult,
 )
 from moa.models.character import (
     CharacterDetails,
@@ -60,6 +61,7 @@ from moa.models.character import (
     RollObservation,
     KakeraReactionReceipt,
     WishlistSnapshot,
+    AntidisablePage,
     UnavailableCharacterPage,
 )
 from moa.repositories.catalog_repository import CatalogRepository, CatalogRepositoryProtocol
@@ -225,6 +227,32 @@ class CatalogService:
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
         return self._repository.wishlist(server_name, account_name)
+
+    def import_antidisable_page(
+        self,
+        page: AntidisablePage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+        scan_id: int | None = None,
+    ) -> AntidisableImportResult:
+        return self._repository.import_antidisable_page(
+            page, server_name, account_name, raw_message, source, scan_id
+        )
+
+    def begin_antidisable_scan(
+        self, server_name: str, account_name: str
+    ) -> HaremScanProgress:
+        return self._repository.begin_antidisable_scan(server_name, account_name)
+
+    def antidisable_series(
+        self, server_name: str, account_name: str
+    ) -> tuple[str, ...]:
+        return self._repository.antidisable_series(server_name, account_name)
+
+    def complete_antidisable_scan(self, scan_id: int) -> HaremScanProgress:
+        return self._repository.complete_antidisable_scan(scan_id)
 
     def import_disablelist(
         self,
