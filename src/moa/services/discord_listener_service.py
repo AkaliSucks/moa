@@ -32,7 +32,6 @@ class DiscordListenerService:
     """Listen for Mudae messages and reuse the existing automatic import pipeline."""
 
     _CONTEXT_TTL_SECONDS = 300.0
-    _EDIT_FETCH_DEBOUNCE_SECONDS = 1.0
     _DEFAULT_STATUS_TEXT = "Mudae progress"
     _MAX_STATUS_LENGTH = 128
     _SCAN_KINDS = {
@@ -85,7 +84,6 @@ class DiscordListenerService:
         self._scan_ids: dict[tuple[str, str, str], int] = {}
         self._seen_payloads: set[tuple[int, str]] = set()
         self._message_cache: dict[int, discord.Message] = {}
-        self._last_edit_fetch: dict[int, float] = {}
         self._mudae_user_id: int | None = None
 
     def run(self, token: str, mudae_user_id: int | None = None) -> None:
@@ -179,32 +177,15 @@ class DiscordListenerService:
         )
 
     async def handle_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
-        """Process an edited response, using cache before falling back to REST."""
+        """Process an edit only when the original message is already cached.
+
+        Discord can emit raw edit events for messages that predate this listener.
+        Fetching every such message through REST causes needless history scans and
+        quickly hits Discord rate limits, so uncached edits are intentionally ignored.
+        """
         cached_message = self._message_cache.get(payload.message_id)
         if cached_message is not None:
             await self.handle_bot_response(cached_message)
-            return
-        channel = self._client_channel(payload.channel_id)
-        if channel is None:
-            return
-        now = time.monotonic()
-        last_fetch = self._last_edit_fetch.get(payload.message_id)
-        if last_fetch is not None and now - last_fetch < self._EDIT_FETCH_DEBOUNCE_SECONDS:
-            self._logger.debug(
-                "Skipping duplicate edited-message fetch for Discord message %s",
-                payload.message_id,
-            )
-            return
-        self._last_edit_fetch[payload.message_id] = now
-        if len(self._last_edit_fetch) > 2000:
-            self._last_edit_fetch = dict(list(self._last_edit_fetch.items())[-1000:])
-        try:
-            message = await channel.fetch_message(payload.message_id)
-        except (discord.HTTPException, discord.NotFound, discord.Forbidden) as error:
-            self._logger.warning("Could not fetch edited Discord message %s: %s", payload.message_id, error)
-            return
-        self._message_cache[message.id] = message
-        await self.handle_bot_response(message)
 
     async def handle_message_edit(
         self,
@@ -323,12 +304,9 @@ class DiscordListenerService:
 
     def _context_from_interaction(self, message: discord.Message) -> DiscordCommandContext | None:
         """Recover account context when Mudae answered a slash interaction."""
-        interaction = getattr(message, "interaction", None)
-        user = getattr(interaction, "user", None)
-        command_name = getattr(interaction, "name", None)
-        if user is None:
-            metadata = getattr(message, "interaction_metadata", None)
-            user = getattr(metadata, "user", None)
+        metadata = getattr(message, "interaction_metadata", None)
+        user = getattr(metadata, "user", None)
+        command_name = getattr(metadata, "name", None)
         if user is None or message.guild is None:
             return None
         identity = self._identity_for_ids(str(message.guild.id), str(user.id))
