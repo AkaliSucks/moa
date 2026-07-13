@@ -32,7 +32,12 @@ class AutomaticImportService:
         if kind == "unknown":
             raise ValueError("This message is not a supported Mudae import format.")
         if kind == "top":
-            result = self._catalog.import_top_page(self._parser.parse_top_page(raw_message), raw_message, source)
+            result = self._catalog.import_top_page(
+                self._parser.parse_top_page(raw_message),
+                raw_message,
+                source,
+                server_name,
+            )
             return AutomaticImportResult(
                 kind=kind,
                 imported_count=result.characters_imported,

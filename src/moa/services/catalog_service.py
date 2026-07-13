@@ -12,6 +12,7 @@ from moa.models.catalog import (
     RankedCatalogCharacter,
     RankedHaremImportResult,
     TopImportResult,
+    TopOwnerObservation,
     PlayerBonusImportResult,
     PlayerBonusObservation,
     DisableListImportResult,
@@ -70,8 +71,14 @@ class CatalogService:
     def __init__(self, repository: CatalogRepositoryProtocol | None = None) -> None:
         self._repository = repository or CatalogRepository()
 
-    def import_top_page(self, page: TopPage, raw_message: str, source: str) -> TopImportResult:
-        return self._repository.import_top_page(page, raw_message, source)
+    def import_top_page(
+        self,
+        page: TopPage,
+        raw_message: str,
+        source: str,
+        server_name: str | None = None,
+    ) -> TopImportResult:
+        return self._repository.import_top_page(page, raw_message, source, server_name)
 
     def import_character_details(
         self,
@@ -84,6 +91,11 @@ class CatalogService:
 
     def top(self, limit: int | None = 15) -> tuple[RankedCatalogCharacter, ...]:
         return self._repository.top(limit)
+
+    def top_owner_observations(
+        self, server_name: str
+    ) -> tuple[TopOwnerObservation, ...]:
+        return self._repository.top_owner_observations(server_name)
 
     def character_count(self) -> int:
         return self._repository.character_count()

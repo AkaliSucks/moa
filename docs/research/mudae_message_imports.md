@@ -26,9 +26,18 @@ timestamped claim-rank snapshot, and archives the exact copied message in the
 local SQLite database. The database is intentionally local and ignored by Git:
 it is personal account data, not packaged reference knowledge.
 
-`$topo` pages can use the same `moa import top --clipboard` command. Owner
-names shown after `=>` are retained as direct claimed-by evidence, so catalog
-search can report reasons such as `Unavailable (claimed by xuppii)`.
+`$topo` pages must include the server where the message was observed so owner
+claims do not leak between servers. In Discord, run `$topo` and copy the full
+response, then run the matching command:
+
+```powershell
+moa import top --server "Lake Arrowhead 2025" --clipboard
+```
+
+Owner names shown after `=>` are retained as server-scoped claimed-by evidence,
+so catalog search can report reasons such as `Unavailable (claimed by xuppii)`
+only for that server. A normal `$top` page without owner names can still omit
+`--server`.
 
 `moa import im --server <label> --clipboard` enriches the canonical character
 with observed gender and roulette metadata, records the current global ranks,

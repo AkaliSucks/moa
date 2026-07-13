@@ -45,6 +45,14 @@ class RankedCatalogCharacter(MOAModel):
     owner_name: str | None = None
 
 
+class TopOwnerObservation(MOAModel):
+    """A server-scoped owner claim observed in a `$topo` page."""
+
+    character: CatalogCharacter
+    owner_name: str
+    observed_at: datetime
+
+
 class CatalogTopSearchEntry(MOAModel):
     """A ranked catalog character cross-referenced with optional account evidence."""
 

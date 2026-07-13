@@ -66,9 +66,48 @@ def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:
         MudaeTextParser().parse_top_page(page_text),
         page_text,
         "clipboard",
+        server_name="Lake Arrowhead 2025",
     )
 
     assert service.top()[0].owner_name == "xuppii"
+    observations = service.top_owner_observations("Lake Arrowhead 2025")
+    assert [(entry.character.name, entry.owner_name) for entry in observations] == [
+        ("Hatsune Miku", "xuppii")
+    ]
+
+
+def test_import_topo_page_requires_server_context_for_owner_claims(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    page_text = "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID"
+
+    with pytest.raises(ValueError, match="owner claims requires --server"):
+        service.import_top_page(
+            MudaeTextParser().parse_top_page(page_text),
+            page_text,
+            "clipboard",
+        )
+
+
+def test_topo_owner_observations_are_isolated_by_server(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    lake_page = "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID"
+    personal_page = "#1 - Hatsune Miku \U0001f49e => ernieuuu - VOCALOID"
+
+    service.import_top_page(
+        MudaeTextParser().parse_top_page(lake_page),
+        lake_page,
+        "clipboard",
+        server_name="Lake Arrowhead 2025",
+    )
+    service.import_top_page(
+        MudaeTextParser().parse_top_page(personal_page),
+        personal_page,
+        "clipboard",
+        server_name="ernieuuu's server",
+    )
+
+    assert service.top_owner_observations("Lake Arrowhead 2025")[0].owner_name == "xuppii"
+    assert service.top_owner_observations("ernieuuu's server")[0].owner_name == "ernieuuu"
 
 
 def test_import_im_enriches_global_character_and_keeps_kakera_value_per_server(tmp_path) -> None:

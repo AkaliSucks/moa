@@ -53,6 +53,7 @@ class TopSearchService:
         keyed_names: set[str] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
         self_account_names: set[str] | None = None
+        owner_names: dict[str, str] | None = None
         if scoped:
             self_account_names = {
                 account.casefold()
@@ -70,6 +71,10 @@ class TopSearchService:
                 entry.character.name.casefold(): entry.reason
                 for entry in self._catalog.unavailable_characters(server_name, account_name)
             }
+            owner_names = {
+                entry.character.name.casefold(): entry.owner_name
+                for entry in self._catalog.top_owner_observations(server_name)
+            }
 
         normalized_series = series.strip().casefold() if series else None
         ranked = self._catalog.top(None)
@@ -86,7 +91,7 @@ class TopSearchService:
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
-            owner_name = entry.owner_name
+            owner_name = owner_names.get(name) if owner_names is not None else None
             topx_unavailable = (
                 name in unavailable_reasons if unavailable_reasons is not None else None
             )

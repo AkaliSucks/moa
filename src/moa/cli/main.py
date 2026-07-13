@@ -1474,10 +1474,16 @@ def import_reaction(
 
 @import_app.command("top")
 def import_top(
+    server: str | None = typer.Option(
+        None,
+        "--server",
+        "-s",
+        help="Server where `$topo` owner claims were observed.",
+    ),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Parse and persist a `$top` page as a timestamped local rank snapshot."""
+    """Parse and persist a `$top` or `$topo` page as a timestamped local rank snapshot."""
     raw_message = _read_message_source(path, clipboard)
     try:
         page = MudaeTextParser().parse_top_page(raw_message)
@@ -1486,7 +1492,11 @@ def import_top(
         raise typer.Exit(1) from error
 
     source = "clipboard" if clipboard else f"file:{path}"
-    result = CatalogService().import_top_page(page, raw_message, source)
+    try:
+        result = CatalogService().import_top_page(page, raw_message, source, server)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
     total = CatalogService().character_count()
     console.print(
         f"[green]Imported {result.characters_imported} ranked characters.[/green] "

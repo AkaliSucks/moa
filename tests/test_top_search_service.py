@@ -7,6 +7,7 @@ from moa.models.catalog import (
     HaremKeyObservation,
     OwnedCharacterObservation,
     RankedCatalogCharacter,
+    TopOwnerObservation,
     UnavailableCharacterObservation,
 )
 from moa.services.top_search_service import TopSearchService
@@ -78,6 +79,17 @@ class InMemoryTopCatalog:
 
     def has_complete_harem_scan(self, server_name: str, account_name: str, scan_kind: str = "keys"):
         return scan_kind == "owned" and self._owned_scan_complete
+
+    def top_owner_observations(self, server_name: str):
+        return tuple(
+            TopOwnerObservation(
+                character=entry.character,
+                owner_name=entry.owner_name,
+                observed_at=entry.observed_at,
+            )
+            for entry in self._top
+            if entry.owner_name
+        )
 
 
 def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:

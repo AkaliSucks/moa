@@ -50,6 +50,7 @@ from moa.models.catalog import (
     WishlistImportResult,
     WishlistObservation,
     TopImportResult,
+    TopOwnerObservation,
 )
 from moa.models.character import (
     CharacterDetails,
@@ -75,7 +76,13 @@ from moa.models.character import (
 class CatalogRepositoryProtocol(Protocol):
     """Storage contract required by :class:`CatalogService`."""
 
-    def import_top_page(self, page: TopPage, raw_message: str, source: str) -> TopImportResult: ...
+    def import_top_page(
+        self,
+        page: TopPage,
+        raw_message: str,
+        source: str,
+        server_name: str | None = None,
+    ) -> TopImportResult: ...
 
     def import_character_details(
         self,
@@ -86,6 +93,10 @@ class CatalogRepositoryProtocol(Protocol):
     ) -> CharacterDetailsImportResult: ...
 
     def top(self, limit: int | None) -> tuple[RankedCatalogCharacter, ...]: ...
+
+    def top_owner_observations(
+        self, server_name: str
+    ) -> tuple[TopOwnerObservation, ...]: ...
 
     def character_count(self) -> int: ...
 
@@ -301,8 +312,19 @@ class CatalogRepository:
         self._database_path = database_path
         self._initialize()
 
-    def import_top_page(self, page: TopPage, raw_message: str, source: str) -> TopImportResult:
+    def import_top_page(
+        self,
+        page: TopPage,
+        raw_message: str,
+        source: str,
+        server_name: str | None = None,
+    ) -> TopImportResult:
         """Upsert characters and append one rank snapshot per imported row."""
+        if any(character.owner_name for character in page.characters) and (
+            not server_name or not server_name.strip()
+        ):
+            raise ValueError("A `$topo` import with owner claims requires --server.")
+
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
             cursor = connection.execute(
@@ -313,6 +335,11 @@ class CatalogRepository:
                 ("top_page", source, observed_at.isoformat(), raw_message),
             )
             import_event_id = int(cursor.lastrowid)
+            server_id = (
+                self._upsert_server(connection, server_name, observed_at)
+                if server_name and server_name.strip()
+                else None
+            )
 
             for ranked_character in page.characters:
                 character_id = self._upsert_character(
@@ -337,6 +364,21 @@ class CatalogRepository:
                         import_event_id,
                     ),
                 )
+                if ranked_character.owner_name and server_id is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO top_owner_observations (
+                            server_context_id, character_id, owner_name, observed_at, import_event_id
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            server_id,
+                            character_id,
+                            ranked_character.owner_name,
+                            observed_at.isoformat(),
+                            import_event_id,
+                        ),
+                    )
 
         return TopImportResult(
             import_event_id=import_event_id,
@@ -661,6 +703,54 @@ class CatalogRepository:
                 like_rank=row["like_rank"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
                 owner_name=row["owner_name"],
+            )
+            for row in rows
+        )
+
+    def top_owner_observations(
+        self, server_name: str
+    ) -> tuple[TopOwnerObservation, ...]:
+        """Return the latest `$topo` owner claim for each character in one server."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    characters.id,
+                    characters.name,
+                    characters.series,
+                    characters.gender,
+                    characters.roulette,
+                    top_owner_observations.owner_name,
+                    top_owner_observations.observed_at
+                FROM server_contexts
+                JOIN top_owner_observations
+                  ON top_owner_observations.server_context_id = server_contexts.id
+                JOIN characters ON characters.id = top_owner_observations.character_id
+                WHERE server_contexts.normalized_name = ?
+                  AND top_owner_observations.id = (
+                    SELECT observations.id
+                    FROM top_owner_observations AS observations
+                    WHERE observations.server_context_id = server_contexts.id
+                      AND observations.character_id = top_owner_observations.character_id
+                    ORDER BY observations.id DESC
+                    LIMIT 1
+                )
+                ORDER BY characters.name COLLATE NOCASE ASC
+                """,
+                (self._normalize(server_name),),
+            ).fetchall()
+
+        return tuple(
+            TopOwnerObservation(
+                character=CatalogCharacter(
+                    id=row["id"],
+                    name=row["name"],
+                    series=row["series"],
+                    gender=row["gender"],
+                    roulette=row["roulette"],
+                ),
+                owner_name=row["owner_name"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
         )
@@ -2183,6 +2273,10 @@ class CatalogRepository:
                 "DELETE FROM rank_snapshots WHERE import_event_id = ?",
                 (import_event_id,),
             )
+            connection.execute(
+                "DELETE FROM top_owner_observations WHERE import_event_id = ?",
+                (import_event_id,),
+            )
             connection.execute("DELETE FROM import_events WHERE id = ?", (import_event_id,))
         return True
 
@@ -2227,6 +2321,15 @@ class CatalogRepository:
                     normalized_name TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS top_owner_observations (
+                    id INTEGER PRIMARY KEY,
+                    server_context_id INTEGER NOT NULL REFERENCES server_contexts(id),
+                    character_id INTEGER NOT NULL REFERENCES characters(id),
+                    owner_name TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS server_character_observations (
