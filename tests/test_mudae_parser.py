@@ -477,6 +477,22 @@ def test_parse_tower_state_reads_current_level_cost_balance_and_built_perks() ->
     assert state.built_perk_ids == (5, 11)
 
 
+def test_parse_tower_state_accepts_current_format_without_completed_tower_count() -> None:
+    state = MudaeTextParser().parse_tower_state(
+        "Your current level is:tow7:\n"
+        "The next level costs 40,000:kakera:\n"
+        "You have 26,490:kakera:\n"
+        "☑️ [1] +2 wishlist slots\n"
+        "[6] +30 spheres when you claim a character"
+    )
+
+    assert state.current_level == 7
+    assert state.completed_towers is None
+    assert state.next_level_cost == 40000
+    assert state.kakera_balance == 26490
+    assert state.built_perk_ids == (1,)
+
+
 def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:
     state = MudaeTextParser().parse_kakeraloot_state(
         "ernieuuu - Kakeraloots\n"
@@ -509,6 +525,51 @@ def test_parse_kakeraloot_state_accepts_the_no_loots_message() -> None:
     assert not state.has_kakeraloots
     assert state.status_note == "No Kakeraloots bought; Mudae did not report loot statistics."
     assert state.quantity_level is None
+
+
+def test_parse_kakeraloot_state_accepts_layout_without_rolls_stacked() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        ":disablemore: $disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+        ":wishprotect: Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+        ":mudapin: Mudapins: 22 ($mp)\n"
+        ":rtcd: $rt: -2h cooldown\n"
+        ":addroll: +1 permanent roll\n"
+        ":sw: 1 star branch (+0 $sw)\n"
+        "Quantity LVL 23\n"
+        "Quality LVL 6\n"
+        "$kl usage: 256 (:kakeraC:+1)\n"
+        "20,831:kakera:"
+    )
+
+    assert state.rolls_stacked is None
+    assert state.quantity_level == 23
+    assert state.usage_count == 256
+    assert state.kakera_balance == 20831
+
+
+def test_parse_sphere_result_reads_color_gains_total_and_stock() -> None:
+    state = MudaeTextParser().parse_sphere_result(
+        "You can click 7 times on the buttons below (2 minutes).\n"
+        "Find 3 purple spheres (out of 4) to turn the 4th purple into a red sphere or more.\n"
+        ":spB: +18\n"
+        ":spT: +28\n"
+        ":spP: (Free) +13\n"
+        ":sp: +158\n"
+        ":spG: +43 (Stock: 3,655)"
+    )
+
+    assert state.clicks_available == 7
+    assert state.click_window_minutes == 2
+    assert state.purple_target == 3
+    assert state.purple_total == 4
+    assert [(gain.sphere_type, gain.amount, gain.is_free) for gain in state.gains] == [
+        ("b", 18, False),
+        ("t", 28, False),
+        ("p", 13, True),
+        ("g", 43, False),
+    ]
+    assert state.total_gained == 158
+    assert state.stock == 3655
 
 
 def test_parse_server_settings_reads_core_rules_and_visible_options() -> None:

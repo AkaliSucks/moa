@@ -396,6 +396,24 @@ class DiscordListenerService:
             except MudaeParseError:
                 return None
             return "timers"
+        if expected_kind == "sphere_result":
+            try:
+                self._parser.parse_sphere_result(raw_message)
+            except MudaeParseError:
+                return None
+            return "sphere_result"
+        if expected_kind == "towerstate":
+            try:
+                self._parser.parse_tower_state(raw_message)
+            except MudaeParseError:
+                return None
+            return "towerstate"
+        if expected_kind == "lootstate":
+            try:
+                self._parser.parse_kakeraloot_state(raw_message)
+            except MudaeParseError:
+                return None
+            return "lootstate"
         if expected_kind in {"settings", "bonus"}:
             return expected_kind if detected_kind == expected_kind else None
         if expected_kind == "reaction_receipt":
@@ -471,6 +489,12 @@ class DiscordListenerService:
             return "settings"
         if normalized in {"bonus", "bonuses"}:
             return "bonus"
+        if normalized in {"oq", "ouroquest"}:
+            return "sphere_result"
+        if normalized in {"kt", "tower"}:
+            return "towerstate"
+        if normalized in {"lk", "kakeraloots"}:
+            return "lootstate"
         if normalized.startswith("dl"):
             return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:

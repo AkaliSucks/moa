@@ -17,6 +17,8 @@ from moa.models.character import (
     PersonalRareSnapshot,
     ServerSettingMetric,
     ServerSettingsSnapshot,
+    SphereGain,
+    SphereResultSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
     DisableListEntry,
@@ -123,13 +125,26 @@ class MudaeTextParser:
         re.IGNORECASE,
     )
     _TOWER_LEVEL = re.compile(
-        r"current level is.*?tow(?P<level>\d+).*?\(\+\s*(?P<towers>\d+)\s+tower",
+        r"current level is.*?tow(?P<level>\d+):?(?:.*?\(\+\s*(?P<towers>\d+)\s+towers?)?",
         re.IGNORECASE,
     )
     _TOWER_NEXT_COST = re.compile(
         r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
     )
     _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
+    _SPHERE_CLICKS = re.compile(
+        r"You can click\s+(?P<clicks>\d+)\s+times.*?\((?P<minutes>\d+)\s+minutes?\)",
+        re.IGNORECASE,
+    )
+    _SPHERE_GOAL = re.compile(
+        r"Find\s+(?P<target>\d+)\s+purple spheres?\s+\(out of\s+(?P<total>\d+)\)",
+        re.IGNORECASE,
+    )
+    _SPHERE_GAIN = re.compile(
+        r"^:(?P<marker>sp[a-z0-9_]*):\s*(?P<free>\(Free\)\s*)?"
+        r"\+(?P<amount>[\d,]+)(?:\s+\(Stock:\s*(?P<stock>[\d,]+)\))?$",
+        re.IGNORECASE,
+    )
     _LOOT_ROLLS = re.compile(r"Rolls stacked:\s*(?P<value>\d+)", re.IGNORECASE)
     _LOOT_DISABLE = re.compile(
         r"\$disable limits:\s*-(?P<wa_ha>\d+)\s+\$wa/\$ha,\s*-(?P<wg_hg>\d+)\s+\$wg/\$hg",
@@ -838,12 +853,66 @@ class MudaeTextParser:
             perk = self._TOWER_PERK.match(line)
             if perk is not None and "☑" in line:
                 built_perks.append(int(perk.group("id")))
+        for line in lines:
+            if any(ord(char) in {0x2611, 0x2705} for char in line):
+                perk = self._TOWER_PERK.match(line)
+                if perk is not None and int(perk.group("id")) not in built_perks:
+                    built_perks.append(int(perk.group("id")))
         return TowerStateSnapshot(
             current_level=int(level.group("level")),
-            completed_towers=int(level.group("towers")),
+            completed_towers=(int(level.group("towers")) if level.group("towers") else None),
             next_level_cost=self._number(next_cost.group("value")),
             kakera_balance=self._number(balance.group("value")),
             built_perk_ids=tuple(built_perks),
+        )
+
+    def parse_sphere_result(self, text: str) -> SphereResultSnapshot:
+        """Parse the payout and stock summary from one `$oq` response."""
+        lines = self._lines(text)
+        clicks = next(
+            (self._SPHERE_CLICKS.search(line) for line in lines if self._SPHERE_CLICKS.search(line)),
+            None,
+        )
+        goal = next(
+            (self._SPHERE_GOAL.search(line) for line in lines if self._SPHERE_GOAL.search(line)),
+            None,
+        )
+        gains: list[SphereGain] = []
+        total_gained: int | None = None
+        stock: int | None = None
+        for line in lines:
+            match = self._SPHERE_GAIN.match(line)
+            if match is None:
+                continue
+            amount = self._number(match.group("amount"))
+            marker = match.group("marker").casefold()
+            if marker == "sp":
+                total_gained = amount
+            else:
+                gains.append(
+                    SphereGain(
+                        sphere_type=marker.removeprefix("sp"),
+                        amount=amount,
+                        is_free=match.group("free") is not None,
+                    )
+                )
+            if match.group("stock") is not None:
+                stock = self._number(match.group("stock"))
+
+        if total_gained is None and not gains:
+            raise MudaeParseError("Expected a Mudae $oq response with sphere gains.")
+        return SphereResultSnapshot(
+            clicks_available=int(clicks.group("clicks")) if clicks else None,
+            click_window_minutes=int(clicks.group("minutes")) if clicks else None,
+            purple_target=int(goal.group("target")) if goal else None,
+            purple_total=int(goal.group("total")) if goal else None,
+            gains=tuple(gains),
+            total_gained=(
+                total_gained
+                if total_gained is not None
+                else sum(gain.amount for gain in gains)
+            ),
+            stock=stock,
         )
 
     def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
@@ -880,7 +949,6 @@ class MudaeTextParser:
         if any(
             match is None
             for match in (
-                rolls,
                 disable,
                 protected_wish,
                 mudapins,
@@ -897,7 +965,7 @@ class MudaeTextParser:
 
         return KakeralootStateSnapshot(
             has_kakeraloots=True,
-            rolls_stacked=int(rolls.group("value")),
+            rolls_stacked=int(rolls.group("value")) if rolls else None,
             disable_wa_ha_reduction=int(disable.group("wa_ha")),
             disable_wg_hg_reduction=int(disable.group("wg_hg")),
             protected_wish_level=int(protected_wish.group("level")),
@@ -943,23 +1011,26 @@ class MudaeTextParser:
         sphere_bonus = first(self._SETTING_SPHERE_BONUS)
         game_mode = first(self._SETTING_GAMEMODE)
         channel_instance = first(self._SETTING_CHANNEL_INSTANCE)
-        if any(
-            match is None
-            for match in (
-                premium,
-                claim_reset,
-                reset_minute,
-                reset_shift,
-                rolls,
-                timer,
-                rare,
-                kakera_bonus,
-                sphere_bonus,
-                game_mode,
-                channel_instance,
+        required_settings = {
+            "premium": premium,
+            "claim reset": claim_reset,
+            "reset minute": reset_minute,
+            "reset shift": reset_shift,
+            "rolls per hour": rolls,
+            "claim reaction timer": timer,
+            "rarity multiplier": rare,
+            "Kakera bonus": kakera_bonus,
+            "sphere bonus": sphere_bonus,
+            "game mode": game_mode,
+            "channel instance": channel_instance,
+        }
+        missing_settings = tuple(name for name, match in required_settings.items() if match is None)
+        if missing_settings:
+            missing = ", ".join(missing_settings)
+            raise MudaeParseError(
+                "Expected a complete Mudae $settings response with core server rules; "
+                f"missing: {missing}."
             )
-        ):
-            raise MudaeParseError("Expected a complete Mudae $settings response with core server rules.")
 
         metrics: list[ServerSettingMetric] = []
         for line in lines:

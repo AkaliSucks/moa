@@ -47,6 +47,8 @@ from moa.models.catalog import (
     TowerStateObservation,
     TimerStateImportResult,
     TimerStateObservation,
+    SphereResultImportResult,
+    SphereResultObservation,
     WishlistImportResult,
     WishlistObservation,
     AntidisableImportResult,
@@ -70,6 +72,7 @@ from moa.models.character import (
     TopPage,
     RollObservation,
     KakeraReactionReceipt,
+    SphereResultSnapshot,
     UnavailableCharacterPage,
     WishlistSnapshot,
 )
@@ -293,6 +296,17 @@ class CatalogRepositoryProtocol(Protocol):
 
     def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None: ...
 
+    def import_sphere_result(
+        self,
+        state: SphereResultSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> SphereResultImportResult: ...
+
+    def sphere_result(self, server_name: str, account_name: str) -> SphereResultObservation | None: ...
+
     def import_kakeraloot_state(
         self,
         state: KakeralootStateSnapshot,
@@ -333,6 +347,75 @@ class CatalogRepository:
     def __init__(self, database_path: Path | None = None) -> None:
         self._database_path = database_path
         self._initialize()
+
+    def import_sphere_result(
+        self,
+        state: SphereResultSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> SphereResultImportResult:
+        """Store one account-scoped `$oq` sphere payout."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("sphere_result", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO sphere_result_observations (
+                    account_context_id, snapshot_json, total_gained, stock,
+                    observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    json.dumps(state.model_dump()),
+                    state.total_gained,
+                    state.stock,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return SphereResultImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def sphere_result(self, server_name: str, account_name: str) -> SphereResultObservation | None:
+        """Return the newest imported `$oq` result for one account."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT sphere_result_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN sphere_result_observations ON sphere_result_observations.id = (
+                    SELECT observations.id FROM sphere_result_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return SphereResultObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            snapshot=SphereResultSnapshot.model_validate(json.loads(row["snapshot_json"])),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
 
     def import_top_page(
         self,
@@ -2048,7 +2131,7 @@ class CatalogRepository:
                 (
                     account_id,
                     state.current_level,
-                    state.completed_towers,
+                    state.completed_towers or 0,
                     state.next_level_cost,
                     state.kakera_balance,
                     json.dumps(state.built_perk_ids),
@@ -2088,7 +2171,7 @@ class CatalogRepository:
             server_name=row["server_name"],
             account_name=row["account_name"],
             current_level=row["current_level"],
-            completed_towers=row["completed_towers"],
+            completed_towers=row["completed_towers"] or None,
             next_level_cost=row["next_level_cost"],
             kakera_balance=row["kakera_balance"],
             built_perk_ids=tuple(json.loads(row["built_perk_ids_json"])),
@@ -2691,6 +2774,16 @@ class CatalogRepository:
                     id INTEGER PRIMARY KEY,
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
                     snapshot_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS sphere_result_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    snapshot_json TEXT NOT NULL,
+                    total_gained INTEGER NOT NULL,
+                    stock INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

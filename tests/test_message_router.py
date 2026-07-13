@@ -18,6 +18,16 @@ def test_router_detects_roll_limit_and_vote_reset_messages_as_timers() -> None:
     assert router.detect("Use this command again to reset your rolls timer for ONE server.").kind == "timers"
 
 
+def test_router_detects_sphere_result_messages() -> None:
+    detection = MudaeMessageRouter().detect(
+        "You can click 7 times on the buttons below (2 minutes).\n"
+        ":sp: +158\n"
+        ":spG: +43 (Stock: 3,655)"
+    )
+
+    assert detection.kind == "sphere_result"
+
+
 def test_router_detects_rankless_rolls_after_more_specific_formats() -> None:
     detection = MudaeMessageRouter().detect(
         "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"

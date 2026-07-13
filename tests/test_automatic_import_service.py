@@ -40,6 +40,21 @@ def test_automatic_import_persists_rankless_rolls_for_future_history(tmp_path) -
     assert rolls[0].claim_rank is None
 
 
+def test_automatic_import_persists_sphere_result(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    service = AutomaticImportService(catalog)
+    message = ":sp: +158\n:spG: +43 (Stock: 3,655)"
+
+    result = service.import_message(message, "test", "Lake", "ernieuuu")
+    observation = catalog.sphere_result("Lake", "ernieuuu")
+
+    assert result.kind == "sphere_result"
+    assert result.imported_count == 1
+    assert observation is not None
+    assert observation.snapshot.total_gained == 158
+    assert observation.snapshot.stock == 3655
+
+
 def test_automatic_import_routes_keyed_harem_pages(tmp_path) -> None:
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     service = AutomaticImportService(catalog)

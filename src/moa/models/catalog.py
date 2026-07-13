@@ -9,6 +9,7 @@ from moa.models.character import (
     KakeralootStateSnapshot,
     PlayerBonusMetric,
     ServerSettingMetric,
+    SphereResultSnapshot,
     TimerStateSnapshot,
     WishlistEntry,
 )
@@ -398,10 +399,28 @@ class TowerStateObservation(MOAModel):
     server_name: str
     account_name: str
     current_level: int
-    completed_towers: int
+    completed_towers: int | None
     next_level_cost: int
     kakera_balance: int
     built_perk_ids: tuple[int, ...]
+    observed_at: datetime
+
+
+class SphereResultImportResult(MOAModel):
+    """Summary of one persisted `$oq` sphere-result message."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class SphereResultObservation(MOAModel):
+    """The latest imported `$oq` sphere result for one account."""
+
+    server_name: str
+    account_name: str
+    snapshot: SphereResultSnapshot
     observed_at: datetime
 
 

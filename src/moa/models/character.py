@@ -218,10 +218,30 @@ class TowerStateSnapshot(MOAModel):
     """Account-scoped Kakera Tower state parsed from `$kt`."""
 
     current_level: int
-    completed_towers: int
     next_level_cost: int
     kakera_balance: int
     built_perk_ids: tuple[int, ...]
+    completed_towers: int | None = None
+
+
+class SphereGain(MOAModel):
+    """One color-coded sphere payout reported by `$oq`."""
+
+    sphere_type: str
+    amount: int
+    is_free: bool = False
+
+
+class SphereResultSnapshot(MOAModel):
+    """Account-scoped sphere gains and stock from one `$oq` result."""
+
+    clicks_available: int | None
+    click_window_minutes: int | None
+    purple_target: int | None
+    purple_total: int | None
+    gains: tuple[SphereGain, ...]
+    total_gained: int
+    stock: int | None
 
 
 class KakeralootStateSnapshot(MOAModel):

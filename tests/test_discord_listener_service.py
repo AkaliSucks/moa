@@ -68,6 +68,9 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$settings") == "settings"
     assert DiscordListenerService._expected_kind_for_command("$bonus") == "bonus"
     assert DiscordListenerService._expected_kind_for_command("$rolls") == "timers"
+    assert DiscordListenerService._expected_kind_for_command("$oq") == "sphere_result"
+    assert DiscordListenerService._expected_kind_for_command("$kt") == "towerstate"
+    assert DiscordListenerService._expected_kind_for_command("$lk") == "lootstate"
 
 
 def test_extract_message_text_normalizes_discord_custom_emojis() -> None:
@@ -131,6 +134,16 @@ def test_listener_does_not_turn_bonus_or_timer_text_into_a_roll(tmp_path) -> Non
     assert listener._resolve_message_kind("bonus", timer_text) is None
     assert listener._resolve_message_kind("bonus", bonus_text) == "bonus"
     assert listener._resolve_message_kind("timers", timer_text) == "timers"
+
+
+def test_listener_classifies_sphere_result_for_oq_context(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+
+    raw_message = ":sp: +158\n:spG: +43 (Stock: 3,655)"
+
+    assert listener._resolve_message_kind("sphere_result", raw_message) == "sphere_result"
 
 
 def test_listener_tracks_configured_user_reactions(tmp_path) -> None:

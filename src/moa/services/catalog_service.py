@@ -40,6 +40,8 @@ from moa.models.catalog import (
     TowerStateObservation,
     TimerStateImportResult,
     TimerStateObservation,
+    SphereResultImportResult,
+    SphereResultObservation,
     WishlistImportResult,
     WishlistObservation,
     AntidisableImportResult,
@@ -56,6 +58,7 @@ from moa.models.character import (
     ServerSettingsSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
+    SphereResultSnapshot,
     PlayerBonusSnapshot,
     TopPage,
     RollObservation,
@@ -350,6 +353,21 @@ class CatalogService:
 
     def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None:
         return self._repository.timer_state(server_name, account_name)
+
+    def import_sphere_result(
+        self,
+        state: SphereResultSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> SphereResultImportResult:
+        return self._repository.import_sphere_result(
+            state, server_name, account_name, raw_message, source
+        )
+
+    def sphere_result(self, server_name: str, account_name: str) -> SphereResultObservation | None:
+        return self._repository.sphere_result(server_name, account_name)
 
     def import_kakeraloot_state(
         self,

@@ -2758,6 +2758,32 @@ def catalog_reactions(
     console.print(table)
 
 
+@catalog_app.command("spheres")
+def catalog_spheres(
+    server: str | None = typer.Option(None, "--server", "-s"),
+    account: str | None = typer.Option(None, "--account", "-a"),
+) -> None:
+    """Show the latest imported `$oq` sphere payout."""
+    server, account = _resolve_account_context(server, account)
+    observation = CatalogService().sphere_result(server, account)
+    if observation is None:
+        console.print("[yellow]No $oq sphere result imported for this server/account yet.[/yellow]")
+        raise typer.Exit()
+    snapshot = observation.snapshot
+    table = Table(title=f"{account} - latest $oq sphere result")
+    table.add_column("Sphere", style="green")
+    table.add_column("Amount", justify="right", style="cyan")
+    table.add_column("Free")
+    for gain in snapshot.gains:
+        table.add_row(gain.sphere_type, f"+{gain.amount:,}", "Yes" if gain.is_free else "No")
+    console.print(table)
+    stock = f"{snapshot.stock:,}" if snapshot.stock is not None else "unknown"
+    console.print(
+        f"Total gained: [cyan]+{snapshot.total_gained:,}[/cyan] spheres · Stock: [cyan]{stock}[/cyan] · "
+        f"Observed: {observation.observed_at.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+
 @catalog_app.command("reaction-summary")
 def catalog_reaction_summary(
     server: str | None = typer.Option(None, "--server", "-s"),

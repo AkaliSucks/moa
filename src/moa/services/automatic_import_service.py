@@ -182,6 +182,15 @@ class AutomaticImportService:
                 self._parser.parse_kakeraloot_state(raw_message), server, account, raw_message, source
             )
             return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakeraloot state.")
+        if kind == "sphere_result":
+            state = self._parser.parse_sphere_result(raw_message)
+            self._catalog.import_sphere_result(state, server, account, raw_message, source)
+            stock_note = f" Stock: {state.stock:,}." if state.stock is not None else ""
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported +{state.total_gained:,} spheres.{stock_note}",
+            )
         raise ValueError(f"Automatic import is not implemented for {kind!r}.")
 
     @staticmethod

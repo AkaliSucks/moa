@@ -42,6 +42,12 @@ class MudaeMessageRouter:
             return self._detected("infokl", "Mudae Kakeraloot pricing text found.")
         if "player bonuses" in normalized:
             return self._detected("bonus", "Mudae Player Bonuses header found.")
+        try:
+            self._parser.parse_sphere_result(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("sphere_result", "Mudae sphere payout result found.")
         if "wishlist -" in normalized and "$wl" in normalized:
             return self._detected("wishlist", "Mudae wishlist header found.")
         if "antidisablelist" in normalized:
