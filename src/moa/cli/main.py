@@ -5,6 +5,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from moa.core.config import ConfigService
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.services.badge_service import BadgeService
@@ -43,6 +44,9 @@ catalog_app = typer.Typer(help="Browse MOA's local character catalog")
 harem_app = typer.Typer(help="Build complete keyed-harem snapshots safely")
 recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
 server_app = typer.Typer(help="Compare imported server-wide configuration")
+config_app = typer.Typer(help="Manage user-local MOA profiles and account identities")
+config_profile_app = typer.Typer(help="Manage MOA profiles")
+config_account_app = typer.Typer(help="Manage server/account identities")
 console = Console()
 
 app.add_typer(tower_app, name="tower")
@@ -60,11 +64,99 @@ app.add_typer(catalog_app, name="catalog")
 app.add_typer(harem_app, name="harem")
 app.add_typer(recommend_app, name="recommend")
 app.add_typer(server_app, name="server")
+app.add_typer(config_app, name="config")
+config_app.add_typer(config_profile_app, name="profile")
+config_app.add_typer(config_account_app, name="account")
 
 
 @app.command()
 def version():
     console.print("[cyan]MOA[/cyan] v0.1.0")
+
+
+@config_app.command("show")
+def config_show(
+    profile: str | None = typer.Option(None, "--profile", help="Profile to display; defaults to the active profile."),
+) -> None:
+    """Show the active profile and configured server/account identities."""
+    service = ConfigService()
+    try:
+        config = service.load()
+        selected = service.profile(profile)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    console.print(f"[bold cyan]MOA config[/bold cyan] — {service.path}")
+    console.print(f"Active profile: [green]{config.active_profile}[/green]")
+    table = Table(title=f"Profile: {selected.name}")
+    table.add_column("Server", style="green")
+    table.add_column("Account", style="cyan")
+    table.add_column("Role")
+    table.add_column("Active")
+    if not selected.accounts:
+        console.print("[yellow]No server/account identities configured yet.[/yellow]")
+        return
+    for identity in selected.accounts:
+        active = (
+            "Yes"
+            if identity.server.casefold() == (selected.active_server or "").casefold()
+            and identity.account.casefold() == (selected.active_account or "").casefold()
+            else ""
+        )
+        table.add_row(identity.server, identity.account, identity.role, active)
+    console.print(table)
+
+
+@config_profile_app.command("add")
+def config_profile_add(name: str) -> None:
+    """Create a named profile for one MOA setup."""
+    try:
+        profile = ConfigService().add_profile(name)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(f"[green]Created MOA profile `{profile.name}`.[/green]")
+
+
+@config_account_app.command("add")
+def config_account_add(
+    server: str = typer.Option(..., "--server", "-s", help="Mudae server label."),
+    account: str = typer.Option(..., "--account", "-a", help="Mudae account name."),
+    role: str = typer.Option("primary", "--role", help="Identity role: primary or alt."),
+    profile: str | None = typer.Option(None, "--profile", help="Profile to update."),
+) -> None:
+    """Add one primary or alternate account identity to a profile."""
+    if role not in {"primary", "alt"}:
+        console.print("[red]--role must be `primary` or `alt`.[/red]")
+        raise typer.Exit(1)
+    try:
+        identity = ConfigService().add_account(server, account, role, profile)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[green]Added {identity.role} account {identity.account} on {identity.server}.[/green]"
+    )
+
+
+@config_app.command("use")
+def config_use(
+    server: str = typer.Option(..., "--server", "-s", help="Active Mudae server label."),
+    account: str = typer.Option(..., "--account", "-a", help="Active Mudae account name."),
+    profile: str | None = typer.Option(None, "--profile", help="Profile to update."),
+) -> None:
+    """Select the default server/account context for profile-aware commands."""
+    service = ConfigService()
+    try:
+        selected = service.use_context(server, account, profile)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[green]Active context:[/green] {selected.active_server} / {selected.active_account} "
+        f"([cyan]{selected.name}[/cyan])"
+    )
 
 
 @app.command("detect")
@@ -1749,7 +1841,12 @@ def catalog_top(
     sort_by: str = typer.Option("rank", "--sort", help="Sort by rank or name."),
 ) -> None:
     """Search imported `$top` ranks with optional account evidence filters."""
+    config_service = ConfigService()
     try:
+        server, account = config_service.resolve_context(server, account)
+        owned_account_names = (
+            config_service.owned_account_names(server) if server and account else None
+        )
         characters = TopSearchService().search(
             server_name=server,
             account_name=account,
@@ -1757,6 +1854,7 @@ def catalog_top(
             exact_series=exact_series,
             owned_only=owned_only,
             unowned_only=unowned_only,
+            owned_account_names=owned_account_names,
             keyed_only=keyed_only,
             unavailable_only=unavailable_only,
             sort_by=sort_by,

@@ -131,3 +131,54 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
         "Unavailable (disabled)"
     )
     assert main._format_rollability(False, None, "ernieuuu", True) == "Owned (ernieuuu)"
+
+
+def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    runner = CliRunner()
+
+    added = runner.invoke(
+        main.app,
+        [
+            "config",
+            "account",
+            "add",
+            "--server",
+            "Lake Arrowhead 2025",
+            "--account",
+            "ernieuuu",
+        ],
+    )
+    alt = runner.invoke(
+        main.app,
+        [
+            "config",
+            "account",
+            "add",
+            "--server",
+            "Lake Arrowhead 2025",
+            "--account",
+            "ernie_alt",
+            "--role",
+            "alt",
+        ],
+    )
+    used = runner.invoke(
+        main.app,
+        [
+            "config",
+            "use",
+            "--server",
+            "Lake Arrowhead 2025",
+            "--account",
+            "ernieuuu",
+        ],
+    )
+    shown = runner.invoke(main.app, ["config", "show"])
+
+    assert added.exit_code == 0
+    assert alt.exit_code == 0
+    assert used.exit_code == 0
+    assert shown.exit_code == 0
+    assert "ernie_alt" in shown.stdout
+    assert "Active" in shown.stdout
