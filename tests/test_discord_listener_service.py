@@ -109,6 +109,23 @@ def test_listener_tracks_configured_user_reactions(tmp_path) -> None:
     assert context.expected_kind == "reaction_receipt"
 
 
+def test_listener_uses_cached_message_for_raw_edit_without_fetching(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+    message = SimpleNamespace(id=987, guild=None, author=SimpleNamespace(bot=True))
+    listener._message_cache[message.id] = message
+
+    class UnexpectedClient:
+        def get_channel(self, _channel_id):
+            raise AssertionError("cached message edits should not fetch the channel")
+
+    listener._client = UnexpectedClient()
+    payload = SimpleNamespace(channel_id=789, message_id=987)
+
+    asyncio.run(listener.handle_raw_message_edit(payload))
+
+
 def test_listener_presence_uses_watching_status_and_truncates_custom_text(tmp_path) -> None:
     listener = DiscordListenerService(
         catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
