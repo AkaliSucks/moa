@@ -996,6 +996,20 @@ def _format_catalog_ownership(
     return "(no data)"
 
 
+def _format_catalog_keys(
+    keyed: bool | None,
+    key_type: str | None,
+    key_count: int | None,
+) -> str:
+    """Render imported harem key evidence using Mudae's key marker format."""
+    if keyed is None:
+        return "Not requested"
+    if not keyed or key_count is None:
+        return "-"
+    marker = f":{key_type}key:" if key_type else ":key:"
+    return f"{marker} ({key_count})"
+
+
 def _format_observed_at(observed_at: datetime) -> str:
     """Render imported timestamps consistently as UTC in compact CLI output."""
     if observed_at.tzinfo is not None:
@@ -2069,7 +2083,8 @@ def catalog_top(
     table.add_column("Character", style="green")
     table.add_column("Series")
     table.add_column("Ownership")
-    table.add_column("Key evidence")
+    table.add_column("Keys")
+    table.add_column("Kakera")
     table.add_column("Rollability")
     table.add_column("Observed (UTC)")
     for character in characters:
@@ -2079,12 +2094,10 @@ def catalog_top(
             character.owner_is_self,
             character.topo_observed,
         )
-        key_state = (
-            "Not requested"
-            if character.keyed is None
-            else "Keyed"
-            if character.keyed
-            else "No imported key"
+        key_state = _format_catalog_keys(
+            character.keyed,
+            character.key_type,
+            character.key_count,
         )
         rollability = _format_rollability(
             character.unavailable,
@@ -2099,6 +2112,7 @@ def catalog_top(
             character.character.series,
             ownership,
             key_state,
+            _format_optional_number(character.kakera_value),
             rollability,
             character.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
@@ -2106,7 +2120,7 @@ def catalog_top(
     if server and account:
         console.print(
             "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "
-            "No imported key evidence does not prove unkeyed. Enabled means no imported blocking evidence; "
+            "A dash in Keys means no imported key row for that character. Enabled means no imported blocking evidence; "
             "import fresh $topx/$adl data for stronger rollability evidence.[/dim]"
         )
 

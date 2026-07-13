@@ -134,6 +134,12 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
 
 
+def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
+    assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
+    assert main._format_catalog_keys(False, None, None) == "-"
+    assert main._format_catalog_keys(None, None, None) == "Not requested"
+
+
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
     assert main._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
         "Claimed 💞 => cute_beagle_91130"

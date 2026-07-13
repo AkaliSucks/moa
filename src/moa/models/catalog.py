@@ -68,6 +68,9 @@ class CatalogTopSearchEntry(MOAModel):
     owner_is_self: bool | None = None
     topo_observed: bool | None = None
     rollability_status: str | None = None
+    key_type: str | None = None
+    key_count: int | None = None
+    kakera_value: int | None = None
 
 
 class TopImportResult(MOAModel):

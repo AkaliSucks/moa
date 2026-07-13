@@ -1,6 +1,6 @@
 """Cross-reference imported global ranks with account-scoped evidence."""
 
-from moa.models.catalog import CatalogTopSearchEntry
+from moa.models.catalog import CatalogTopSearchEntry, HaremKeyObservation
 from moa.services.catalog_service import CatalogService
 
 
@@ -59,6 +59,7 @@ class TopSearchService:
 
         owned_names: set[str] | None = None
         keyed_names: set[str] | None = None
+        key_observations: dict[str, HaremKeyObservation] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
         self_account_names: set[str] | None = None
         topo_owner_names: dict[str, str | None] | None = None
@@ -73,10 +74,11 @@ class TopSearchService:
                 entry.character_name.casefold()
                 for entry in self._catalog.owned_characters(server_name, account_name)
             }
-            keyed_names = {
-                entry.character_name.casefold()
+            key_observations = {
+                entry.character_name.casefold(): entry
                 for entry in self._catalog.harem_keys(server_name, account_name)
             }
+            keyed_names = set(key_observations)
             unavailable_reasons = {
                 entry.character.name.casefold(): entry.reason
                 for entry in self._catalog.unavailable_characters(server_name, account_name)
@@ -108,6 +110,11 @@ class TopSearchService:
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
+            key_observation = (
+                key_observations.get(name)
+                if key_observations is not None
+                else None
+            )
             topo_observed = name in topo_owner_names if topo_owner_names is not None else None
             owner_name = (
                 topo_owner_names[name]
@@ -185,6 +192,9 @@ class TopSearchService:
                     owner_is_self=owner_is_self,
                     topo_observed=topo_observed,
                     rollability_status=rollability_status,
+                    key_type=key_observation.key_type if key_observation else None,
+                    key_count=key_observation.key_count if key_observation else None,
+                    kakera_value=key_observation.kakera_value if key_observation else None,
                 )
             )
 

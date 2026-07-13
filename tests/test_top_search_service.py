@@ -110,6 +110,9 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert [entry.character.name for entry in keyed] == ["Zero Two"]
     assert [entry.character.name for entry in unavailable] == ["Rem"]
     assert keyed[0].keyed is True
+    assert keyed[0].key_type == "gold"
+    assert keyed[0].key_count == 7
+    assert keyed[0].kakera_value == 1440
     assert keyed[0].unavailable is False
     assert keyed[0].unavailable_reason is None
     assert unavailable[0].unavailable_reason == "$togglewestern"
