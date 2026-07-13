@@ -19,6 +19,8 @@ class ConfigAccount(MOAModel):
     server: str
     account: str
     role: ConfigRole = "primary"
+    discord_server_id: str | None = None
+    discord_user_id: str | None = None
 
 
 class ConfigProfile(MOAModel):
@@ -89,6 +91,8 @@ class ConfigService:
         account: str,
         role: ConfigRole = "primary",
         profile_name: str | None = None,
+        discord_server_id: str | None = None,
+        discord_user_id: str | None = None,
     ) -> ConfigAccount:
         config = self.load()
         profile = self.profile(profile_name)
@@ -96,16 +100,36 @@ class ConfigService:
             server=self._clean(server, "server"),
             account=self._clean(account, "account"),
             role=role,
+            discord_server_id=self._clean_optional(discord_server_id),
+            discord_user_id=self._clean_optional(discord_user_id),
         )
-        if any(
-            item.server.casefold() == identity.server.casefold()
-            and item.account.casefold() == identity.account.casefold()
-            for item in profile.accounts
-        ):
-            raise ValueError(
-                f"Account `{identity.account}` is already configured for server `{identity.server}`."
+        existing_index = next(
+            (
+                index
+                for index, item in enumerate(profile.accounts)
+                if item.server.casefold() == identity.server.casefold()
+                and item.account.casefold() == identity.account.casefold()
+            ),
+            None,
+        )
+        if existing_index is not None:
+            existing = profile.accounts[existing_index]
+            if identity.discord_server_id is None and identity.discord_user_id is None:
+                raise ValueError(
+                    f"Account `{identity.account}` is already configured for server `{identity.server}`."
+                )
+            updated_accounts = list(profile.accounts)
+            updated_accounts[existing_index] = existing.model_copy(
+                update={
+                    "role": identity.role,
+                    "discord_server_id": identity.discord_server_id or existing.discord_server_id,
+                    "discord_user_id": identity.discord_user_id or existing.discord_user_id,
+                }
             )
-        updated_profile = profile.model_copy(update={"accounts": (*profile.accounts, identity)})
+            identity = updated_accounts[existing_index]
+        else:
+            updated_accounts = [*profile.accounts, identity]
+        updated_profile = profile.model_copy(update={"accounts": tuple(updated_accounts)})
         self._save_profile(config, updated_profile)
         return identity
 
@@ -173,3 +197,10 @@ class ConfigService:
         if not cleaned:
             raise ValueError(f"{label.title()} cannot be empty.")
         return cleaned
+
+    @staticmethod
+    def _clean_optional(value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None

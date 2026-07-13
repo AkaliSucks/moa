@@ -93,6 +93,8 @@ def config_show(
     table.add_column("Server", style="green")
     table.add_column("Account", style="cyan")
     table.add_column("Role")
+    table.add_column("Server ID")
+    table.add_column("Discord user ID")
     table.add_column("Active")
     if not selected.accounts:
         console.print("[yellow]No server/account identities configured yet.[/yellow]")
@@ -104,7 +106,14 @@ def config_show(
             and identity.account.casefold() == (selected.active_account or "").casefold()
             else ""
         )
-        table.add_row(identity.server, identity.account, identity.role, active)
+        table.add_row(
+            identity.server,
+            identity.account,
+            identity.role,
+            identity.discord_server_id or "-",
+            identity.discord_user_id or "-",
+            active,
+        )
     console.print(table)
 
 
@@ -125,13 +134,22 @@ def config_account_add(
     account: str = typer.Option(..., "--account", "-a", help="Mudae account name."),
     role: str = typer.Option("primary", "--role", help="Identity role: primary or alt."),
     profile: str | None = typer.Option(None, "--profile", help="Profile to update."),
+    server_id: str | None = typer.Option(None, "--server-id", help="Stable Discord server ID from `$myid`."),
+    user_id: str | None = typer.Option(None, "--user-id", help="Stable Discord user ID from `$myid`."),
 ) -> None:
     """Add one primary or alternate account identity to a profile."""
     if role not in {"primary", "alt"}:
         console.print("[red]--role must be `primary` or `alt`.[/red]")
         raise typer.Exit(1)
     try:
-        identity = ConfigService().add_account(server, account, role, profile)
+        identity = ConfigService().add_account(
+            server,
+            account,
+            role,
+            profile,
+            discord_server_id=server_id,
+            discord_user_id=user_id,
+        )
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
