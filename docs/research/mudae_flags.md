@@ -7,6 +7,17 @@ Use `moa command flags` to browse the reference or explain a combined query:
 moa command explain '$mmwy= Re:Zero$--Some bundle'
 ```
 
+For imported keyed-harem evidence, the equivalent MOA-side search is:
+
+```powershell
+moa catalog harem --server "Lake Arrowhead 2025" --account "ernieuuu" `
+  --series "Re:Zero" --sort keys --min-keys 5
+```
+
+`--sort keys` corresponds to the `$mmy=` ordering, `--sort kakera` to `k=`,
+and `--min-keys` expresses a numeric `y>` filter. This searches only imported
+keyed-harem evidence; it does not claim that an unimported character is owned.
+
 The parser uses longest-match semantics, so `w+` is the wishlist flag while
 `w` is the waifu gender filter. It also recognizes numeric forms such as
 `z<5`, `y>7`, and `y!<3`.

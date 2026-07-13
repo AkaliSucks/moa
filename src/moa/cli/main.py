@@ -19,6 +19,7 @@ from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
 from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
+from moa.services.harem_search_service import HaremSearchService
 from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
@@ -1709,15 +1710,41 @@ def catalog_show(
 def catalog_harem(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
     account: str = typer.Option(..., "--account", "-a", help="Account whose harem to show."),
+    series: str | None = typer.Option(None, "--series", help="Case-insensitive series text filter."),
+    exact_series: bool = typer.Option(False, "--exact-series", help="Require an exact series match."),
+    key_type: str | None = typer.Option(None, "--key-type", help="Filter by key tier, such as gold."),
+    min_keys: int | None = typer.Option(None, "--min-keys", help="Minimum imported key count."),
+    max_keys: int | None = typer.Option(None, "--max-keys", help="Maximum imported key count."),
+    min_kakera: int | None = typer.Option(None, "--min-kakera", help="Minimum imported Kakera value."),
+    unresolved_only: bool = typer.Option(False, "--unresolved-only", help="Only entries still needing $im identity data."),
+    sort_by: str = typer.Option("kakera", "--sort", help="Sort by kakera, keys, name, or observed."),
+    limit: int | None = typer.Option(None, "--limit", "-n", min=1, help="Maximum matching entries."),
 ) -> None:
-    """Show the latest keyed-harem observations for one server/account pair."""
-    entries = CatalogService().harem_keys(server, account)
+    """Search imported keyed-harem observations for one server/account pair."""
+    try:
+        entries = HaremSearchService().search(
+            server,
+            account,
+            series=series,
+            exact_series=exact_series,
+            key_type=key_type,
+            min_keys=min_keys,
+            max_keys=max_keys,
+            min_kakera=min_kakera,
+            unresolved_only=unresolved_only,
+            sort_by=sort_by,
+            limit=limit,
+        )
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
     if not entries:
-        console.print("[yellow]No keyed harem entries imported for this server/account yet.[/yellow]")
+        console.print("[yellow]No keyed-harem entries matched the requested filters.[/yellow]")
         raise typer.Exit()
 
-    table = Table(title=f"{account} - keyed harem")
+    table = Table(title=f"{account} - keyed harem search")
     table.add_column("Character", style="green")
+    table.add_column("Series")
     table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
     table.add_column("Kakera", justify="right", style="magenta")
@@ -1726,6 +1753,7 @@ def catalog_harem(
     for entry in entries:
         table.add_row(
             entry.character_name,
+            entry.character.series if entry.character else "Needs $im",
             entry.key_type.title(),
             str(entry.key_count),
             _format_optional_number(entry.kakera_value),
@@ -1733,6 +1761,10 @@ def catalog_harem(
             entry.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
+    if any(entry.character is None for entry in entries):
+        console.print(
+            "[dim]Unresolved entries cannot be matched by series until a matching $im import provides identity data.[/dim]"
+        )
 
 
 @catalog_app.command("keyfarm")
