@@ -151,6 +151,8 @@ message edits through the existing automatic importer. Roll commands such as
 reactions from the configured user are tracked so Mudae Kakera receipts are
 assigned to the right account. It automatically opens and completes
 harem/antidisable scans when it sees page 1 through the final page.
+When Mudae responds to a slash interaction, MOA can recover the invoking user
+from Discord's interaction metadata instead of relying on message content.
 `--mudae-user-id` or `MOA_MUDAE_BOT_ID` can optionally restrict imports to the
 real Mudae bot. The bot does not impersonate the user or click Mudae
 components; pagination still follows the user's normal Discord interaction.

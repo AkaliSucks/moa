@@ -150,11 +150,18 @@ class DiscordListenerService:
         if message.author.bot:
             await self._handle_bot_message(message)
             return
-        content = (message.content or "").lstrip()
-        if not content.startswith(("$", "/")):
-            return
         identity = self._identity_for_ids(str(message.guild.id), str(message.author.id))
         if identity is None:
+            return
+        content = (message.content or "").lstrip()
+        if not content:
+            self._logger.warning(
+                "Configured user's Discord message %s had no readable content; "
+                "enable Message Content Intent for prefix-command tracking.",
+                message.id,
+            )
+            return
+        if not content.startswith(("$", "/")):
             return
         self._contexts[message.channel.id] = DiscordCommandContext(
             server_id=str(message.guild.id),
@@ -241,6 +248,8 @@ class DiscordListenerService:
         if self._mudae_user_id is not None and message.author.id != self._mudae_user_id:
             return
         context = self._contexts.get(message.channel.id)
+        if context is None:
+            context = self._context_from_interaction(message)
         if context is None or time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
             return
         raw_message = self.extract_message_text(message)
@@ -308,6 +317,39 @@ class DiscordListenerService:
             context.identity,
             scan_id,
         )
+
+    def _context_from_interaction(self, message: discord.Message) -> DiscordCommandContext | None:
+        """Recover account context when Mudae answered a slash interaction."""
+        interaction = getattr(message, "interaction", None)
+        user = getattr(interaction, "user", None)
+        command_name = getattr(interaction, "name", None)
+        if user is None:
+            metadata = getattr(message, "interaction_metadata", None)
+            user = getattr(metadata, "user", None)
+        if user is None or message.guild is None:
+            return None
+        identity = self._identity_for_ids(str(message.guild.id), str(user.id))
+        if identity is None:
+            return None
+        context = DiscordCommandContext(
+            server_id=str(message.guild.id),
+            user_id=str(user.id),
+            identity=identity,
+            captured_at=time.monotonic(),
+            expected_kind=(
+                self._expected_kind_for_command(command_name)
+                if command_name
+                else None
+            ),
+        )
+        self._contexts[message.channel.id] = context
+        self._logger.info(
+            "Tracking Discord interaction /%s for %s / %s",
+            command_name or "unknown",
+            identity.server,
+            identity.account,
+        )
+        return context
 
     def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
         detected_kind = self._router.detect(raw_message).kind

@@ -126,6 +126,35 @@ def test_listener_uses_cached_message_for_raw_edit_without_fetching(tmp_path) ->
     asyncio.run(listener.handle_raw_message_edit(payload))
 
 
+def test_listener_recovers_context_from_mudae_interaction_response(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+    )
+    message = SimpleNamespace(
+        id=987,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=789),
+        interaction=SimpleNamespace(
+            name="wa",
+            user=SimpleNamespace(id=456),
+        ),
+    )
+
+    context = listener._context_from_interaction(message)
+
+    assert context is not None
+    assert context.identity.account == "ernieuuu"
+    assert context.expected_kind == "roll"
+
+
 def test_listener_presence_uses_watching_status_and_truncates_custom_text(tmp_path) -> None:
     listener = DiscordListenerService(
         catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
