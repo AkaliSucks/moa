@@ -29,6 +29,8 @@ class ConfigProfile(MOAModel):
     name: str
     active_server: str | None = None
     active_account: str | None = None
+    active_server_id: str | None = None
+    active_user_id: str | None = None
     accounts: tuple[ConfigAccount, ...] = ()
 
 
@@ -152,7 +154,64 @@ class ConfigService:
                 f"Add `{normalized_account}` on `{normalized_server}` to profile `{profile.name}` first."
             )
         updated_profile = profile.model_copy(
-            update={"active_server": normalized_server, "active_account": normalized_account}
+            update={
+                "active_server": normalized_server,
+                "active_account": normalized_account,
+                "active_server_id": next(
+                    (
+                        item.discord_server_id
+                        for item in profile.accounts
+                        if item.server.casefold() == normalized_server.casefold()
+                        and item.account.casefold() == normalized_account.casefold()
+                    ),
+                    None,
+                ),
+                "active_user_id": next(
+                    (
+                        item.discord_user_id
+                        for item in profile.accounts
+                        if item.server.casefold() == normalized_server.casefold()
+                        and item.account.casefold() == normalized_account.casefold()
+                    ),
+                    None,
+                ),
+            }
+        )
+        self._save_profile(config, updated_profile)
+        return updated_profile
+
+    def use_identity_ids(
+        self,
+        server_id: str,
+        user_id: str,
+        profile_name: str | None = None,
+    ) -> ConfigProfile:
+        """Select an active context by stable Discord IDs."""
+        config = self.load()
+        profile = self.profile(profile_name)
+        normalized_server_id = self._clean(server_id, "server ID")
+        normalized_user_id = self._clean(user_id, "user ID")
+        identity = next(
+            (
+                item
+                for item in profile.accounts
+                if item.discord_server_id == normalized_server_id
+                and item.discord_user_id == normalized_user_id
+            ),
+            None,
+        )
+        if identity is None:
+            raise ValueError(
+                f"No configured account matches server ID `{normalized_server_id}` and "
+                f"user ID `{normalized_user_id}` in profile `{profile.name}`."
+            )
+        updated_profile = profile.model_copy(
+            update={
+                "active_server": identity.server,
+                "active_account": identity.account,
+                "active_server_id": normalized_server_id,
+                "active_user_id": normalized_user_id,
+            }
         )
         self._save_profile(config, updated_profile)
         return updated_profile
@@ -168,6 +227,19 @@ class ConfigService:
         if server and account:
             return server.strip(), account.strip()
         profile = self.profile(profile_name)
+        if profile.active_server is None or profile.active_account is None:
+            if profile.active_server_id and profile.active_user_id:
+                identity = next(
+                    (
+                        item
+                        for item in profile.accounts
+                        if item.discord_server_id == profile.active_server_id
+                        and item.discord_user_id == profile.active_user_id
+                    ),
+                    None,
+                )
+                if identity is not None:
+                    return identity.server, identity.account
         return profile.active_server, profile.active_account
 
     def owned_account_names(self, server: str, profile_name: str | None = None) -> tuple[str, ...]:

@@ -18,6 +18,26 @@ def test_config_service_persists_profiles_accounts_and_active_context(tmp_path: 
     assert service.owned_account_names("Second Server") == ("solo_account",)
 
 
+def test_config_service_selects_active_context_by_discord_ids(tmp_path: Path) -> None:
+    service = ConfigService(tmp_path / "config.json")
+    service.add_account(
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        discord_server_id="1323181920397426763",
+        discord_user_id="146851153412358144",
+    )
+
+    selected = service.use_identity_ids(
+        "1323181920397426763",
+        "146851153412358144",
+    )
+
+    assert selected.active_server == "Lake Arrowhead 2025"
+    assert selected.active_account == "ernieuuu"
+    assert selected.active_server_id == "1323181920397426763"
+    assert selected.active_user_id == "146851153412358144"
+
+
 def test_config_service_updates_existing_identity_with_discord_ids(tmp_path: Path) -> None:
     service = ConfigService(tmp_path / "config.json")
     service.add_account("Lake Arrowhead 2025", "ernieuuu")

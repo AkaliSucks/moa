@@ -7,8 +7,8 @@ including alts.
 
 ```powershell
 moa config account add --server "Lake Arrowhead 2025" --account "ernieuuu" --role primary --server-id "1323181920397426763" --user-id "146851153412358144"
-moa config account add --server "Lake Arrowhead 2025" --account "ernie_alt" --role alt
-moa config use --server "Lake Arrowhead 2025" --account "ernieuuu"
+moa config account add --server "Lake Arrowhead 2025" --account "ernie_alt" --role alt --server-id "1323181920397426763" --user-id "<alt Discord user ID>"
+moa config use --server-id "1323181920397426763" --user-id "146851153412358144"
 moa config show
 ```
 

@@ -160,14 +160,25 @@ def config_account_add(
 
 @config_app.command("use")
 def config_use(
-    server: str = typer.Option(..., "--server", "-s", help="Active Mudae server label."),
-    account: str = typer.Option(..., "--account", "-a", help="Active Mudae account name."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Active Mudae server label."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Active Mudae account name."),
     profile: str | None = typer.Option(None, "--profile", help="Profile to update."),
+    server_id: str | None = typer.Option(None, "--server-id", help="Stable Discord server ID."),
+    user_id: str | None = typer.Option(None, "--user-id", help="Stable Discord user ID."),
 ) -> None:
     """Select the default server/account context for profile-aware commands."""
     service = ConfigService()
     try:
-        selected = service.use_context(server, account, profile)
+        if bool(server_id) != bool(user_id):
+            raise ValueError("--server-id and --user-id must be supplied together.")
+        if server_id and user_id:
+            selected = service.use_identity_ids(server_id, user_id, profile)
+        elif server and account:
+            selected = service.use_context(server, account, profile)
+        else:
+            raise ValueError(
+                "Provide either --server/--account or --server-id/--user-id."
+            )
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error

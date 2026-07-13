@@ -182,3 +182,39 @@ def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_p
     assert shown.exit_code == 0
     assert "ernie_alt" in shown.stdout
     assert "Active" in shown.stdout
+
+
+def test_config_use_accepts_discord_ids(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    runner = CliRunner()
+    runner.invoke(
+        main.app,
+        [
+            "config",
+            "account",
+            "add",
+            "--server",
+            "Lake Arrowhead 2025",
+            "--account",
+            "ernieuuu",
+            "--server-id",
+            "1323181920397426763",
+            "--user-id",
+            "146851153412358144",
+        ],
+    )
+
+    result = runner.invoke(
+        main.app,
+        [
+            "config",
+            "use",
+            "--server-id",
+            "1323181920397426763",
+            "--user-id",
+            "146851153412358144",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Lake Arrowhead 2025 / ernieuuu" in result.stdout
