@@ -115,6 +115,7 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert keyed[0].kakera_value == 1440
     assert keyed[0].unavailable is False
     assert keyed[0].unavailable_reason is None
+    assert unavailable[0].rollability_status == "Unavailable ($togglewestern)"
     assert unavailable[0].unavailable_reason == "$togglewestern"
 
 

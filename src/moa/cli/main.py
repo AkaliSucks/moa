@@ -2084,7 +2084,7 @@ def catalog_top(
     table.add_column("Series")
     table.add_column("Ownership")
     table.add_column("Keys")
-    table.add_column("Kakera")
+    table.add_column("Kakera value")
     table.add_column("Rollability")
     table.add_column("Observed (UTC)")
     for character in characters:
