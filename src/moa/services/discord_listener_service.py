@@ -248,13 +248,15 @@ class DiscordListenerService:
             self._message_cache = dict(list(self._message_cache.items())[-1000:])
         if self._mudae_user_id is not None and message.author.id != self._mudae_user_id:
             return
-        context = self._contexts.get(message.channel.id)
-        if context is None:
-            context = self._context_from_interaction(message)
-        if context is None or time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
-            return
         raw_message = self.extract_message_text(message)
         if not raw_message:
+            return
+        context = self._context_from_interaction(message)
+        if context is None:
+            context = self._context_from_reaction_receipt(message, raw_message)
+        if context is None:
+            context = self._contexts.get(message.channel.id)
+        if context is None or time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
             return
         kind = self._resolve_message_kind(context.expected_kind, raw_message)
         if kind is None:
@@ -332,16 +334,20 @@ class DiscordListenerService:
         identity = self._identity_for_ids(str(message.guild.id), str(user.id))
         if identity is None:
             return None
+        expected_kind = self._expected_kind_for_command(command_name) if command_name else None
+        existing = self._contexts.get(message.channel.id)
+        if (
+            existing is not None
+            and existing.user_id == str(user.id)
+            and existing.expected_kind == expected_kind
+        ):
+            return existing
         context = DiscordCommandContext(
             server_id=str(message.guild.id),
             user_id=str(user.id),
             identity=identity,
             captured_at=time.monotonic(),
-            expected_kind=(
-                self._expected_kind_for_command(command_name)
-                if command_name
-                else None
-            ),
+            expected_kind=expected_kind,
         )
         self._contexts[message.channel.id] = context
         self._logger.info(
@@ -352,8 +358,42 @@ class DiscordListenerService:
         )
         return context
 
+    def _context_from_reaction_receipt(
+        self,
+        message: discord.Message,
+        raw_message: str,
+    ) -> DiscordCommandContext | None:
+        """Resolve a Mudae button-reaction receipt without a Discord reaction event."""
+        if message.guild is None:
+            return None
+        try:
+            receipt = self._parser.parse_kakera_reaction_receipt(raw_message)
+        except MudaeParseError:
+            return None
+        identity = self._config.identity_for_discord_server_account(
+            str(message.guild.id), receipt.account_name, self._profile_name
+        )
+        if identity is None:
+            return None
+        context = DiscordCommandContext(
+            server_id=str(message.guild.id),
+            user_id=identity.discord_user_id or "",
+            identity=identity,
+            captured_at=time.monotonic(),
+            expected_kind="reaction_receipt",
+        )
+        self._contexts[message.channel.id] = context
+        self._logger.info(
+            "Resolved Kakera receipt for %s / %s from Mudae's receipt message",
+            identity.server,
+            identity.account,
+        )
+        return context
+
     def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
         detected_kind = self._router.detect(raw_message).kind
+        if detected_kind == "reaction_receipt":
+            return detected_kind
         if expected_kind == "roll":
             try:
                 self._parser.parse_roll(raw_message)
@@ -372,6 +412,14 @@ class DiscordListenerService:
             except MudaeParseError:
                 return None
             return "disablelist"
+        if expected_kind == "timers":
+            try:
+                self._parser.parse_timer_state(raw_message)
+            except MudaeParseError:
+                return None
+            return "timers"
+        if expected_kind in {"settings", "bonus"}:
+            return expected_kind if detected_kind == expected_kind else None
         if expected_kind == "reaction_receipt":
             return None
         if expected_kind in self._SCAN_KINDS:
@@ -439,6 +487,12 @@ class DiscordListenerService:
             return "antidisable"
         if normalized in {"k", "kakera"}:
             return "kakera"
+        if normalized in {"tu", "rolls"}:
+            return "timers"
+        if normalized in {"settings", "set"}:
+            return "settings"
+        if normalized in {"bonus", "bonuses"}:
+            return "bonus"
         if normalized.startswith("dl"):
             return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:

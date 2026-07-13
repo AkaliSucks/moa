@@ -73,6 +73,23 @@ def test_config_service_resolves_identity_for_discord_listener(tmp_path: Path) -
     assert service.profile().accounts[0] == identity
 
 
+def test_config_service_resolves_identity_by_server_and_account_name(tmp_path: Path) -> None:
+    service = ConfigService(tmp_path / "config.json")
+    service.add_account(
+        "Lake Arrowhead 2025",
+        "cute_beagle_91130",
+        discord_server_id="1323181920397426763",
+        discord_user_id="147839232239599616",
+    )
+
+    identity = service.identity_for_discord_server_account(
+        "1323181920397426763", "CUTE_BEAGLE_91130"
+    )
+
+    assert identity is not None
+    assert identity.account == "cute_beagle_91130"
+
+
 def test_config_service_supports_named_profiles(tmp_path: Path) -> None:
     service = ConfigService(tmp_path / "config.json")
     service.add_profile("travel")

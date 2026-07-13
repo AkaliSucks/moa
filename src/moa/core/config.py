@@ -276,6 +276,26 @@ class ConfigService:
             None,
         )
 
+    def identity_for_discord_server_account(
+        self,
+        server_id: str,
+        account_name: str,
+        profile_name: str | None = None,
+    ) -> ConfigAccount | None:
+        """Resolve a configured account name within one Discord server."""
+        normalized_server_id = self._clean(server_id, "server ID")
+        normalized_account = self._clean(account_name, "account")
+        profile = self.profile(profile_name)
+        return next(
+            (
+                identity
+                for identity in profile.accounts
+                if identity.discord_server_id == normalized_server_id
+                and identity.account.casefold() == normalized_account.casefold()
+            ),
+            None,
+        )
+
     def _save_profile(self, config: MOAConfig, updated_profile: ConfigProfile) -> None:
         profiles = tuple(
             updated_profile if profile.name.casefold() == updated_profile.name.casefold() else profile

@@ -11,6 +11,13 @@ def test_router_detects_supported_timer_and_server_setting_messages() -> None:
     assert settings.kind == "settings"
 
 
+def test_router_detects_roll_limit_and_vote_reset_messages_as_timers() -> None:
+    router = MudaeMessageRouter()
+
+    assert router.detect("The roulette is limited to 17 uses per hour. 50 min left.").kind == "timers"
+    assert router.detect("Use this command again to reset your rolls timer for ONE server.").kind == "timers"
+
+
 def test_router_detects_rankless_rolls_after_more_specific_formats() -> None:
     detection = MudaeMessageRouter().detect(
         "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"

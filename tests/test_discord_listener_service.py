@@ -65,6 +65,9 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$m") == "roll"
     assert DiscordListenerService._expected_kind_for_command("$k") == "kakera"
     assert DiscordListenerService._expected_kind_for_command("$dl") == "disablelist"
+    assert DiscordListenerService._expected_kind_for_command("$settings") == "settings"
+    assert DiscordListenerService._expected_kind_for_command("$bonus") == "bonus"
+    assert DiscordListenerService._expected_kind_for_command("$rolls") == "timers"
 
 
 def test_extract_message_text_normalizes_discord_custom_emojis() -> None:
@@ -115,6 +118,19 @@ def test_listener_keeps_scan_commands_from_being_misclassified_as_rolls(tmp_path
 
     assert listener._resolve_message_kind("harem", raw_message) == "harem"
     assert listener._resolve_message_kind("harem", "Mai Sakurajima\nSeries\n34:kakera:") is None
+
+
+def test_listener_does_not_turn_bonus_or_timer_text_into_a_roll(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+
+    timer_text = "You have 0 rolls left. Next rolls reset in 40 min."
+    bonus_text = "Player Bonuses\nRolls per hour: +9"
+
+    assert listener._resolve_message_kind("bonus", timer_text) is None
+    assert listener._resolve_message_kind("bonus", bonus_text) == "bonus"
+    assert listener._resolve_message_kind("timers", timer_text) == "timers"
 
 
 def test_listener_tracks_configured_user_reactions(tmp_path) -> None:

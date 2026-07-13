@@ -279,6 +279,8 @@ class TimerStateSnapshot(MOAModel):
     oq_stored: int | None
     ot_remaining: int | None
     ouro_refill_minutes: int | None
+    rolls_reset_status: str | None = None
+    rolls_per_hour_limit: int | None = None
 
 
 class ServerSettingMetric(MOAModel):

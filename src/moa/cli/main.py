@@ -2612,6 +2612,13 @@ def catalog_timers(
         table.add_row("Claim", claim)
     if state.rolls_left is not None:
         table.add_row("Rolls", f"{state.rolls_left} left; reset in {state.rolls_reset_minutes} min")
+    elif state.rolls_reset_status == "limited_timer":
+        table.add_row(
+            "Rolls",
+            f"Limited to {state.rolls_per_hour_limit} per hour; reset in {state.rolls_reset_minutes} min",
+        )
+    elif state.rolls_reset_status == "vote_required":
+        table.add_row("Rolls", "Vote required to reset")
     if state.daily_kakera_ready is not None:
         table.add_row("$dk", "Ready" if state.daily_kakera_ready else "Not ready")
     if state.rt_available is not None:

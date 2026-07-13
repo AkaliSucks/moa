@@ -221,6 +221,21 @@ def test_parse_roll_accepts_a_positive_kakera_prefix() -> None:
     assert roll.kakera_value == 1386
 
 
+def test_parse_roll_accepts_a_claim_card_with_a_separate_key_line() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Mudae-chan\n"
+        "Mudae's Mascot\n"
+        ":bronzekey: (1) $embedcolor unlocked!\n"
+        "188 :kakera:"
+    )
+
+    assert roll.name == "Mudae-chan"
+    assert roll.series == "Mudae's Mascot"
+    assert roll.kakera_value == 188
+    assert roll.displayed_key_type == "bronze"
+    assert roll.displayed_key_count == 1
+
+
 def test_parse_roll_accepts_current_ranked_roll_card_layout() -> None:
     roll = MudaeTextParser().parse_roll(
         "Mai Sakurajima\n"
@@ -595,6 +610,25 @@ def test_parse_timer_state_accepts_a_shorter_customized_layout() -> None:
     assert state.daily_kakera_ready is False
     assert state.rt_available is None
     assert state.oq_stored == 0
+
+
+def test_parse_timer_state_distinguishes_roll_limit_and_vote_reset_prompt() -> None:
+    parser = MudaeTextParser()
+
+    limited = parser.parse_timer_state(
+        "ernieuuu, the roulette is limited to 17 uses per hour. 50 min left.\n"
+        "Upvote Mudae to reset the timer: $vote."
+    )
+    prompt = parser.parse_timer_state(
+        "Upvote Mudae and use this command again to reset your rolls timer for ONE server "
+        "(one vote per 12h)."
+    )
+
+    assert limited.rolls_reset_status == "limited_timer"
+    assert limited.rolls_per_hour_limit == 17
+    assert limited.rolls_reset_minutes == 50
+    assert prompt.rolls_reset_status == "vote_required"
+    assert prompt.rolls_per_hour_limit is None
 
 
 def test_parse_top_page_rejects_unrecognized_text() -> None:

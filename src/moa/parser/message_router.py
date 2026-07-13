@@ -55,7 +55,12 @@ class MudaeMessageRouter:
             return self._detected("disablelist", "Mudae disablelist header and totals found.")
         if "current $personalrare" in normalized:
             return self._detected("personalrare", "Mudae personal rarity value found.")
-        if "you can claim right now" in normalized or "you can't claim for another" in normalized:
+        if (
+            "you can claim right now" in normalized
+            or "you can't claim for another" in normalized
+            or "roulette is limited to" in normalized
+            or "reset your rolls timer for one server" in normalized
+        ):
             return self._detected("timers", "Mudae action-timer claim state found.")
         if "current level is" in normalized and "list of perks" in normalized:
             return self._detected("towerstate", "Mudae Kakera Tower state found.")

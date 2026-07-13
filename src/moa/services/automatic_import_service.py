@@ -110,10 +110,18 @@ class AutomaticImportService:
             )
         if kind == "roll":
             account = self._require(account_name, "account", kind)
+            roll = self._parser.parse_roll(raw_message)
             result = self._catalog.import_roll(
-                self._parser.parse_roll(raw_message), server, account, raw_message, source
+                roll, server, account, raw_message, source
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported roll observation.")
+            key_note = ""
+            if roll.displayed_key_type is not None and roll.displayed_key_count is not None:
+                key_note = f" with :{roll.displayed_key_type}key: ({roll.displayed_key_count})"
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported roll observation{key_note}.",
+            )
         if kind == "im":
             result = self._catalog.import_character_details(
                 self._parser.parse_character_details(raw_message), server, raw_message, source

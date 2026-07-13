@@ -52,13 +52,13 @@ class MudaeTextParser:
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = re.compile(
         r"^(?P<roulette>.+?)(?:\s+roulette)?(?:\s*[\u00b7\u2022]\s*|\s+)"
-        r"(?P<value>[\d,]+)(?:\D.*)?$",
+        r"(?P<value>[\d,]+)\s*(?::kakera:|\bkakera\b)(?:\D.*)?$",
         re.IGNORECASE,
     )
     _CLAIM_RANK = re.compile(r"^Claim Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
     _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _KAKERA = re.compile(r"^\+?(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+    _KAKERA = re.compile(r"^\+?(?P<value>[\d,]+)\s*:kakera:$", re.IGNORECASE)
     _ROLL_KEY = re.compile(r":(?P<key_type>[a-z]+)key:\s*\((?P<count>\d+)\)", re.IGNORECASE)
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
@@ -159,7 +159,7 @@ class MudaeTextParser:
     )
     _SERVER_PREMIUM = re.compile(r"Server\s+(?P<status>not\s+premium|premium)", re.IGNORECASE)
     _SETTING_LINE = re.compile(
-        r"^[·•]\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
+        r"^\s*[^\w\s]*\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
     )
     _SETTING_CLAIM_RESET = re.compile(r"Claim reset:\s*every\s*(?P<value>\d+)\s*min", re.IGNORECASE)
     _SETTING_RESET_MINUTE = re.compile(r"Exact minute of the reset:\s*(?P<value>\S+)", re.IGNORECASE)
@@ -180,6 +180,15 @@ class MudaeTextParser:
     )
     _TIMER_ROLLS = re.compile(
         r"You have\s*(?P<rolls>\d+)\s+rolls? left\.\s*Next rolls reset in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+    _TIMER_ROLL_LIMITED = re.compile(
+        r"roulette is limited to\s*(?P<limit>\d+)\s+uses? per hour\.\s*"
+        r"(?P<duration>.+?)\s+left\.",
+        re.IGNORECASE,
+    )
+    _TIMER_ROLL_VOTE_PROMPT = re.compile(
+        r"use this command again to reset your rolls timer for one server",
         re.IGNORECASE,
     )
     _TIMER_ROLL_STOCK = re.compile(r"You have\s*(?P<value>\d+)\s+rolls? reset in stock", re.IGNORECASE)
@@ -331,9 +340,19 @@ class MudaeTextParser:
             kakera = self._KAKERA.match(lines[kakera_index])
             if kakera is None:
                 raise MudaeParseError("Could not parse the Mudae Kakera value.")
+            key_index = next(
+                (index for index, line in enumerate(lines) if self._ROLL_KEY.search(line)),
+                None,
+            )
+            if key_index == kakera_index - 1 and key_index >= 2:
+                name = lines[key_index - 2]
+                series = lines[key_index - 1]
+            else:
+                name = lines[kakera_index - 2]
+                series = lines[kakera_index - 1]
             return RollObservation(
-                name=lines[kakera_index - 2],
-                series=lines[kakera_index - 1],
+                name=name,
+                series=series,
                 claim_rank=None,
                 kakera_value=self._number(kakera.group("value")),
                 displayed_key_type=key.group("key_type").lower() if key else None,
@@ -700,6 +719,8 @@ class MudaeTextParser:
         claim_ready = first(self._TIMER_CLAIM_READY)
         claim_waiting = first(self._TIMER_CLAIM_WAITING)
         rolls = first(self._TIMER_ROLLS)
+        limited_rolls = first(self._TIMER_ROLL_LIMITED)
+        vote_prompt = first(self._TIMER_ROLL_VOTE_PROMPT)
         roll_stock = first(self._TIMER_ROLL_STOCK)
         vote = first(self._TIMER_VOTE)
         daily = first(self._TIMER_DAILY)
@@ -715,6 +736,8 @@ class MudaeTextParser:
             claim_ready,
             claim_waiting,
             rolls,
+            limited_rolls,
+            vote_prompt,
             roll_stock,
             vote,
             daily,
@@ -734,11 +757,23 @@ class MudaeTextParser:
         else:
             can_claim_now = None
             claim_reset_minutes = None
+        if rolls is not None:
+            rolls_reset_minutes = self._duration_minutes(rolls.group("duration"))
+            rolls_reset_status = "timer"
+        elif limited_rolls is not None:
+            rolls_reset_minutes = self._duration_minutes(limited_rolls.group("duration"))
+            rolls_reset_status = "limited_timer"
+        elif vote_prompt is not None:
+            rolls_reset_minutes = None
+            rolls_reset_status = "vote_required"
+        else:
+            rolls_reset_minutes = None
+            rolls_reset_status = None
         return TimerStateSnapshot(
             can_claim_now=can_claim_now,
             claim_reset_minutes=claim_reset_minutes,
             rolls_left=int(rolls.group("rolls")) if rolls else None,
-            rolls_reset_minutes=(self._duration_minutes(rolls.group("duration")) if rolls else None),
+            rolls_reset_minutes=rolls_reset_minutes,
             rolls_reset_stock=int(roll_stock.group("value")) if roll_stock else None,
             vote_reset_minutes=(self._duration_minutes(vote.group("duration")) if vote else None),
             daily_reset_minutes=(self._duration_minutes(daily.group("duration")) if daily else None),
@@ -782,6 +817,8 @@ class MudaeTextParser:
             ouro_refill_minutes=(
                 self._duration_minutes(ouro_refill.group("duration")) if ouro_refill else None
             ),
+            rolls_reset_status=rolls_reset_status,
+            rolls_per_hour_limit=(int(limited_rolls.group("limit")) if limited_rolls else None),
         )
 
     def parse_tower_state(self, text: str) -> TowerStateSnapshot:
