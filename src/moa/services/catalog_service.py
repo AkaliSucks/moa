@@ -79,7 +79,7 @@ class CatalogService:
     ) -> CharacterDetailsImportResult:
         return self._repository.import_character_details(details, server_name, raw_message, source)
 
-    def top(self, limit: int = 15) -> tuple[RankedCatalogCharacter, ...]:
+    def top(self, limit: int | None = 15) -> tuple[RankedCatalogCharacter, ...]:
         return self._repository.top(limit)
 
     def character_count(self) -> int:

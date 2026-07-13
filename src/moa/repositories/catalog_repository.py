@@ -82,7 +82,7 @@ class CatalogRepositoryProtocol(Protocol):
         source: str,
     ) -> CharacterDetailsImportResult: ...
 
-    def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]: ...
+    def top(self, limit: int | None) -> tuple[RankedCatalogCharacter, ...]: ...
 
     def character_count(self) -> int: ...
 
@@ -585,14 +585,15 @@ class CatalogRepository:
             rows = connection.execute("SELECT reaction_label, COUNT(*) AS count, SUM(kakera_earned) AS total" + query + " GROUP BY reaction_label ORDER BY total DESC", params).fetchall()
         return KakeraReactionSummary(receipt_count=totals["count"], total_kakera_earned=totals["total"], average_kakera_earned=totals["average"], highest_kakera_earned=totals["highest"], by_reaction=tuple((row["reaction_label"], row["count"], row["total"]) for row in rows))
 
-    def top(self, limit: int) -> tuple[RankedCatalogCharacter, ...]:
+    def top(self, limit: int | None) -> tuple[RankedCatalogCharacter, ...]:
         """Return characters ordered by their most recently imported claim rank."""
-        if limit <= 0:
+        if limit is not None and limit <= 0:
             raise ValueError("Catalog limit must be positive.")
 
+        limit_clause = "LIMIT ?" if limit is not None else ""
         with self._connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT
                     characters.id,
                     characters.name,
@@ -612,9 +613,9 @@ class CatalogRepository:
                 )
                 WHERE rank_snapshots.claim_rank IS NOT NULL
                 ORDER BY rank_snapshots.claim_rank ASC
-                LIMIT ?
+                {limit_clause}
                 """,
-                (limit,),
+                (limit,) if limit is not None else (),
             ).fetchall()
 
         return tuple(

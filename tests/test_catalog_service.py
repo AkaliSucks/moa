@@ -32,6 +32,7 @@ def test_import_top_page_persists_characters_snapshots_and_raw_message(tmp_path)
     ranked = service.top()
     assert [character.character.name for character in ranked] == ["Hatsune Miku", "Zero Two"]
     assert [character.claim_rank for character in ranked] == [1, 2]
+    assert len(service.top(None)) == 2
 
     with sqlite3.connect(database_path) as connection:
         raw_message = connection.execute("SELECT raw_message FROM import_events").fetchone()[0]

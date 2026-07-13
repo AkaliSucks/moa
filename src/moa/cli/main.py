@@ -24,6 +24,7 @@ from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.server_comparison_service import ServerComparisonService
+from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
@@ -1644,32 +1645,69 @@ def harem_complete(scan_id: int) -> None:
 @catalog_app.command("top")
 def catalog_top(
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of characters to display."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Server for account evidence filters."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account for account evidence filters."),
+    series: str | None = typer.Option(None, "--series", help="Case-insensitive series text filter."),
+    exact_series: bool = typer.Option(False, "--exact-series", help="Require an exact series match."),
+    keyed_only: bool = typer.Option(False, "--keyed-only", help="Only characters with imported key evidence."),
+    unavailable_only: bool = typer.Option(False, "--unavailable-only", help="Only characters observed as unavailable by $topx."),
+    sort_by: str = typer.Option("rank", "--sort", help="Sort by rank or name."),
 ) -> None:
-    """Show the best ranks currently stored in MOA's local catalog."""
-    service = CatalogService()
+    """Search imported `$top` ranks with optional account evidence filters."""
     try:
-        characters = service.top(limit)
+        characters = TopSearchService().search(
+            server_name=server,
+            account_name=account,
+            series=series,
+            exact_series=exact_series,
+            keyed_only=keyed_only,
+            unavailable_only=unavailable_only,
+            sort_by=sort_by,
+            limit=limit,
+        )
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
 
     if not characters:
-        console.print("[yellow]Catalog is empty. Import a $top page first.[/yellow]")
+        console.print("[yellow]No imported `$top` characters matched the requested filters.[/yellow]")
         raise typer.Exit()
 
-    table = Table(title="Imported Character Catalog")
+    table = Table(title="Imported Character Catalog Search")
     table.add_column("Claim rank", justify="right", style="cyan")
     table.add_column("Character", style="green")
     table.add_column("Series")
+    table.add_column("Key evidence")
+    table.add_column("Rollability")
     table.add_column("Observed (UTC)")
-    for ranked_character in characters:
+    for character in characters:
+        key_state = (
+            "Not requested"
+            if character.keyed is None
+            else "Keyed"
+            if character.keyed
+            else "No imported key"
+        )
+        rollability = (
+            "Not requested"
+            if character.unavailable is None
+            else "Unavailable"
+            if character.unavailable
+            else "Not observed unavailable"
+        )
         table.add_row(
-            f"#{ranked_character.claim_rank:,}",
-            ranked_character.character.name,
-            ranked_character.character.series,
-            ranked_character.observed_at.strftime("%Y-%m-%d %H:%M"),
+            f"#{character.claim_rank:,}",
+            character.character.name,
+            character.character.series,
+            key_state,
+            rollability,
+            character.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
+    if server and account:
+        console.print(
+            "[dim]No imported key evidence does not prove unowned, and no $topx observation does not prove rollable.[/dim]"
+        )
 
 
 @catalog_app.command("show")

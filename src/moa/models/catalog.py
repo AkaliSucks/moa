@@ -43,6 +43,17 @@ class RankedCatalogCharacter(MOAModel):
     observed_at: datetime
 
 
+class CatalogTopSearchEntry(MOAModel):
+    """A ranked catalog character cross-referenced with optional account evidence."""
+
+    character: CatalogCharacter
+    claim_rank: int
+    like_rank: int | None
+    observed_at: datetime
+    keyed: bool | None
+    unavailable: bool | None
+
+
 class TopImportResult(MOAModel):
     """Summary of a persisted `$top` import."""
 

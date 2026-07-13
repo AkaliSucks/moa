@@ -18,6 +18,19 @@ moa catalog harem --server "Lake Arrowhead 2025" --account "ernieuuu" `
 and `--min-keys` expresses a numeric `y>` filter. This searches only imported
 keyed-harem evidence; it does not claim that an unimported character is owned.
 
+For imported `$top` ranks, account evidence can be cross-referenced explicitly:
+
+```powershell
+moa catalog top --limit 50 `
+  --server "Lake Arrowhead 2025" --account "ernieuuu" `
+  --unavailable-only
+```
+
+`--keyed-only` means a matching keyed-harem observation exists. It is not an
+`o+`/owned filter for every character because MOA does not yet have complete
+ownership evidence for unkeyed characters. `--unavailable-only` is based only
+on direct `$topx` observations.
+
 The parser uses longest-match semantics, so `w+` is the wishlist flag while
 `w` is the waifu gender filter. It also recognizes numeric forms such as
 `z<5`, `y>7`, and `y!<3`.
