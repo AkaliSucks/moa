@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 
 import typer
@@ -169,6 +170,7 @@ def discord_listen(
         "[green]Starting Discord listener.[/green] It requires Message Content Intent, "
         "View Channel, and Read Message History permissions."
     )
+    logging.getLogger("moa.discord").setLevel(logging.INFO)
     try:
         DiscordListenerService(profile_name=profile, status_text=status).run(token, parsed_mudae_user_id)
     except ValueError as error:

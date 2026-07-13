@@ -357,6 +357,9 @@ class _MOADiscordClient(discord.Client):
 
     async def on_ready(self) -> None:
         self._listener._logger.info("Discord listener connected as %s", self.user)
+        self._listener._logger.info(
+            "Waiting for a configured user's Mudae command; use $mmrkty+ for a full owned-harem scan."
+        )
         await self.change_presence(
             status=discord.Status.online,
             activity=self._listener.presence_activity(),
