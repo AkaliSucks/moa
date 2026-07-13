@@ -975,6 +975,28 @@ def _format_rollability(
     return f"Unavailable ({reason or 'disabled'})"
 
 
+def _format_catalog_ownership(
+    owned: bool | None,
+    owner_name: str | None,
+    owner_is_self: bool | None,
+    unowned_only: bool,
+) -> str:
+    """Show direct harem evidence separately from server-scoped `$topo` claims."""
+    if owner_name and owner_is_self is True:
+        return f"Claimed by you ({owner_name})"
+    if owner_name and owner_is_self is False:
+        return f"Claimed by other ({owner_name})"
+    if owner_name:
+        return f"Claimed by {owner_name}"
+    if owned is None:
+        return "Not requested"
+    if owned:
+        return "Owned evidence"
+    if unowned_only:
+        return "Unowned (complete scan)"
+    return "No owned evidence"
+
+
 def _format_observed_at(observed_at: datetime) -> str:
     """Render imported timestamps consistently as UTC in compact CLI output."""
     if observed_at.tzinfo is not None:
@@ -1961,14 +1983,11 @@ def catalog_top(
     table.add_column("Rollability")
     table.add_column("Observed (UTC)")
     for character in characters:
-        ownership = (
-            "Not requested"
-            if character.owned is None
-            else "Owned evidence"
-            if character.owned
-            else "Unowned (complete scan)"
-            if unowned_only
-            else "No owned evidence"
+        ownership = _format_catalog_ownership(
+            character.owned,
+            character.owner_name,
+            character.owner_is_self,
+            unowned_only,
         )
         key_state = (
             "Not requested"

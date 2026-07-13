@@ -133,6 +133,16 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(False, None, "ernieuuu", True) == "Owned (ernieuuu)"
 
 
+def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
+    assert main._format_catalog_ownership(None, "cute_beagle_91130", True, False) == (
+        "Claimed by you (cute_beagle_91130)"
+    )
+    assert main._format_catalog_ownership(None, "xuppii", False, False) == (
+        "Claimed by other (xuppii)"
+    )
+    assert main._format_catalog_ownership(False, None, None, False) == "No owned evidence"
+
+
 def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
     runner = CliRunner()

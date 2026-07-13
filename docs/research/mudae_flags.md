@@ -28,8 +28,9 @@ moa catalog top --limit 50 `
 
 `--keyed-only` means a matching keyed-harem observation exists. It is not an
 `o+`/owned filter for every character because MOA does not yet have complete
-ownership evidence for unkeyed characters. `--unavailable-only` is based only
-on direct `$topx` observations.
+ownership evidence for unkeyed characters. `--unavailable-only` uses direct
+`$topx` observations plus server-scoped claimed-by evidence from `$topo`; claims
+by your configured primary/alt accounts are excluded from unavailable results.
 
 The parser uses longest-match semantics, so `w+` is the wishlist flag while
 `w` is the waifu gender filter. It also recognizes numeric forms such as
