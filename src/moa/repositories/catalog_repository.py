@@ -364,7 +364,7 @@ class CatalogRepository:
                         import_event_id,
                     ),
                 )
-                if ranked_character.owner_name and server_id is not None:
+                if server_id is not None:
                     connection.execute(
                         """
                         INSERT INTO top_owner_observations (
@@ -2327,7 +2327,7 @@ class CatalogRepository:
                     id INTEGER PRIMARY KEY,
                     server_context_id INTEGER NOT NULL REFERENCES server_contexts(id),
                     character_id INTEGER NOT NULL REFERENCES characters(id),
-                    owner_name TEXT NOT NULL,
+                    owner_name TEXT,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
@@ -2589,6 +2589,38 @@ class CatalogRepository:
             }
             if "owner_name" not in rank_columns:
                 connection.execute("ALTER TABLE rank_snapshots ADD COLUMN owner_name TEXT")
+            top_owner_columns = connection.execute(
+                "PRAGMA table_info(top_owner_observations)"
+            ).fetchall()
+            if any(
+                row["name"] == "owner_name" and row["notnull"]
+                for row in top_owner_columns
+            ):
+                connection.execute(
+                    "ALTER TABLE top_owner_observations RENAME TO top_owner_observations_legacy"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE top_owner_observations (
+                        id INTEGER PRIMARY KEY,
+                        server_context_id INTEGER NOT NULL REFERENCES server_contexts(id),
+                        character_id INTEGER NOT NULL REFERENCES characters(id),
+                        owner_name TEXT,
+                        observed_at TEXT NOT NULL,
+                        import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO top_owner_observations (
+                        id, server_context_id, character_id, owner_name, observed_at, import_event_id
+                    )
+                    SELECT id, server_context_id, character_id, owner_name, observed_at, import_event_id
+                    FROM top_owner_observations_legacy
+                    """
+                )
+                connection.execute("DROP TABLE top_owner_observations_legacy")
             owned_columns = {
                 row["name"]
                 for row in connection.execute(

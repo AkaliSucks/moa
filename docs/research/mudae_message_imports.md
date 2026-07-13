@@ -35,8 +35,9 @@ moa import top --server "Lake Arrowhead 2025" --clipboard
 ```
 
 Owner names shown after `=>` are retained as server-scoped claimed-by evidence,
-so catalog search can report reasons such as `Unavailable (claimed by xuppii)`
-only for that server. A normal `$top` page without owner names can still omit
+while rows without an owner are retained as `Unclaimed`. Catalog search can
+therefore report reasons such as `Unavailable (claimed by xuppii)` only for
+that server. A normal `$top` page without owner names can still omit
 `--server`.
 
 `moa import im --server <label> --clipboard` enriches the canonical character

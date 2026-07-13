@@ -53,7 +53,8 @@ class TopSearchService:
         keyed_names: set[str] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
         self_account_names: set[str] | None = None
-        owner_names: dict[str, str] | None = None
+        topo_owner_names: dict[str, str | None] | None = None
+        wishlist_names: set[str] | None = None
         if scoped:
             self_account_names = {
                 account.casefold()
@@ -71,7 +72,10 @@ class TopSearchService:
                 entry.character.name.casefold(): entry.reason
                 for entry in self._catalog.unavailable_characters(server_name, account_name)
             }
-            owner_names = {
+            wishlist = self._catalog.wishlist(server_name, account_name)
+            if wishlist is not None:
+                wishlist_names = {entry.name.casefold() for entry in wishlist.entries}
+            topo_owner_names = {
                 entry.character.name.casefold(): entry.owner_name
                 for entry in self._catalog.top_owner_observations(server_name)
             }
@@ -91,9 +95,17 @@ class TopSearchService:
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
-            owner_name = owner_names.get(name) if owner_names is not None else None
+            topo_observed = name in topo_owner_names if topo_owner_names is not None else None
+            owner_name = (
+                topo_owner_names[name]
+                if topo_observed and topo_owner_names is not None
+                else None
+            )
             topx_unavailable = (
                 name in unavailable_reasons if unavailable_reasons is not None else None
+            )
+            wishlist_match = (
+                name in wishlist_names if wishlist_names is not None else None
             )
             owner_is_self = (
                 owner_name.casefold() in self_account_names
@@ -103,6 +115,8 @@ class TopSearchService:
             unavailable = (
                 False
                 if owner_is_self is True
+                else False
+                if wishlist_match is True
                 else True
                 if owner_name
                 else topx_unavailable
@@ -110,10 +124,23 @@ class TopSearchService:
             unavailable_reason = (
                 None
                 if owner_is_self is True
+                else None
+                if wishlist_match is True
                 else f"claimed by {owner_name}"
                 if owner_name
                 else unavailable_reasons[name]
                 if topx_unavailable and unavailable_reasons is not None
+                else None
+            )
+            rollability_status = (
+                "Claimed"
+                if owner_name
+                else "Wishlist"
+                if wishlist_match is True
+                else f"Disabled ({unavailable_reasons[name] or 'disabled'})"
+                if topx_unavailable and unavailable_reasons is not None
+                else "Enabled"
+                if scoped
                 else None
             )
             if owned_only and not owned:
@@ -136,6 +163,8 @@ class TopSearchService:
                     unavailable_reason=unavailable_reason,
                     owner_name=owner_name,
                     owner_is_self=owner_is_self,
+                    topo_observed=topo_observed,
+                    rollability_status=rollability_status,
                 )
             )
 

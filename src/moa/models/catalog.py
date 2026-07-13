@@ -46,10 +46,10 @@ class RankedCatalogCharacter(MOAModel):
 
 
 class TopOwnerObservation(MOAModel):
-    """A server-scoped owner claim observed in a `$topo` page."""
+    """A server-scoped ownership state observed in a `$topo` page."""
 
     character: CatalogCharacter
-    owner_name: str
+    owner_name: str | None
     observed_at: datetime
 
 
@@ -66,6 +66,8 @@ class CatalogTopSearchEntry(MOAModel):
     unavailable_reason: str | None
     owner_name: str | None = None
     owner_is_self: bool | None = None
+    topo_observed: bool | None = None
+    rollability_status: str | None = None
 
 
 class TopImportResult(MOAModel):

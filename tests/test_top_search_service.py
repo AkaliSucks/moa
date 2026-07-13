@@ -9,7 +9,9 @@ from moa.models.catalog import (
     RankedCatalogCharacter,
     TopOwnerObservation,
     UnavailableCharacterObservation,
+    WishlistObservation,
 )
+from moa.models.character import WishlistEntry
 from moa.services.top_search_service import TopSearchService
 
 
@@ -64,6 +66,7 @@ class InMemoryTopCatalog:
             ),
         )
         self._owned_scan_complete = owned_scan_complete
+        self._wishlist = None
 
     def top(self, limit: int | None):
         return self._top if limit is None else self._top[:limit]
@@ -79,6 +82,9 @@ class InMemoryTopCatalog:
 
     def has_complete_harem_scan(self, server_name: str, account_name: str, scan_kind: str = "keys"):
         return scan_kind == "owned" and self._owned_scan_complete
+
+    def wishlist(self, server_name: str, account_name: str):
+        return self._wishlist
 
     def top_owner_observations(self, server_name: str):
         return tuple(
@@ -125,6 +131,71 @@ def test_top_search_uses_topo_owner_as_unavailable_reason() -> None:
 
     assert [entry.character.name for entry in unavailable] == ["Rem", "Albedo"]
     assert unavailable[1].unavailable_reason == "claimed by xuppii"
+
+
+def test_top_search_retains_unclaimed_topo_state() -> None:
+    catalog = InMemoryTopCatalog()
+    catalog._topo = (
+        TopOwnerObservation(
+            character=catalog._top[2].character,
+            owner_name=None,
+            observed_at=catalog._top[2].observed_at,
+        ),
+    )
+    catalog.top_owner_observations = lambda server_name: catalog._topo
+
+    albedo = next(
+        entry
+        for entry in TopSearchService(catalog).search(
+            server_name="Lake", account_name="ernieuuu"
+        )
+        if entry.character.name == "Albedo"
+    )
+
+    assert albedo.topo_observed is True
+    assert albedo.owner_name is None
+    assert albedo.unavailable is False
+    assert albedo.rollability_status == "Enabled"
+
+
+def test_top_search_marks_wishlist_as_rollability_status_and_overrides_disabled() -> None:
+    catalog = InMemoryTopCatalog()
+    catalog._wishlist = WishlistObservation(
+        server_name="Lake",
+        account_name="ernieuuu",
+        wishlist_count=1,
+        wishlist_capacity=15,
+        starwish_count=0,
+        starwish_capacity=1,
+        entries=(
+            WishlistEntry(
+                name="Albedo",
+                is_starwish=False,
+                is_owned_marker_present=False,
+                kakera_marker_present=False,
+            ),
+        ),
+        observed_at=catalog._top[2].observed_at,
+    )
+    catalog._unavailable = catalog._unavailable + (
+        UnavailableCharacterObservation(
+            character=catalog._top[2].character,
+            claim_rank=4,
+            reason="$togglewestern",
+            observed_at=catalog._top[2].observed_at,
+        ),
+    )
+
+    albedo = next(
+        entry
+        for entry in TopSearchService(catalog).search(
+            server_name="Lake", account_name="ernieuuu"
+        )
+        if entry.character.name == "Albedo"
+    )
+
+    assert albedo.rollability_status == "Wishlist"
+    assert albedo.unavailable is False
 
 
 def test_top_search_treats_selected_account_and_alt_accounts_as_owned() -> None:

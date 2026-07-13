@@ -32,6 +32,12 @@ ownership evidence for unkeyed characters. `--unavailable-only` uses direct
 `$topx` observations plus server-scoped claimed-by evidence from `$topo`; claims
 by your configured primary/alt accounts are excluded from unavailable results.
 
+The catalog separates Ownership from Rollability. Ownership uses `Claimed 💞 =>
+<owner>`, `Claimed`, `Unclaimed`, or `(no data)`. Rollability currently uses
+`Claimed`, `Wishlist`, `Disabled (...)`, or `Enabled`; `Enabled` means no
+imported blocking evidence, not a complete proof that every roll pool is
+currently available.
+
 The parser uses longest-match semantics, so `w+` is the wishlist flag while
 `w` is the waifu gender filter. It also recognizes numeric forms such as
 `z<5`, `y>7`, and `y!<3`.

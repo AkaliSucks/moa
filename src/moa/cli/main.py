@@ -965,9 +965,12 @@ def _format_rollability(
     reason: str | None,
     owner_name: str | None = None,
     owner_is_self: bool | None = None,
+    status: str | None = None,
 ) -> str:
+    if status:
+        return status
     if owner_is_self is True and owner_name:
-        return f"Owned ({owner_name})"
+        return "Claimed"
     if unavailable is None:
         return "Not requested"
     if not unavailable:
@@ -979,22 +982,16 @@ def _format_catalog_ownership(
     owned: bool | None,
     owner_name: str | None,
     owner_is_self: bool | None,
-    unowned_only: bool,
+    topo_observed: bool | None,
 ) -> str:
     """Show direct harem evidence separately from server-scoped `$topo` claims."""
-    if owner_name and owner_is_self is True:
-        return f"Claimed by you ({owner_name})"
-    if owner_name and owner_is_self is False:
-        return f"Claimed by other ({owner_name})"
     if owner_name:
-        return f"Claimed by {owner_name}"
-    if owned is None:
-        return "Not requested"
+        return f"Claimed 💞 => {owner_name}"
     if owned:
-        return "Owned evidence"
-    if unowned_only:
-        return "Unowned (complete scan)"
-    return "No owned evidence"
+        return "Claimed"
+    if topo_observed:
+        return "Unclaimed"
+    return "(no data)"
 
 
 def _format_observed_at(observed_at: datetime) -> str:
@@ -1987,7 +1984,7 @@ def catalog_top(
             character.owned,
             character.owner_name,
             character.owner_is_self,
-            unowned_only,
+            character.topo_observed,
         )
         key_state = (
             "Not requested"
@@ -2001,6 +1998,7 @@ def catalog_top(
             character.unavailable_reason,
             character.owner_name,
             character.owner_is_self,
+            character.rollability_status,
         )
         table.add_row(
             f"#{character.claim_rank:,}",
@@ -2015,7 +2013,8 @@ def catalog_top(
     if server and account:
         console.print(
             "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "
-            "No imported key evidence does not prove unkeyed, and no $topx/$topo observation does not prove rollable.[/dim]"
+            "No imported key evidence does not prove unkeyed. Enabled means no imported blocking evidence; "
+            "import fresh $topx/$adl data for stronger rollability evidence.[/dim]"
         )
 
 

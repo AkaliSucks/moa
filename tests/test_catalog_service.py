@@ -60,7 +60,10 @@ def test_import_top_page_updates_a_character_without_duplicate_catalog_rows(tmp_
 
 def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
-    page_text = "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID"
+    page_text = (
+        "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID\n"
+        "#10 - 2B - NieR: Automata"
+    )
 
     service.import_top_page(
         MudaeTextParser().parse_top_page(page_text),
@@ -72,7 +75,8 @@ def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:
     assert service.top()[0].owner_name == "xuppii"
     observations = service.top_owner_observations("Lake Arrowhead 2025")
     assert [(entry.character.name, entry.owner_name) for entry in observations] == [
-        ("Hatsune Miku", "xuppii")
+        ("2B", None),
+        ("Hatsune Miku", "xuppii"),
     ]
 
 

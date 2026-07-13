@@ -130,17 +130,20 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(entries[1].unavailable, entries[1].unavailable_reason) == (
         "Unavailable (disabled)"
     )
-    assert main._format_rollability(False, None, "ernieuuu", True) == "Owned (ernieuuu)"
+    assert main._format_rollability(False, None, "ernieuuu", True) == "Claimed"
+    assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
 
 
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
-    assert main._format_catalog_ownership(None, "cute_beagle_91130", True, False) == (
-        "Claimed by you (cute_beagle_91130)"
+    assert main._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
+        "Claimed 💞 => cute_beagle_91130"
     )
-    assert main._format_catalog_ownership(None, "xuppii", False, False) == (
-        "Claimed by other (xuppii)"
+    assert main._format_catalog_ownership(None, "xuppii", False, True) == (
+        "Claimed 💞 => xuppii"
     )
-    assert main._format_catalog_ownership(False, None, None, False) == "No owned evidence"
+    assert main._format_catalog_ownership(True, None, None, False) == "Claimed"
+    assert main._format_catalog_ownership(False, None, None, True) == "Unclaimed"
+    assert main._format_catalog_ownership(None, None, None, False) == "(no data)"
 
 
 def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_path) -> None:
