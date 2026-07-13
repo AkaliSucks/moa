@@ -145,6 +145,16 @@ def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
     assert "Discord bot token missing" in result.stdout
 
 
+def test_discord_listener_rejects_example_bot_token() -> None:
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "YOUR_DISCORD_BOT_TOKEN"],
+    )
+
+    assert result.exit_code == 1
+    assert "Replace YOUR_DISCORD_BOT_TOKEN" in result.stdout
+
+
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
     assert main._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"

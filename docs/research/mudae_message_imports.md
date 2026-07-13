@@ -137,6 +137,13 @@ $env:MOA_DISCORD_BOT_TOKEN = "your-bot-token"
 moa discord listen
 ```
 
+The listener sets the bot presence to `Watching Mudae progress`. Customize it
+with `--status`, for example:
+
+```powershell
+moa discord listen --status 'Tracking Mudae data'
+```
+
 MOA associates a configured Discord server ID and user ID with the latest
 `$`/slash command in each channel, then imports recognized Mudae responses and
 message edits through the existing automatic importer. It automatically opens

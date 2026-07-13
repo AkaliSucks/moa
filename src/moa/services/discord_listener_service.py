@@ -30,6 +30,8 @@ class DiscordListenerService:
     """Listen for Mudae messages and reuse the existing automatic import pipeline."""
 
     _CONTEXT_TTL_SECONDS = 300.0
+    _DEFAULT_STATUS_TEXT = "Mudae progress"
+    _MAX_STATUS_LENGTH = 128
     _SCAN_KINDS = {
         "harem": "keys",
         "ranked_harem": "owned",
@@ -42,6 +44,7 @@ class DiscordListenerService:
         catalog_service: CatalogService | None = None,
         importer: AutomaticImportService | None = None,
         profile_name: str | None = None,
+        status_text: str = _DEFAULT_STATUS_TEXT,
         logger: logging.Logger | None = None,
     ) -> None:
         self._config = config_service or ConfigService()
@@ -50,6 +53,7 @@ class DiscordListenerService:
         self._parser = MudaeTextParser()
         self._router = MudaeMessageRouter(self._parser)
         self._profile_name = profile_name
+        self._status_text = self._normalize_status_text(status_text)
         self._logger = logger or logging.getLogger("moa.discord")
         self._contexts: dict[int, DiscordCommandContext] = {}
         self._scan_ids: dict[tuple[str, str, str], int] = {}
@@ -58,15 +62,42 @@ class DiscordListenerService:
 
     def run(self, token: str, mudae_user_id: int | None = None) -> None:
         """Run the blocking Discord gateway client until interrupted."""
-        if not token.strip():
+        normalized_token = token.strip()
+        if not normalized_token:
             raise ValueError("A Discord bot token is required.")
+        if normalized_token.casefold() in {
+            "your_discord_bot_token",
+            "your-bot-token",
+            "your bot token",
+        }:
+            raise ValueError(
+                "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
+            )
         self._mudae_user_id = mudae_user_id
         intents = discord.Intents.none()
         intents.guilds = True
         intents.messages = True
         intents.message_content = True
         client = _MOADiscordClient(self, intents=intents)
-        client.run(token.strip())
+        try:
+            client.run(normalized_token)
+        except discord.LoginFailure as error:
+            raise ValueError(
+                "Discord rejected the bot token (401 Unauthorized). Check that it is the current "
+                "bot token from the Discord Developer Portal, then try again."
+            ) from error
+
+    @classmethod
+    def _normalize_status_text(cls, status_text: str | None) -> str:
+        normalized = (status_text or "").strip()
+        return (normalized or cls._DEFAULT_STATUS_TEXT)[: cls._MAX_STATUS_LENGTH]
+
+    def presence_activity(self) -> discord.Activity:
+        """Return the friendly Discord presence shown while the listener runs."""
+        return discord.Activity(
+            type=discord.ActivityType.watching,
+            name=self._status_text,
+        )
 
     async def handle_message(self, message: discord.Message) -> None:
         """Track configured user commands and import recognized bot responses."""
@@ -282,6 +313,10 @@ class _MOADiscordClient(discord.Client):
 
     async def on_ready(self) -> None:
         self._listener._logger.info("Discord listener connected as %s", self.user)
+        await self.change_presence(
+            status=discord.Status.online,
+            activity=self._listener.presence_activity(),
+        )
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:

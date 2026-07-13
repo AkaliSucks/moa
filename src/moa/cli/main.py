@@ -146,6 +146,11 @@ def discord_listen(
         envvar="MOA_MUDAE_BOT_ID",
         help="Optional Mudae Discord bot user ID used to filter responses.",
     ),
+    status: str = typer.Option(
+        "Mudae progress",
+        "--status",
+        help="Text shown in the bot's Watching presence while the listener runs.",
+    ),
 ) -> None:
     """Listen for Mudae responses and import them without clipboard copying."""
     if not token or not token.strip():
@@ -165,7 +170,7 @@ def discord_listen(
         "View Channel, and Read Message History permissions."
     )
     try:
-        DiscordListenerService(profile_name=profile).run(token, parsed_mudae_user_id)
+        DiscordListenerService(profile_name=profile, status_text=status).run(token, parsed_mudae_user_id)
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error

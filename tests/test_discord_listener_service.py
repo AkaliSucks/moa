@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.catalog_service import CatalogService
 from moa.services.discord_listener_service import DiscordListenerService
@@ -38,3 +40,24 @@ def test_listener_ignores_non_scan_page_metadata(tmp_path) -> None:
     )
 
     assert listener._page_metadata("top", "#1 - Zero Two - DARLING in the FRANXX") == (None, None)
+
+
+def test_listener_rejects_example_bot_token(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+
+    with pytest.raises(ValueError, match="Replace YOUR_DISCORD_BOT_TOKEN"):
+        listener.run("YOUR_DISCORD_BOT_TOKEN")
+
+
+def test_listener_presence_uses_watching_status_and_truncates_custom_text(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        status_text="  Tracking Mudae data  ",
+    )
+
+    activity = listener.presence_activity()
+
+    assert activity.type.value == 3
+    assert activity.name == "Tracking Mudae data"
