@@ -168,7 +168,7 @@ def discord_listen(
             raise typer.Exit(1) from error
     console.print(
         "[green]Starting Discord listener.[/green] It requires Message Content Intent, "
-        "View Channel, and Read Message History permissions."
+        "View Channel, Read Message History, and reaction events."
     )
     logging.getLogger("moa.discord").setLevel(logging.INFO)
     try:

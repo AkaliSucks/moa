@@ -38,6 +38,29 @@ class DiscordListenerService:
         "ranked_harem": "owned",
         "antidisable": "antidisable",
     }
+    _ROLL_COMMANDS = {
+        "m",
+        "mx",
+        "marry",
+        "ma",
+        "marrya",
+        "mg",
+        "marryg",
+        "w",
+        "wx",
+        "waifu",
+        "wa",
+        "waifua",
+        "wg",
+        "waifug",
+        "h",
+        "hx",
+        "husbando",
+        "ha",
+        "husbandoa",
+        "hg",
+        "husbandog",
+    }
 
     def __init__(
         self,
@@ -74,11 +97,13 @@ class DiscordListenerService:
             raise ValueError(
                 "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
             )
+        self._configure_logging()
         self._mudae_user_id = mudae_user_id
         intents = discord.Intents.none()
         intents.guilds = True
         intents.messages = True
         intents.message_content = True
+        intents.reactions = True
         client = _MOADiscordClient(self, intents=intents)
         try:
             client.run(normalized_token)
@@ -99,6 +124,21 @@ class DiscordListenerService:
             type=discord.ActivityType.watching,
             name=self._status_text,
         )
+
+    def _configure_logging(self) -> None:
+        """Make listener progress visible even when discord.py owns root logging."""
+        self._logger.setLevel(logging.INFO)
+        if self._logger.handlers:
+            return
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)s %(name)s %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        self._logger.addHandler(handler)
+        self._logger.propagate = False
 
     async def handle_message(self, message: discord.Message) -> None:
         """Track configured user commands and import recognized bot responses."""
@@ -139,6 +179,28 @@ class DiscordListenerService:
             return
         await self.handle_bot_response(message)
 
+    async def handle_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        """Track configured-user reactions so Mudae Kakera receipts stay account-scoped."""
+        if payload.guild_id is None:
+            return
+        identity = self._identity_for_ids(str(payload.guild_id), str(payload.user_id))
+        if identity is None:
+            return
+        self._contexts[payload.channel_id] = DiscordCommandContext(
+            server_id=str(payload.guild_id),
+            user_id=str(payload.user_id),
+            identity=identity,
+            captured_at=time.monotonic(),
+            expected_kind="reaction_receipt",
+        )
+        self._logger.info(
+            "Tracking reaction %s on Discord message %s for %s / %s",
+            payload.emoji,
+            payload.message_id,
+            identity.server,
+            identity.account,
+        )
+
     async def handle_bot_response(self, message: discord.Message) -> None:
         """Import one bot-authored Mudae response when a configured context exists."""
         if message.guild is None or not message.author.bot:
@@ -154,12 +216,33 @@ class DiscordListenerService:
         kind = self._resolve_message_kind(context.expected_kind, raw_message)
         if kind is None:
             return
+        if kind == "reaction_receipt":
+            try:
+                receipt = self._parser.parse_kakera_reaction_receipt(raw_message)
+            except MudaeParseError:
+                return
+            if receipt.account_name.casefold() != context.identity.account.casefold():
+                self._logger.info(
+                    "Ignored Kakera receipt %s for %s while tracking %s",
+                    message.id,
+                    receipt.account_name,
+                    context.identity.account,
+                )
+                return
         payload_key = (message.id, raw_message)
         if payload_key in self._seen_payloads:
             return
         self._seen_payloads.add(payload_key)
         if len(self._seen_payloads) > 2000:
             self._seen_payloads = set(list(self._seen_payloads)[-1000:])
+
+        self._logger.info(
+            "Detected Mudae %s message %s for %s / %s",
+            kind,
+            message.id,
+            context.identity.server,
+            context.identity.account,
+        )
 
         scan_id = self._scan_id_for_page(
             kind,
@@ -195,10 +278,22 @@ class DiscordListenerService:
 
     def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
         detected_kind = self._router.detect(raw_message).kind
+        if detected_kind == "unknown":
+            return None
         if expected_kind is None or expected_kind == detected_kind:
-            return None if detected_kind == "unknown" else detected_kind
+            return detected_kind
+        if expected_kind == "roll":
+            try:
+                self._parser.parse_roll(raw_message)
+            except MudaeParseError:
+                return None
+            return "roll"
+        if expected_kind == "reaction_receipt":
+            return None
         if expected_kind not in self._SCAN_KINDS:
-            return None if detected_kind == "unknown" else detected_kind
+            return detected_kind
+        if detected_kind == "roll":
+            return detected_kind
         try:
             self._parse_scan_page(expected_kind, raw_message)
         except MudaeParseError:
@@ -228,6 +323,8 @@ class DiscordListenerService:
             return "harem"
         if normalized.startswith("adl"):
             return "antidisable"
+        if normalized in DiscordListenerService._ROLL_COMMANDS:
+            return "roll"
         return None
 
     def _identity_for_ids(self, server_id: str, user_id: str) -> ConfigAccount | None:
@@ -358,7 +455,7 @@ class _MOADiscordClient(discord.Client):
     async def on_ready(self) -> None:
         self._listener._logger.info("Discord listener connected as %s", self.user)
         self._listener._logger.info(
-            "Waiting for a configured user's Mudae command; use $mmrkty+ for a full owned-harem scan."
+            "Waiting for configured-user Mudae commands, rolls, message edits, and reactions."
         )
         await self.change_presence(
             status=discord.Status.online,
@@ -373,3 +470,6 @@ class _MOADiscordClient(discord.Client):
 
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         await self._listener.handle_raw_message_edit(payload)
+
+    async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
+        await self._listener.handle_raw_reaction_add(payload)

@@ -221,6 +221,23 @@ def test_parse_roll_accepts_a_positive_kakera_prefix() -> None:
     assert roll.kakera_value == 1386
 
 
+def test_parse_roll_accepts_current_ranked_roll_card_layout() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Mai Sakurajima\n"
+        "Seishun Buta Yarou :female:\n"
+        "Animanga roulette · 1,494:kakera: · :goldkey: (7)\n"
+        "Claim Rank: #9\n"
+        "Like Rank: #19\n"
+    )
+
+    assert roll.name == "Mai Sakurajima"
+    assert roll.series == "Seishun Buta Yarou"
+    assert roll.claim_rank == 9
+    assert roll.kakera_value == 1494
+    assert roll.displayed_key_type == "gold"
+    assert roll.displayed_key_count == 7
+
+
 def test_parse_kakera_reaction_receipt() -> None:
     receipt = MudaeTextParser().parse_kakera_reaction_receipt(
         ":kakeraY: cute_beagle_91130 +497 ($k)"

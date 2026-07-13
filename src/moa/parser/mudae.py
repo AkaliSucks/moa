@@ -296,6 +296,25 @@ class MudaeTextParser:
         """Parse the key fields from a copied standard Mudae roll card."""
         lines = self._lines(text)
         key = next((self._ROLL_KEY.search(line) for line in lines if self._ROLL_KEY.search(line)), None)
+        roulette_index = next(
+            (index for index, line in enumerate(lines) if self._ROULETTE.match(line)),
+            None,
+        )
+        if roulette_index is not None:
+            if roulette_index < 2:
+                raise MudaeParseError("Expected character name and series before the Mudae roulette line.")
+            roulette_line = self._ROULETTE.match(lines[roulette_index])
+            if roulette_line is None:
+                raise MudaeParseError("Could not parse the Mudae roulette line.")
+            series = self._GENDER.sub("", lines[roulette_index - 1]).strip()
+            return RollObservation(
+                name=lines[roulette_index - 2],
+                series=series,
+                claim_rank=self._first_number(lines, self._CLAIM_RANK),
+                kakera_value=self._number(roulette_line.group("value")),
+                displayed_key_type=key.group("key_type").lower() if key else None,
+                displayed_key_count=int(key.group("count")) if key else None,
+            )
         claims_index = next(
             (index for index, line in enumerate(lines) if self._ROLL_CLAIMS.match(line)),
             None,

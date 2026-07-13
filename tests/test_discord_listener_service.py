@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from moa.repositories.catalog_repository import CatalogRepository
+from moa.core.config import ConfigService
 from moa.services.catalog_service import CatalogService
 from moa.services.discord_listener_service import DiscordListenerService
 
@@ -59,6 +61,52 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$mmrkty+") == "ranked_harem"
     assert DiscordListenerService._expected_kind_for_command("$mmyk") == "harem"
     assert DiscordListenerService._expected_kind_for_command("$adl") == "antidisable"
+    assert DiscordListenerService._expected_kind_for_command("$wa") == "roll"
+    assert DiscordListenerService._expected_kind_for_command("$m") == "roll"
+
+
+def test_listener_classifies_a_ranked_roll_card_as_a_roll(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+    raw_message = (
+        "$m mai sakurajima\n"
+        "Mudae\n"
+        "Mai Sakurajima\n"
+        "Seishun Buta Yarou :female:\n"
+        "Animanga roulette · 1,494:kakera: · :goldkey: (7)\n"
+        "Claim Rank: #9\n"
+        "Like Rank: #19"
+    )
+
+    assert listener._resolve_message_kind("roll", raw_message) == "roll"
+
+
+def test_listener_tracks_configured_user_reactions(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+    )
+    payload = SimpleNamespace(
+        guild_id=123,
+        user_id=456,
+        channel_id=789,
+        message_id=987,
+        emoji="💞",
+    )
+
+    asyncio.run(listener.handle_raw_reaction_add(payload))
+
+    context = listener._contexts[789]
+    assert context.identity.account == "ernieuuu"
+    assert context.expected_kind == "reaction_receipt"
 
 
 def test_listener_presence_uses_watching_status_and_truncates_custom_text(tmp_path) -> None:
