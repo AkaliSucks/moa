@@ -262,10 +262,11 @@ def list_mudae_flags(
 
 @account_app.command("activity")
 def account_activity(
-    server: str = typer.Option(..., "--server", "-s"),
-    account: str = typer.Option(..., "--account", "-a"),
+    server: str | None = typer.Option(None, "--server", "-s"),
+    account: str | None = typer.Option(None, "--account", "-a"),
 ) -> None:
     """Show current imported activity signals without making spending decisions."""
+    server, account = _resolve_account_context(server, account)
     overview = AccountOverviewService().overview(server, account)
     readiness = ActionService().readiness(server, account)
     reactions = CatalogService().kakera_reaction_summary(server, account)
@@ -504,11 +505,12 @@ def show_loot(loot_id: str) -> None:
 
 @roll_app.command("recent")
 def recent_rolls(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose rolls to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose rolls to show."),
     limit: int = typer.Option(20, "--limit", "-n", min=1, help="Maximum number of recent rolls."),
 ) -> None:
     """Show raw roll observations imported for one account context."""
+    server, account = _resolve_account_context(server, account)
     rolls = CatalogService().recent_rolls(server, account, limit)
     if not rolls:
         console.print("[yellow]No rolls imported for this server/account yet.[/yellow]")
@@ -532,10 +534,11 @@ def recent_rolls(
 
 @roll_app.command("stats")
 def roll_statistics(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose rolls to summarize."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose rolls to summarize."),
 ) -> None:
     """Summarize imported roll history without estimating probabilities."""
+    server, account = _resolve_account_context(server, account)
     statistics = CatalogService().roll_statistics(server, account)
     if statistics.roll_count == 0:
         console.print("[yellow]No rolls imported for this server/account yet.[/yellow]")
@@ -615,10 +618,11 @@ def compare_roll_statistics(
 
 @loot_app.command("next")
 def next_loot_spending_step(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakeraloot state is shown."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose Kakeraloot state is shown."),
 ) -> None:
     """Show the next Quantity and Quality costs from imported server/account state."""
+    server, account = _resolve_account_context(server, account)
     plan = KakeralootBudgetService().plan(server, account)
     console.print(
         f"[bold cyan]{plan.account_name} - Kakeraloot spending readiness[/bold cyan]\n"
@@ -701,10 +705,11 @@ def show_key(key_id: str) -> None:
 
 @account_app.command("overview")
 def account_overview(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose imported state to summarize."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose imported state to summarize."),
 ) -> None:
     """Show one read-only summary of the latest imported account state."""
+    server, account = _resolve_account_context(server, account)
     overview = AccountOverviewService().overview(server, account)
     table = Table(title=f"{overview.account_name} - account overview")
     table.add_column("Area", style="green")
@@ -808,10 +813,11 @@ def account_compare(
 
 @account_app.command("progress")
 def account_progress(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose imported $k history to measure."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose imported $k history to measure."),
 ) -> None:
     """Measure Kakera progression from the account's timestamped `$k` imports."""
+    server, account = _resolve_account_context(server, account)
     progress = ProgressService().kakera_progress(server, account)
     if not progress.observations:
         console.print("[yellow]No $k snapshots imported for this server/account yet.[/yellow]")
@@ -841,10 +847,11 @@ def account_progress(
 
 @action_app.command("now")
 def action_now(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose latest $tu snapshot to use."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose latest $tu snapshot to use."),
 ) -> None:
     """Show the action checklist supported by a recent imported `$tu` snapshot."""
+    server, account = _resolve_account_context(server, account)
     readiness = ActionService().readiness(server, account)
     console.print(f"[bold cyan]{readiness.account_name} - action readiness[/bold cyan]")
     console.print(readiness.status)
@@ -910,6 +917,43 @@ def _read_message_source(path: Path | None, clipboard: bool) -> str:
         console.print("[red]Provide a text-file path or use --clipboard.[/red]")
         raise typer.Exit(1)
     return _read_copied_message(path)
+
+
+def _resolve_account_context(
+    server: str | None,
+    account: str | None,
+) -> tuple[str, str]:
+    """Resolve explicit or configured account context for read-only commands."""
+    try:
+        resolved_server, resolved_account = ConfigService().resolve_context(server, account)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    if not resolved_server or not resolved_account:
+        console.print(
+            "[red]No active server/account context. Configure one with `moa config use` "
+            "or pass --server and --account.[/red]"
+        )
+        raise typer.Exit(1)
+    return resolved_server, resolved_account
+
+
+def _resolve_server_context(server: str | None) -> str:
+    """Resolve explicit or configured server context for read-only commands."""
+    if server:
+        return server.strip()
+    try:
+        resolved_server, _ = ConfigService().resolve_context(None, None)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    if not resolved_server:
+        console.print(
+            "[red]No active server context. Configure one with `moa config use` "
+            "or pass --server.[/red]"
+        )
+        raise typer.Exit(1)
+    return resolved_server
 
 
 def _format_optional_number(value: int | None) -> str:
@@ -1046,12 +1090,13 @@ def parse_kakera_reaction(
 
 @app.command("analyze-roll")
 def analyze_roll(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account deciding what to do with this roll."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account deciding what to do with this roll."),
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
     """Explain a copied roll using directly imported account context."""
+    server, account = _resolve_account_context(server, account)
     try:
         roll = MudaeTextParser().parse_roll(_read_message_source(path, clipboard))
     except MudaeParseError as error:
@@ -1981,8 +2026,8 @@ def catalog_show(
 
 @catalog_app.command("harem")
 def catalog_harem(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose harem to show."),
     series: str | None = typer.Option(None, "--series", help="Case-insensitive series text filter."),
     exact_series: bool = typer.Option(False, "--exact-series", help="Require an exact series match."),
     key_type: str | None = typer.Option(None, "--key-type", help="Filter by key tier, such as gold."),
@@ -1994,6 +2039,7 @@ def catalog_harem(
     limit: int | None = typer.Option(None, "--limit", "-n", min=1, help="Maximum matching entries."),
 ) -> None:
     """Search imported keyed-harem observations for one server/account pair."""
+    server, account = _resolve_account_context(server, account)
     try:
         entries = HaremSearchService().search(
             server,
@@ -2042,11 +2088,12 @@ def catalog_harem(
 
 @catalog_app.command("keyfarm")
 def catalog_keyfarm(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to shortlist."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose harem to shortlist."),
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of entries to display."),
 ) -> None:
     """Show the highest-value imported keyed characters for a future key-farm plan."""
+    server, account = _resolve_account_context(server, account)
     service = CatalogService()
     entries = service.harem_keys(server, account)
     wishlist = service.wishlist(server, account)
@@ -2096,11 +2143,12 @@ def catalog_keyfarm(
 
 @catalog_app.command("keyprogress")
 def catalog_keyprogress(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose key progress to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose key progress to show."),
     limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of entries to display."),
 ) -> None:
     """Show each imported harem character's next universal key unlock."""
+    server, account = _resolve_account_context(server, account)
     progress = KeyProgressService().progress(server, account)
     if not progress:
         console.print("[yellow]No keyed harem entries imported for this server/account yet.[/yellow]")
@@ -2129,11 +2177,12 @@ def catalog_keyprogress(
 
 @catalog_app.command("key-gains")
 def catalog_key_gains(
-    server: str = typer.Option(..., "--server", "-s"),
-    account: str = typer.Option(..., "--account", "-a"),
+    server: str | None = typer.Option(None, "--server", "-s"),
+    account: str | None = typer.Option(None, "--account", "-a"),
     limit: int = typer.Option(20, "--limit", "-n", min=1),
 ) -> None:
     """Show recent key states directly observed on imported rolls."""
+    server, account = _resolve_account_context(server, account)
     observations = CatalogService().recent_key_gains(server, account, limit)
     if not observations:
         console.print("[yellow]No key gains imported from rolls for this server/account yet.[/yellow]")
@@ -2157,11 +2206,12 @@ def catalog_key_gains(
 
 @recommend_app.command("keyfarm")
 def recommend_keyfarm(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose harem to prioritize."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose harem to prioritize."),
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of recommendations to show."),
 ) -> None:
     """Rank key-farm targets from imported value, wish bonuses, and key chance."""
+    server, account = _resolve_account_context(server, account)
     try:
         recommendations = KeyFarmService().recommend(server, account)
     except ValueError as error:
@@ -2201,10 +2251,11 @@ def recommend_keyfarm(
 
 @catalog_app.command("bonus")
 def catalog_bonus(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose bonus snapshot to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose bonus snapshot to show."),
 ) -> None:
     """Show the latest imported `$bonus` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     bonus = CatalogService().player_bonus(server, account)
     if bonus is None:
         console.print("[yellow]No $bonus snapshot imported for this server/account yet.[/yellow]")
@@ -2221,10 +2272,11 @@ def catalog_bonus(
 
 @catalog_app.command("wishlist")
 def catalog_wishlist(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose wishlist to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose wishlist to show."),
 ) -> None:
     """Show the latest imported `$wl` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     wishlist = CatalogService().wishlist(server, account)
     if wishlist is None:
         console.print("[yellow]No $wl snapshot imported for this server/account yet.[/yellow]")
@@ -2244,10 +2296,11 @@ def catalog_wishlist(
 
 @catalog_app.command("disablelist")
 def catalog_disablelist(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose disable list to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose disable list to show."),
 ) -> None:
     """Show the latest imported `$dl` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     disablelist = CatalogService().disablelist(server, account)
     if disablelist is None:
         console.print("[yellow]No $dl snapshot imported for this server/account yet.[/yellow]")
@@ -2270,10 +2323,11 @@ def catalog_disablelist(
 
 @catalog_app.command("unavailable")
 def catalog_unavailable(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose roll pool to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose roll pool to show."),
 ) -> None:
     """Show characters directly observed as unavailable by `$topx`."""
+    server, account = _resolve_account_context(server, account)
     observations = CatalogService().unavailable_characters(server, account)
     if not observations:
         console.print("[yellow]No unavailable-character observations imported yet.[/yellow]")
@@ -2295,10 +2349,11 @@ def catalog_unavailable(
 
 @catalog_app.command("kakera")
 def catalog_kakera(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakera state to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose Kakera state to show."),
 ) -> None:
     """Show the latest imported `$k` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     state = CatalogService().kakera_state(server, account)
     if state is None:
         console.print("[yellow]No $k snapshot imported for this server/account yet.[/yellow]")
@@ -2314,10 +2369,11 @@ def catalog_kakera(
 
 @catalog_app.command("towerstate")
 def catalog_towerstate(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose tower state to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose tower state to show."),
 ) -> None:
     """Show the latest imported `$kt` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     state = CatalogService().tower_state(server, account)
     if state is None:
         console.print("[yellow]No $kt snapshot imported for this server/account yet.[/yellow]")
@@ -2334,10 +2390,11 @@ def catalog_towerstate(
 
 @catalog_app.command("timers")
 def catalog_timers(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose latest $tu snapshot to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose latest $tu snapshot to show."),
 ) -> None:
     """Show the most recently imported `$tu` snapshot without treating it as live state."""
+    server, account = _resolve_account_context(server, account)
     observation = CatalogService().timer_state(server, account)
     if observation is None:
         console.print("[yellow]No $tu snapshot imported for this server/account yet.[/yellow]")
@@ -2365,10 +2422,11 @@ def catalog_timers(
 
 @catalog_app.command("lootstate")
 def catalog_lootstate(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
-    account: str = typer.Option(..., "--account", "-a", help="Account whose Kakeraloot state to show."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
+    account: str | None = typer.Option(None, "--account", "-a", help="Account whose Kakeraloot state to show."),
 ) -> None:
     """Show the latest imported `$lk` snapshot for one account."""
+    server, account = _resolve_account_context(server, account)
     state = CatalogService().kakeraloot_state(server, account)
     if state is None:
         console.print("[yellow]No $lk snapshot imported for this server/account yet.[/yellow]")
@@ -2396,9 +2454,10 @@ def catalog_lootstate(
 
 @catalog_app.command("infokl")
 def catalog_infokl(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
 ) -> None:
     """Show the latest imported `$infokl` configuration for one server."""
+    server = _resolve_server_context(server)
     settings = CatalogService().kakeraloot_settings(server)
     if settings is None:
         console.print("[yellow]No $infokl configuration imported for this server yet.[/yellow]")
@@ -2414,9 +2473,10 @@ def catalog_infokl(
 
 @catalog_app.command("settings")
 def catalog_settings(
-    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
 ) -> None:
     """Show the latest imported `$settings` snapshot for one server."""
+    server = _resolve_server_context(server)
     settings = CatalogService().server_settings(server)
     if settings is None:
         console.print("[yellow]No $settings snapshot imported for this server yet.[/yellow]")
@@ -2469,10 +2529,11 @@ def catalog_imports(
 
 @catalog_app.command("reactions")
 def catalog_reactions(
-    server: str = typer.Option(..., "--server", "-s"),
-    account: str = typer.Option(..., "--account", "-a"),
+    server: str | None = typer.Option(None, "--server", "-s"),
+    account: str | None = typer.Option(None, "--account", "-a"),
 ) -> None:
     """Show recent standalone Kakera payouts reported by Mudae."""
+    server, account = _resolve_account_context(server, account)
     reactions = CatalogService().kakera_reactions(server, account)
     if not reactions:
         console.print("[yellow]No reaction receipts imported for this server/account yet.[/yellow]")
@@ -2488,10 +2549,11 @@ def catalog_reactions(
 
 @catalog_app.command("reaction-summary")
 def catalog_reaction_summary(
-    server: str = typer.Option(..., "--server", "-s"),
-    account: str = typer.Option(..., "--account", "-a"),
+    server: str | None = typer.Option(None, "--server", "-s"),
+    account: str | None = typer.Option(None, "--account", "-a"),
 ) -> None:
     """Summarize Kakera-reaction receipts stored for one account."""
+    server, account = _resolve_account_context(server, account)
     summary = CatalogService().kakera_reaction_summary(server, account)
     if summary.receipt_count == 0:
         console.print("[yellow]No reaction receipts imported for this server/account yet.[/yellow]")
