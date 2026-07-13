@@ -1701,9 +1701,14 @@ def import_adl(
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
+    count_message = (
+        f"[cyan]{page.antidisabled_character_count:,}[/cyan] antidisabled characters reported."
+        if page.antidisabled_character_count is not None
+        else "[dim]Character total is not repeated on this page.[/dim]"
+    )
     console.print(
         f"[green]Imported {result.series_imported} antidisable series for {result.account_name}.[/green] "
-        f"[cyan]{page.antidisabled_character_count:,}[/cyan] antidisabled characters reported."
+        f"{count_message}"
     )
     if result.scan_id is not None and result.page_number is not None and result.page_count is not None:
         console.print(

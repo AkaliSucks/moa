@@ -404,7 +404,6 @@ def test_import_antidisable_scan_activates_series_only_when_complete(tmp_path) -
     )
     page_two = (
         "ernieuuu's Antidisablelist (2/500)\n"
-        "20 antidisabled characters\n"
         "Chainsaw Man\n"
         "Page 2 / 2"
     )
@@ -464,6 +463,36 @@ def test_catalog_top_marks_matching_series_antidisabled(tmp_path) -> None:
 
     assert power.character.name == "Power"
     assert power.rollability_status == "Antidisabled"
+
+
+def test_reinitializing_catalog_backfills_unclaimed_topo_rows(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    page_text = (
+        "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID\n"
+        "#10 - 2B - NieR: Automata"
+    )
+    result = service.import_top_page(
+        MudaeTextParser().parse_top_page(page_text),
+        page_text,
+        "clipboard",
+        server_name="Lake Arrowhead 2025",
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM top_owner_observations WHERE import_event_id = ? "
+            "AND owner_name IS NULL",
+            (result.import_event_id,),
+        )
+
+    refreshed = CatalogService(CatalogRepository(database_path))
+    observations = refreshed.top_owner_observations("Lake Arrowhead 2025")
+
+    assert [(entry.character.name, entry.owner_name) for entry in observations] == [
+        ("2B", None),
+        ("Hatsune Miku", "xuppii"),
+    ]
 
 
 def test_import_disablelist_persists_account_scoped_roll_pool_state(tmp_path) -> None:

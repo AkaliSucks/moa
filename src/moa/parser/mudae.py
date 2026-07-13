@@ -519,9 +519,9 @@ class MudaeTextParser:
             None,
         )
         page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
-        if header is None or count is None:
+        if header is None:
             raise MudaeParseError(
-                "Expected a Mudae `$adl` header with slot counts and antidisabled character count."
+                "Expected a Mudae `$adl` header with antidisable slot counts."
             )
 
         header_line = header.group(0)
@@ -540,7 +540,9 @@ class MudaeTextParser:
             page_count=int(page.group("pages")) if page else None,
             slots_used=int(header.group("used")),
             slots_capacity=int(header.group("capacity")),
-            antidisabled_character_count=self._number(count.group("count")),
+            antidisabled_character_count=(
+                self._number(count.group("count")) if count is not None else None
+            ),
             series_names=tuple(series_names),
         )
 

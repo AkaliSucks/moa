@@ -2566,7 +2566,7 @@ class CatalogRepository:
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
                     series_name TEXT NOT NULL,
                     normalized_series_name TEXT NOT NULL,
-                    antidisabled_character_count INTEGER NOT NULL,
+                    antidisabled_character_count INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id),
                     harem_scan_id INTEGER REFERENCES harem_scans(id)
@@ -2781,6 +2781,34 @@ class CatalogRepository:
                     """
                 )
                 connection.execute("DROP TABLE top_owner_observations_legacy")
+            connection.execute(
+                """
+                INSERT INTO top_owner_observations (
+                    server_context_id, character_id, owner_name, observed_at, import_event_id
+                )
+                SELECT scoped.server_context_id,
+                       rank_snapshots.character_id,
+                       rank_snapshots.owner_name,
+                       rank_snapshots.observed_at,
+                       rank_snapshots.import_event_id
+                FROM rank_snapshots
+                JOIN import_events
+                  ON import_events.id = rank_snapshots.import_event_id
+                 AND import_events.kind = 'top_page'
+                JOIN (
+                    SELECT DISTINCT server_context_id, import_event_id
+                    FROM top_owner_observations
+                ) AS scoped
+                  ON scoped.import_event_id = rank_snapshots.import_event_id
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM top_owner_observations AS existing
+                    WHERE existing.server_context_id = scoped.server_context_id
+                      AND existing.character_id = rank_snapshots.character_id
+                      AND existing.import_event_id = rank_snapshots.import_event_id
+                )
+                """
+            )
             owned_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -2803,6 +2831,43 @@ class CatalogRepository:
                 )
             if "status_note" not in loot_columns:
                 connection.execute("ALTER TABLE kakeraloot_state_observations ADD COLUMN status_note TEXT")
+            antidisable_columns = connection.execute(
+                "PRAGMA table_info(antidisable_series_observations)"
+            ).fetchall()
+            if any(
+                row["name"] == "antidisabled_character_count" and row["notnull"]
+                for row in antidisable_columns
+            ):
+                connection.execute(
+                    "ALTER TABLE antidisable_series_observations "
+                    "RENAME TO antidisable_series_observations_legacy"
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE antidisable_series_observations (
+                        id INTEGER PRIMARY KEY,
+                        account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                        series_name TEXT NOT NULL,
+                        normalized_series_name TEXT NOT NULL,
+                        antidisabled_character_count INTEGER,
+                        observed_at TEXT NOT NULL,
+                        import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                        harem_scan_id INTEGER REFERENCES harem_scans(id)
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO antidisable_series_observations (
+                        id, account_context_id, series_name, normalized_series_name,
+                        antidisabled_character_count, observed_at, import_event_id, harem_scan_id
+                    )
+                    SELECT id, account_context_id, series_name, normalized_series_name,
+                           antidisabled_character_count, observed_at, import_event_id, harem_scan_id
+                    FROM antidisable_series_observations_legacy
+                    """
+                )
+                connection.execute("DROP TABLE antidisable_series_observations_legacy")
 
     def _prepare_harem_scan_page(
         self,

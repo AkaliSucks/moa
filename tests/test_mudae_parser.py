@@ -127,6 +127,19 @@ def test_parse_antidisable_page_reads_series_slots_count_and_pages() -> None:
     assert page.series_names == ("OSHI NO KO", "Chainsaw Man")
 
 
+def test_parse_antidisable_continuation_page_without_character_count() -> None:
+    page = MudaeTextParser().parse_antidisable_page(
+        "ernieuuu's Antidisablelist (83/500)\n"
+        "Chainsaw Man\n"
+        "Page 2 / 6"
+    )
+
+    assert page.antidisabled_character_count is None
+    assert page.page_number == 2
+    assert page.page_count == 6
+    assert page.series_names == ("Chainsaw Man",)
+
+
 def test_parse_character_details_from_copied_im_output() -> None:
     character = MudaeTextParser().parse_character_details(CHARACTER_DETAILS)
 

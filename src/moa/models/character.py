@@ -144,7 +144,7 @@ class AntidisablePage(MOAModel):
     page_count: int | None
     slots_used: int
     slots_capacity: int
-    antidisabled_character_count: int
+    antidisabled_character_count: int | None
     series_names: tuple[str, ...]
 
 

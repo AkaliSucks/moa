@@ -44,7 +44,7 @@ class MudaeMessageRouter:
             return self._detected("bonus", "Mudae Player Bonuses header found.")
         if "wishlist -" in normalized and "$wl" in normalized:
             return self._detected("wishlist", "Mudae wishlist header found.")
-        if "antidisablelist" in normalized and "antidisabled characters" in normalized:
+        if "antidisablelist" in normalized:
             try:
                 self._parser.parse_antidisable_page(text)
             except MudaeParseError:
