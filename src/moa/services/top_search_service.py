@@ -21,6 +21,7 @@ class TopSearchService:
         exact_series: bool = False,
         owned_only: bool = False,
         unowned_only: bool = False,
+        owned_account_names: tuple[str, ...] | None = None,
         keyed_only: bool = False,
         unavailable_only: bool = False,
         sort_by: str = "rank",
@@ -51,7 +52,12 @@ class TopSearchService:
         owned_names: set[str] | None = None
         keyed_names: set[str] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
+        self_account_names: set[str] | None = None
         if scoped:
+            self_account_names = {
+                account.casefold()
+                for account in (owned_account_names or (account_name,))
+            }
             owned_names = {
                 entry.character_name.casefold()
                 for entry in self._catalog.owned_characters(server_name, account_name)
@@ -84,13 +90,22 @@ class TopSearchService:
             topx_unavailable = (
                 name in unavailable_reasons if unavailable_reasons is not None else None
             )
+            owner_is_self = (
+                owner_name.casefold() in self_account_names
+                if owner_name is not None and self_account_names is not None
+                else None
+            )
             unavailable = (
-                True
+                False
+                if owner_is_self is True
+                else True
                 if owner_name
                 else topx_unavailable
             )
             unavailable_reason = (
-                f"claimed by {owner_name}"
+                None
+                if owner_is_self is True
+                else f"claimed by {owner_name}"
                 if owner_name
                 else unavailable_reasons[name]
                 if topx_unavailable and unavailable_reasons is not None
@@ -115,6 +130,7 @@ class TopSearchService:
                     unavailable=unavailable,
                     unavailable_reason=unavailable_reason,
                     owner_name=owner_name,
+                    owner_is_self=owner_is_self,
                 )
             )
 

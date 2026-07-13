@@ -795,7 +795,14 @@ def _format_optional_number(value: int | None) -> str:
     return "-" if value is None else f"{value:,}"
 
 
-def _format_rollability(unavailable: bool | None, reason: str | None) -> str:
+def _format_rollability(
+    unavailable: bool | None,
+    reason: str | None,
+    owner_name: str | None = None,
+    owner_is_self: bool | None = None,
+) -> str:
+    if owner_is_self is True and owner_name:
+        return f"Owned ({owner_name})"
     if unavailable is None:
         return "Not requested"
     if not unavailable:
@@ -1788,7 +1795,12 @@ def catalog_top(
             if character.keyed
             else "No imported key"
         )
-        rollability = _format_rollability(character.unavailable, character.unavailable_reason)
+        rollability = _format_rollability(
+            character.unavailable,
+            character.unavailable_reason,
+            character.owner_name,
+            character.owner_is_self,
+        )
         table.add_row(
             f"#{character.claim_rank:,}",
             character.character.name,

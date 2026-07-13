@@ -115,6 +115,31 @@ def test_top_search_uses_topo_owner_as_unavailable_reason() -> None:
     assert unavailable[1].unavailable_reason == "claimed by xuppii"
 
 
+def test_top_search_treats_selected_account_and_alt_accounts_as_owned() -> None:
+    catalog = InMemoryTopCatalog()
+    claimed = catalog._top[2]
+    catalog._top = catalog._top[:2] + (
+        RankedCatalogCharacter(
+            character=claimed.character,
+            claim_rank=claimed.claim_rank,
+            like_rank=claimed.like_rank,
+            observed_at=claimed.observed_at,
+            owner_name="ernie_alt",
+        ),
+    )
+
+    entries = TopSearchService(catalog).search(
+        server_name="Lake",
+        account_name="ernieuuu",
+        owned_account_names=("ernieuuu", "ernie_alt"),
+    )
+    albedo = next(entry for entry in entries if entry.character.name == "Albedo")
+
+    assert albedo.owner_is_self is True
+    assert albedo.unavailable is False
+    assert albedo.unavailable_reason is None
+
+
 def test_top_search_filters_to_directly_observed_owned_characters() -> None:
     service = TopSearchService(InMemoryTopCatalog())
 

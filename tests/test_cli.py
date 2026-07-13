@@ -130,3 +130,4 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(entries[1].unavailable, entries[1].unavailable_reason) == (
         "Unavailable (disabled)"
     )
+    assert main._format_rollability(False, None, "ernieuuu", True) == "Owned (ernieuuu)"
