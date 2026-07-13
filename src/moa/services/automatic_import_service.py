@@ -40,6 +40,25 @@ class AutomaticImportService:
             )
 
         server = self._require(server_name, "server", kind)
+        if kind == "ranked_harem":
+            account = self._require(account_name, "account", kind)
+            page = self._parser.parse_ranked_harem_page(raw_message)
+            result = self._catalog.import_ranked_harem_page(
+                page, server, account, raw_message, source
+            )
+            page_label = (
+                f" page {page.page_number}/{page.page_count}"
+                if page.page_number is not None and page.page_count is not None
+                else ""
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=result.entries_imported,
+                message=(
+                    f"Imported {result.entries_imported} owned harem entries{page_label}; "
+                    f"{result.entries_linked} linked to the catalog."
+                ),
+            )
         if kind == "harem":
             account = self._require(account_name, "account", kind)
             page = self._parser.parse_harem_key_page(raw_message)

@@ -25,6 +25,12 @@ class MudaeMessageRouter:
             return self._detected("reaction_receipt", "Mudae Kakera reaction amount and recipient found.")
         if "harem" in normalized:
             try:
+                self._parser.parse_ranked_harem_page(text)
+            except MudaeParseError:
+                pass
+            else:
+                return self._detected("ranked_harem", "Mudae ranked harem page found.")
+            try:
                 self._parser.parse_harem_key_page(text)
             except MudaeParseError:
                 pass

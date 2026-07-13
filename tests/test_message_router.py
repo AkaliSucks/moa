@@ -33,6 +33,17 @@ def test_router_detects_keyed_harem_pages() -> None:
     assert detection.kind == "harem"
 
 
+def test_router_detects_ranked_harem_pages() -> None:
+    detection = MudaeMessageRouter().detect(
+        "ernieuuu's harem\n"
+        "#2 - Zero Two 1,440 ka\n"
+        "#3 - Rem 1,426 ka\n"
+        "Page 1 / 38"
+    )
+
+    assert detection.kind == "ranked_harem"
+
+
 def test_router_keeps_ambiguous_messages_unknown() -> None:
     detection = MudaeMessageRouter().detect("Mudae is online. Have fun!")
 

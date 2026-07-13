@@ -8,7 +8,9 @@ from moa.models.catalog import (
     HaremKeyObservation,
     HaremScanProgress,
     ImportEventSummary,
+    OwnedCharacterObservation,
     RankedCatalogCharacter,
+    RankedHaremImportResult,
     TopImportResult,
     PlayerBonusImportResult,
     PlayerBonusObservation,
@@ -44,6 +46,7 @@ from moa.models.character import (
     CharacterDetails,
     DisableListSnapshot,
     HaremKeyPage,
+    RankedHaremPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
@@ -138,6 +141,23 @@ class CatalogService:
         return self._repository.import_harem_key_page(
             page, server_name, account_name, raw_message, source, scan_id
         )
+
+    def import_ranked_harem_page(
+        self,
+        page: RankedHaremPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RankedHaremImportResult:
+        return self._repository.import_ranked_harem_page(
+            page, server_name, account_name, raw_message, source
+        )
+
+    def owned_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[OwnedCharacterObservation, ...]:
+        return self._repository.owned_characters(server_name, account_name)
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
         return self._repository.harem_keys(server_name, account_name)

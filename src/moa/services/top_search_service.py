@@ -19,6 +19,7 @@ class TopSearchService:
         account_name: str | None = None,
         series: str | None = None,
         exact_series: bool = False,
+        owned_only: bool = False,
         keyed_only: bool = False,
         unavailable_only: bool = False,
         sort_by: str = "rank",
@@ -34,12 +35,17 @@ class TopSearchService:
         scoped = bool(server_name and account_name)
         if bool(server_name) != bool(account_name):
             raise ValueError("--server and --account must be supplied together.")
-        if (keyed_only or unavailable_only) and not scoped:
+        if (owned_only or keyed_only or unavailable_only) and not scoped:
             raise ValueError("--server and --account are required for account evidence filters.")
 
+        owned_names: set[str] | None = None
         keyed_names: set[str] | None = None
         unavailable_names: set[str] | None = None
         if scoped:
+            owned_names = {
+                entry.character_name.casefold()
+                for entry in self._catalog.owned_characters(server_name, account_name)
+            }
             keyed_names = {
                 entry.character_name.casefold()
                 for entry in self._catalog.harem_keys(server_name, account_name)
@@ -62,8 +68,11 @@ class TopSearchService:
                     continue
 
             name = entry.character.name.casefold()
+            owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
             unavailable = name in unavailable_names if unavailable_names is not None else None
+            if owned_only and not owned:
+                continue
             if keyed_only and not keyed:
                 continue
             if unavailable_only and not unavailable:
@@ -74,6 +83,7 @@ class TopSearchService:
                     claim_rank=entry.claim_rank,
                     like_rank=entry.like_rank,
                     observed_at=entry.observed_at,
+                    owned=owned,
                     keyed=keyed,
                     unavailable=unavailable,
                 )

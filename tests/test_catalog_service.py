@@ -173,6 +173,41 @@ def test_import_mmyk_page_persists_current_harem_kakera_values(tmp_path) -> None
     ]
 
 
+def test_import_mmrk_page_persists_direct_owned_evidence(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    service.import_top_page(
+        MudaeTextParser().parse_top_page("#2 - Zero Two - DARLING in the FRANXX"),
+        "#2 - Zero Two - DARLING in the FRANXX",
+        "clipboard",
+    )
+    page_text = (
+        "ernieuuu's harem\n"
+        "#2 - Zero Two 1,440 ka\n"
+        "#57 - Unresolved Character 800 ka\n"
+        "Page 1 / 38"
+    )
+
+    result = service.import_ranked_harem_page(
+        MudaeTextParser().parse_ranked_harem_page(page_text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        page_text,
+        "clipboard",
+    )
+
+    assert result.entries_imported == 2
+    assert result.entries_linked == 1
+    entries = service.owned_characters("Lake Arrowhead 2025", "ernieuuu")
+    assert [(entry.character_name, entry.claim_rank, entry.kakera_value) for entry in entries] == [
+        ("Zero Two", 2, 1440),
+        ("Unresolved Character", 57, 800),
+    ]
+    assert entries[0].character is not None
+    assert entries[0].character.series == "DARLING in the FRANXX"
+    assert entries[1].character is None
+
+
 def test_complete_harem_scan_activates_only_after_every_page_is_imported(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     scan = service.begin_harem_scan("Lake Arrowhead 2025", "ernieuuu")

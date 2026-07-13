@@ -996,6 +996,37 @@ def parse_bonus(
     console.print(table)
 
 
+@parse_app.command("mmr")
+def parse_mmr(
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse one copied ranked `$mmr`/`$mmrk` owned-harem page."""
+    try:
+        page = MudaeTextParser().parse_ranked_harem_page(_read_message_source(path, clipboard))
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    page_label = (
+        f"Page {page.page_number}/{page.page_count}"
+        if page.page_number is not None and page.page_count is not None
+        else "Partial import"
+    )
+    console.print(f"[bold cyan]Owned harem - {page_label}[/bold cyan]")
+    table = Table()
+    table.add_column("Claim rank", justify="right", style="cyan")
+    table.add_column("Character", style="green")
+    table.add_column("Kakera", justify="right", style="magenta")
+    for entry in page.entries:
+        table.add_row(
+            f"#{entry.claim_rank:,}",
+            entry.name,
+            _format_optional_number(entry.kakera_value),
+        )
+    console.print(table)
+
+
 @parse_app.command("wishlist")
 def parse_wishlist(
     path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $wl response."),
@@ -1347,6 +1378,36 @@ def import_mm(
         )
 
 
+@import_app.command("mmr")
+def import_mmr(
+    server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
+    account: str = typer.Option(..., "--account", "-a", help="Account whose harem is shown."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk page."),
+    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
+) -> None:
+    """Parse and persist one ranked `$mmr`/`$mmrk` owned-harem page."""
+    raw_message = _read_message_source(path, clipboard)
+    try:
+        page = MudaeTextParser().parse_ranked_harem_page(raw_message)
+    except MudaeParseError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    source = "clipboard" if clipboard else f"file:{path}"
+    result = CatalogService().import_ranked_harem_page(
+        page,
+        server,
+        account,
+        raw_message,
+        source,
+    )
+    console.print(
+        f"[green]Imported {result.entries_imported} owned harem entries for "
+        f"{result.account_name}.[/green] "
+        f"[cyan]{result.entries_linked}[/cyan] linked to the current catalog."
+    )
+
+
 @import_app.command("bonus")
 def import_bonus(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
@@ -1649,6 +1710,7 @@ def catalog_top(
     account: str | None = typer.Option(None, "--account", "-a", help="Account for account evidence filters."),
     series: str | None = typer.Option(None, "--series", help="Case-insensitive series text filter."),
     exact_series: bool = typer.Option(False, "--exact-series", help="Require an exact series match."),
+    owned_only: bool = typer.Option(False, "--owned-only", help="Only characters directly observed in the account's $mm harem."),
     keyed_only: bool = typer.Option(False, "--keyed-only", help="Only characters with imported key evidence."),
     unavailable_only: bool = typer.Option(False, "--unavailable-only", help="Only characters observed as unavailable by $topx."),
     sort_by: str = typer.Option("rank", "--sort", help="Sort by rank or name."),
@@ -1660,6 +1722,7 @@ def catalog_top(
             account_name=account,
             series=series,
             exact_series=exact_series,
+            owned_only=owned_only,
             keyed_only=keyed_only,
             unavailable_only=unavailable_only,
             sort_by=sort_by,
@@ -1677,10 +1740,18 @@ def catalog_top(
     table.add_column("Claim rank", justify="right", style="cyan")
     table.add_column("Character", style="green")
     table.add_column("Series")
+    table.add_column("Ownership")
     table.add_column("Key evidence")
     table.add_column("Rollability")
     table.add_column("Observed (UTC)")
     for character in characters:
+        ownership = (
+            "Not requested"
+            if character.owned is None
+            else "Owned evidence"
+            if character.owned
+            else "No owned evidence"
+        )
         key_state = (
             "Not requested"
             if character.keyed is None
@@ -1699,6 +1770,7 @@ def catalog_top(
             f"#{character.claim_rank:,}",
             character.character.name,
             character.character.series,
+            ownership,
             key_state,
             rollability,
             character.observed_at.strftime("%Y-%m-%d %H:%M"),
@@ -1706,7 +1778,8 @@ def catalog_top(
     console.print(table)
     if server and account:
         console.print(
-            "[dim]No imported key evidence does not prove unowned, and no $topx observation does not prove rollable.[/dim]"
+            "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "
+            "No imported key evidence does not prove unkeyed, and no $topx observation does not prove rollable.[/dim]"
         )
 
 

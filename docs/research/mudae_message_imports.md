@@ -43,6 +43,15 @@ provides reliable identity metadata.
 `--server` and `--account` context, plus `--scan <id>` when importing pages
 into a multi-page harem scan.
 
+`moa import mmr --server <label> --account <label> --clipboard` records direct
+owned-character evidence from one ranked `$mmr` or `$mmrk` page. The parser
+keeps the claim rank and optional displayed Kakera value, and links names to
+the catalog only when the name is unique. `moa import auto` recognizes this
+format as `ranked_harem` too. Use `moa catalog top --owned-only` to restrict
+the imported `$top` list to characters directly observed in those pages.
+Missing owned evidence is not proof of unownership: a single `$mm` page is
+only a partial observation until every page has been imported.
+
 For an accurate full-harem snapshot, begin a scan before copying pages:
 
 ```powershell
@@ -69,6 +78,6 @@ help and slot information.
 ## Intentional limits
 
 The parser only extracts fields that are clear in the observed format. It does
-not yet infer ownership, tags, series aliases, disable-list status, or a
+not yet infer unownership, tags, series aliases, disable-list status, or a
 character's permanent global identity. Those need separate, explicit modeling
 instead of being guessed from one message.

@@ -204,6 +204,27 @@ def test_parse_value_sorted_keyed_harem_page_from_mmyk_output() -> None:
     assert page.entries[2].key_type == "gold"
 
 
+def test_parse_ranked_harem_page_from_mmrk_output() -> None:
+    page = MudaeTextParser().parse_ranked_harem_page(
+        "ernieuuu's harem\n"
+        "AVG: 1,361\n"
+        "Top 15 value: 169\n"
+        "Total value: 163,373:kakera:\n"
+        "#2 - Zero Two 1,440 ka\n"
+        "#3 - Rem 1,426 ka\n"
+        "#4 - Saber 1,478 ka\n"
+        "Page 1 / 38"
+    )
+
+    assert page.page_number == 1
+    assert page.page_count == 38
+    assert [(entry.name, entry.claim_rank, entry.kakera_value) for entry in page.entries] == [
+        ("Zero Two", 2, 1440),
+        ("Rem", 3, 1426),
+        ("Saber", 4, 1478),
+    ]
+
+
 def test_parse_player_bonus_preserves_metrics_and_extracts_key_modifiers() -> None:
     bonus = MudaeTextParser().parse_player_bonus(
         "Player Bonuses\n"

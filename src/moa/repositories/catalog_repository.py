@@ -17,6 +17,8 @@ from moa.models.catalog import (
     HaremScanProgress,
     ImportEventSummary,
     RankedCatalogCharacter,
+    RankedHaremImportResult,
+    OwnedCharacterObservation,
     ServerKakeraObservation,
     PlayerBonusImportResult,
     PlayerBonusObservation,
@@ -53,6 +55,7 @@ from moa.models.character import (
     CharacterDetails,
     DisableListSnapshot,
     HaremKeyPage,
+    RankedHaremPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
@@ -128,6 +131,19 @@ class CatalogRepositoryProtocol(Protocol):
         source: str,
         scan_id: int | None = None,
     ) -> HaremKeyImportResult: ...
+
+    def import_ranked_harem_page(
+        self,
+        page: RankedHaremPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RankedHaremImportResult: ...
+
+    def owned_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[OwnedCharacterObservation, ...]: ...
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]: ...
 
@@ -842,6 +858,121 @@ class CatalogRepository:
             scan_id=scan_id,
             page_number=page.page_number,
             page_count=page.page_count,
+        )
+
+    def import_ranked_harem_page(
+        self,
+        page: RankedHaremPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> RankedHaremImportResult:
+        """Store direct owned-character evidence from one ranked `$mm` page."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("ranked_harem_page", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            linked_entries = 0
+            for entry in page.entries:
+                normalized_name = self._normalize(entry.name)
+                matches = connection.execute(
+                    "SELECT id FROM characters WHERE normalized_name = ?",
+                    (normalized_name,),
+                ).fetchall()
+                character_id = matches[0]["id"] if len(matches) == 1 else None
+                linked_entries += character_id is not None
+                connection.execute(
+                    """
+                    INSERT INTO owned_character_observations (
+                        account_context_id, character_id, character_name, normalized_character_name,
+                        claim_rank, kakera_value, observed_at, import_event_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        account_id,
+                        character_id,
+                        entry.name,
+                        normalized_name,
+                        entry.claim_rank,
+                        entry.kakera_value,
+                        observed_at.isoformat(),
+                        import_event_id,
+                    ),
+                )
+        return RankedHaremImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            entries_imported=len(page.entries),
+            entries_linked=linked_entries,
+            observed_at=observed_at,
+            page_number=page.page_number,
+            page_count=page.page_count,
+        )
+
+    def owned_characters(
+        self, server_name: str, account_name: str
+    ) -> tuple[OwnedCharacterObservation, ...]:
+        """Return the latest direct owned-character evidence per account/name."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT observations.character_name, observations.claim_rank,
+                       observations.kakera_value, observations.observed_at,
+                       characters.id AS character_id, characters.name,
+                       characters.series, characters.gender, characters.roulette
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN owned_character_observations AS observations
+                  ON observations.id = (
+                      SELECT latest.id
+                      FROM owned_character_observations AS latest
+                      WHERE latest.account_context_id = account_contexts.id
+                        AND latest.normalized_character_name = observations.normalized_character_name
+                      ORDER BY latest.id DESC
+                      LIMIT 1
+                  )
+                LEFT JOIN characters ON characters.id = observations.character_id
+                    OR (
+                        observations.character_id IS NULL
+                        AND characters.normalized_name = observations.normalized_character_name
+                        AND 1 = (
+                            SELECT COUNT(*)
+                            FROM characters AS candidates
+                            WHERE candidates.normalized_name = observations.normalized_character_name
+                        )
+                    )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                ORDER BY observations.claim_rank ASC, observations.character_name COLLATE NOCASE
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchall()
+        return tuple(
+            OwnedCharacterObservation(
+                character_name=row["character_name"],
+                character=(
+                    CatalogCharacter(
+                        id=row["character_id"],
+                        name=row["name"],
+                        series=row["series"],
+                        gender=row["gender"],
+                        roulette=row["roulette"],
+                    )
+                    if row["character_id"] is not None
+                    else None
+                ),
+                claim_rank=row["claim_rank"],
+                kakera_value=row["kakera_value"],
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
         )
 
     def harem_keys(self, server_name: str, account_name: str) -> tuple[HaremKeyObservation, ...]:
@@ -1958,6 +2089,10 @@ class CatalogRepository:
                 (import_event_id,),
             )
             connection.execute(
+                "DELETE FROM owned_character_observations WHERE import_event_id = ?",
+                (import_event_id,),
+            )
+            connection.execute(
                 "DELETE FROM rank_snapshots WHERE import_event_id = ?",
                 (import_event_id,),
             )
@@ -2052,6 +2187,18 @@ class CatalogRepository:
                     normalized_character_name TEXT NOT NULL,
                     key_type TEXT NOT NULL,
                     key_count INTEGER NOT NULL,
+                    kakera_value INTEGER,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS owned_character_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    character_id INTEGER REFERENCES characters(id),
+                    character_name TEXT NOT NULL,
+                    normalized_character_name TEXT NOT NULL,
+                    claim_rank INTEGER NOT NULL,
                     kakera_value INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)

@@ -50,6 +50,7 @@ class CatalogTopSearchEntry(MOAModel):
     claim_rank: int
     like_rank: int | None
     observed_at: datetime
+    owned: bool | None
     keyed: bool | None
     unavailable: bool | None
 
@@ -113,6 +114,19 @@ class HaremKeyImportResult(MOAModel):
     page_count: int | None = None
 
 
+class RankedHaremImportResult(MOAModel):
+    """Summary of one persisted ranked `$mm` ownership page."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    entries_imported: int
+    entries_linked: int
+    observed_at: datetime
+    page_number: int | None = None
+    page_count: int | None = None
+
+
 class HaremKeyObservation(MOAModel):
     """The latest imported key state for one harem entry."""
 
@@ -120,6 +134,16 @@ class HaremKeyObservation(MOAModel):
     character: CatalogCharacter | None
     key_type: str
     key_count: int
+    kakera_value: int | None
+    observed_at: datetime
+
+
+class OwnedCharacterObservation(MOAModel):
+    """One character directly observed in an account's `$mm` harem."""
+
+    character_name: str
+    character: CatalogCharacter | None
+    claim_rank: int
     kakera_value: int | None
     observed_at: datetime
 

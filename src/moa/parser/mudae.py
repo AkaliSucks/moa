@@ -22,6 +22,8 @@ from moa.models.character import (
     DisableListSnapshot,
     HaremKeyEntry,
     HaremKeyPage,
+    RankedHaremEntry,
+    RankedHaremPage,
     PlayerBonusMetric,
     PlayerBonusSnapshot,
     RankedCharacter,
@@ -63,6 +65,11 @@ class MudaeTextParser:
     _HAREM_KEY_ENTRY = re.compile(
         r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
         r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
+        re.IGNORECASE,
+    )
+    _RANKED_HAREM_ENTRY = re.compile(
+        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
+        r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
     _TOTAL_HAREM_VALUE = re.compile(
@@ -362,6 +369,36 @@ class MudaeTextParser:
             page_count=int(page.group("pages")) if page else None,
             entries=tuple(entries),
             total_harem_value=self._number(total.group("value")) if total else None,
+        )
+
+    def parse_ranked_harem_page(self, text: str) -> RankedHaremPage:
+        """Parse direct owned-character evidence from `$mmr` or `$mmrk`."""
+        lines = self._lines(text)
+        if not any("harem" in line.casefold() for line in lines):
+            raise MudaeParseError("Expected a Mudae ranked harem header.")
+        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
+        entries: list[RankedHaremEntry] = []
+        for line in lines:
+            match = self._RANKED_HAREM_ENTRY.match(line)
+            if match is None:
+                continue
+            entries.append(
+                RankedHaremEntry(
+                    name=match.group("name").strip(),
+                    claim_rank=self._number(match.group("rank")),
+                    kakera_value=(
+                        self._number(match.group("kakera_value"))
+                        if match.group("kakera_value")
+                        else None
+                    ),
+                )
+            )
+        if not entries:
+            raise MudaeParseError("No ranked harem entries found in the Mudae `$mmr` output.")
+        return RankedHaremPage(
+            page_number=int(page.group("page")) if page else None,
+            page_count=int(page.group("pages")) if page else None,
+            entries=tuple(entries),
         )
 
     def parse_player_bonus(self, text: str) -> PlayerBonusSnapshot:

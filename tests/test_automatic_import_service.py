@@ -1,5 +1,6 @@
 import pytest
 
+from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
@@ -52,4 +53,25 @@ def test_automatic_import_routes_keyed_harem_pages(tmp_path) -> None:
     entries = catalog.harem_keys("Lake", "ernieuuu")
     assert [(entry.character_name, entry.key_count, entry.kakera_value) for entry in entries] == [
         ("Albedo", 7, 1453)
+    ]
+
+
+def test_automatic_import_routes_ranked_harem_pages(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    catalog.import_top_page(
+        MudaeTextParser().parse_top_page("#2 - Zero Two - DARLING in the FRANXX"),
+        "#2 - Zero Two - DARLING in the FRANXX",
+        "clipboard",
+    )
+    service = AutomaticImportService(catalog)
+    message = "ernieuuu's harem\n#2 - Zero Two 1,440 ka\nPage 1 / 38"
+
+    result = service.import_message(message, "test", "Lake", "ernieuuu")
+
+    assert result.kind == "ranked_harem"
+    assert result.imported_count == 1
+    assert "page 1/38" in result.message
+    entries = catalog.owned_characters("Lake", "ernieuuu")
+    assert [(entry.character_name, entry.claim_rank, entry.kakera_value) for entry in entries] == [
+        ("Zero Two", 2, 1440)
     ]

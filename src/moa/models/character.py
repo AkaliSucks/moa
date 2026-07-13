@@ -76,6 +76,22 @@ class HaremKeyPage(MOAModel):
     total_harem_value: int | None = None
 
 
+class RankedHaremEntry(MOAModel):
+    """One character directly shown in a ranked `$mm` harem page."""
+
+    name: str
+    claim_rank: int
+    kakera_value: int | None = None
+
+
+class RankedHaremPage(MOAModel):
+    """A page of direct owned-character evidence from `$mmr`/`$mmrk`."""
+
+    page_number: int | None
+    page_count: int | None
+    entries: tuple[RankedHaremEntry, ...]
+
+
 class PlayerBonusMetric(MOAModel):
     """One labelled modifier reported by Mudae's `$bonus` command."""
 
