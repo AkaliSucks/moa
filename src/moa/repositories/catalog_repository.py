@@ -326,10 +326,16 @@ class CatalogRepository:
                 connection.execute(
                     """
                     INSERT INTO rank_snapshots (
-                        character_id, claim_rank, like_rank, observed_at, import_event_id
-                    ) VALUES (?, ?, NULL, ?, ?)
+                        character_id, claim_rank, like_rank, owner_name, observed_at, import_event_id
+                    ) VALUES (?, ?, NULL, ?, ?, ?)
                     """,
-                    (character_id, ranked_character.claim_rank, observed_at.isoformat(), import_event_id),
+                    (
+                        character_id,
+                        ranked_character.claim_rank,
+                        ranked_character.owner_name,
+                        observed_at.isoformat(),
+                        import_event_id,
+                    ),
                 )
 
         return TopImportResult(
@@ -625,6 +631,7 @@ class CatalogRepository:
                     characters.roulette,
                     rank_snapshots.claim_rank,
                     rank_snapshots.like_rank,
+                    rank_snapshots.owner_name,
                     rank_snapshots.observed_at
                 FROM characters
                 JOIN rank_snapshots ON rank_snapshots.id = (
@@ -653,6 +660,7 @@ class CatalogRepository:
                 claim_rank=row["claim_rank"],
                 like_rank=row["like_rank"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
+                owner_name=row["owner_name"],
             )
             for row in rows
         )
@@ -735,7 +743,8 @@ class CatalogRepository:
             rows = connection.execute(
                 """
                 SELECT rank_snapshots.character_id, rank_snapshots.claim_rank, rank_snapshots.like_rank,
-                       rank_snapshots.observed_at, rank_snapshots.import_event_id
+                       rank_snapshots.owner_name, rank_snapshots.observed_at,
+                       rank_snapshots.import_event_id
                 FROM rank_snapshots
                 JOIN characters ON characters.id = rank_snapshots.character_id
                 WHERE characters.normalized_name = ? AND characters.normalized_series = ?
@@ -751,6 +760,7 @@ class CatalogRepository:
                 like_rank=row["like_rank"],
                 observed_at=datetime.fromisoformat(row["observed_at"]),
                 import_event_id=row["import_event_id"],
+                owner_name=row["owner_name"],
             )
             for row in rows
         )
@@ -2206,6 +2216,7 @@ class CatalogRepository:
                     character_id INTEGER NOT NULL REFERENCES characters(id),
                     claim_rank INTEGER,
                     like_rank INTEGER,
+                    owner_name TEXT,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
@@ -2469,6 +2480,12 @@ class CatalogRepository:
                 connection.execute(
                     "ALTER TABLE harem_scans ADD COLUMN scan_kind TEXT NOT NULL DEFAULT 'keys'"
                 )
+            rank_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(rank_snapshots)").fetchall()
+            }
+            if "owner_name" not in rank_columns:
+                connection.execute("ALTER TABLE rank_snapshots ADD COLUMN owner_name TEXT")
             owned_columns = {
                 row["name"]
                 for row in connection.execute(

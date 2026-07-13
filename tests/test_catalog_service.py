@@ -58,6 +58,19 @@ def test_import_top_page_updates_a_character_without_duplicate_catalog_rows(tmp_
     assert service.top()[0].claim_rank == 1
 
 
+def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    page_text = "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID"
+
+    service.import_top_page(
+        MudaeTextParser().parse_top_page(page_text),
+        page_text,
+        "clipboard",
+    )
+
+    assert service.top()[0].owner_name == "xuppii"
+
+
 def test_import_im_enriches_global_character_and_keeps_kakera_value_per_server(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     service = CatalogService(CatalogRepository(database_path))

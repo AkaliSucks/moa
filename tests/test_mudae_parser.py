@@ -97,6 +97,19 @@ def test_parse_top_page_accepts_selected_rank_rows_without_embed_metadata() -> N
     assert [character.name for character in page.characters] == ["Mai Sakurajima", "2B"]
 
 
+def test_parse_topo_page_preserves_claimed_owner_names() -> None:
+    page = MudaeTextParser().parse_top_page(
+        "🏆 TOP 1000\n"
+        "#1 - Hatsune Miku \U0001f49e => xuppii - VOCALOID\n"
+        "#2 - Zero Two \U0001f49e => ernieuuu - DARLING in the FRANXX\n"
+        "Page 1 / 67"
+    )
+
+    assert page.characters[0].name == "Hatsune Miku"
+    assert page.characters[0].owner_name == "xuppii"
+    assert page.characters[1].owner_name == "ernieuuu"
+
+
 def test_parse_character_details_from_copied_im_output() -> None:
     character = MudaeTextParser().parse_character_details(CHARACTER_DETAILS)
 

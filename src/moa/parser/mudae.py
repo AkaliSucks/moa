@@ -45,7 +45,8 @@ class MudaeTextParser:
 
     _TOP_HEADER = re.compile(r"\bTOP\s+(?P<limit>[\d,]+)\b", re.IGNORECASE)
     _TOP_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+)$"
+        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
+        r"(?:\s*=>\s*(?P<owner>.+?))?\s+-\s+(?P<series>.+)$"
     )
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = re.compile(
@@ -223,11 +224,13 @@ class MudaeTextParser:
             if entry is None:
                 continue
             name = entry.group("name").removesuffix(" 💞").strip()
+            name = name.replace("\U0001f49e", "").strip()
             characters.append(
                 RankedCharacter(
                     name=name,
                     series=entry.group("series").strip(),
                     claim_rank=self._number(entry.group("rank")),
+                    owner_name=entry.group("owner").strip() if entry.group("owner") else None,
                 )
             )
 

@@ -94,6 +94,27 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert unavailable[0].unavailable_reason == "$togglewestern"
 
 
+def test_top_search_uses_topo_owner_as_unavailable_reason() -> None:
+    catalog = InMemoryTopCatalog()
+    claimed = catalog._top[2]
+    catalog._top = catalog._top[:2] + (
+        RankedCatalogCharacter(
+            character=claimed.character,
+            claim_rank=claimed.claim_rank,
+            like_rank=claimed.like_rank,
+            observed_at=claimed.observed_at,
+            owner_name="xuppii",
+        ),
+    )
+
+    unavailable = TopSearchService(catalog).search(
+        server_name="Lake", account_name="ernieuuu", unavailable_only=True
+    )
+
+    assert [entry.character.name for entry in unavailable] == ["Rem", "Albedo"]
+    assert unavailable[1].unavailable_reason == "claimed by xuppii"
+
+
 def test_top_search_filters_to_directly_observed_owned_characters() -> None:
     service = TopSearchService(InMemoryTopCatalog())
 

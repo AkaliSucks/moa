@@ -1738,7 +1738,7 @@ def catalog_top(
     owned_only: bool = typer.Option(False, "--owned-only", help="Only characters directly observed in the account's $mm harem."),
     unowned_only: bool = typer.Option(False, "--unowned-only", help="Only characters absent from a complete owned-harem scan."),
     keyed_only: bool = typer.Option(False, "--keyed-only", help="Only characters with imported key evidence."),
-    unavailable_only: bool = typer.Option(False, "--unavailable-only", help="Only characters observed as unavailable by $topx."),
+    unavailable_only: bool = typer.Option(False, "--unavailable-only", help="Only characters observed unavailable by $topx or claimed in imported $topo."),
     sort_by: str = typer.Option("rank", "--sort", help="Sort by rank or name."),
 ) -> None:
     """Search imported `$top` ranks with optional account evidence filters."""
@@ -1802,7 +1802,7 @@ def catalog_top(
     if server and account:
         console.print(
             "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "
-            "No imported key evidence does not prove unkeyed, and no $topx observation does not prove rollable.[/dim]"
+            "No imported key evidence does not prove unkeyed, and no $topx/$topo observation does not prove rollable.[/dim]"
         )
 
 

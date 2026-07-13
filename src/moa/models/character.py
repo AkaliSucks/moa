@@ -9,6 +9,7 @@ class RankedCharacter(MOAModel):
     name: str
     series: str
     claim_rank: int
+    owner_name: str | None = None
 
 
 class TopPage(MOAModel):

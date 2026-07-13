@@ -32,6 +32,7 @@ class CatalogRankSnapshot(MOAModel):
     like_rank: int | None
     observed_at: datetime
     import_event_id: int
+    owner_name: str | None = None
 
 
 class RankedCatalogCharacter(MOAModel):
@@ -41,6 +42,7 @@ class RankedCatalogCharacter(MOAModel):
     claim_rank: int
     like_rank: int | None
     observed_at: datetime
+    owner_name: str | None = None
 
 
 class CatalogTopSearchEntry(MOAModel):
@@ -54,6 +56,7 @@ class CatalogTopSearchEntry(MOAModel):
     keyed: bool | None
     unavailable: bool | None
     unavailable_reason: str | None
+    owner_name: str | None = None
 
 
 class TopImportResult(MOAModel):

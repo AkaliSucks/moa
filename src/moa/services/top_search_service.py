@@ -80,10 +80,20 @@ class TopSearchService:
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
-            unavailable = name in unavailable_reasons if unavailable_reasons is not None else None
+            owner_name = entry.owner_name
+            topx_unavailable = (
+                name in unavailable_reasons if unavailable_reasons is not None else None
+            )
+            unavailable = (
+                True
+                if owner_name
+                else topx_unavailable
+            )
             unavailable_reason = (
-                unavailable_reasons[name]
-                if unavailable and unavailable_reasons is not None
+                f"claimed by {owner_name}"
+                if owner_name
+                else unavailable_reasons[name]
+                if topx_unavailable and unavailable_reasons is not None
                 else None
             )
             if owned_only and not owned:
@@ -104,6 +114,7 @@ class TopSearchService:
                     keyed=keyed,
                     unavailable=unavailable,
                     unavailable_reason=unavailable_reason,
+                    owner_name=owner_name,
                 )
             )
 
