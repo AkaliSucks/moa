@@ -90,6 +90,8 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert [entry.character.name for entry in unavailable] == ["Rem"]
     assert keyed[0].keyed is True
     assert keyed[0].unavailable is False
+    assert keyed[0].unavailable_reason is None
+    assert unavailable[0].unavailable_reason == "$togglewestern"
 
 
 def test_top_search_filters_to_directly_observed_owned_characters() -> None:
@@ -127,6 +129,7 @@ def test_top_search_filters_series_and_keeps_unknown_account_state_explicit() ->
     assert series[0].keyed is None
     assert series[0].owned is None
     assert series[0].unavailable is None
+    assert series[0].unavailable_reason is None
 
 
 def test_top_search_requires_account_context_for_evidence_filters() -> None:

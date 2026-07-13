@@ -53,6 +53,7 @@ class CatalogTopSearchEntry(MOAModel):
     owned: bool | None
     keyed: bool | None
     unavailable: bool | None
+    unavailable_reason: str | None
 
 
 class TopImportResult(MOAModel):

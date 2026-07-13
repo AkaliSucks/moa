@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typer.testing import CliRunner
 
 from moa.cli import main
+from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
@@ -92,3 +93,40 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert "#484" in result.stdout
     assert "2026-07-12 23:45 UTC" in result.stdout
     assert "Mai Sakurajima | 7 - Gold | 2026-07-12 23:45 UTC" in result.stdout
+
+
+def test_catalog_top_displays_unavailable_reasons() -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    entries = (
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=1, name="Venom", series="Marvel", gender=None, roulette=None
+            ),
+            claim_rank=87,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=None,
+            keyed=None,
+            unavailable=True,
+            unavailable_reason="$togglewestern",
+        ),
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=2, name="2B", series="NieR: Automata", gender=None, roulette=None
+            ),
+            claim_rank=10,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=None,
+            keyed=None,
+            unavailable=True,
+            unavailable_reason=None,
+        ),
+    )
+
+    assert main._format_rollability(entries[0].unavailable, entries[0].unavailable_reason) == (
+        "Unavailable ($togglewestern)"
+    )
+    assert main._format_rollability(entries[1].unavailable, entries[1].unavailable_reason) == (
+        "Unavailable (disabled)"
+    )

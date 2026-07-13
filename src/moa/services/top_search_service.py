@@ -50,7 +50,7 @@ class TopSearchService:
 
         owned_names: set[str] | None = None
         keyed_names: set[str] | None = None
-        unavailable_names: set[str] | None = None
+        unavailable_reasons: dict[str, str | None] | None = None
         if scoped:
             owned_names = {
                 entry.character_name.casefold()
@@ -60,8 +60,8 @@ class TopSearchService:
                 entry.character_name.casefold()
                 for entry in self._catalog.harem_keys(server_name, account_name)
             }
-            unavailable_names = {
-                entry.character.name.casefold()
+            unavailable_reasons = {
+                entry.character.name.casefold(): entry.reason
                 for entry in self._catalog.unavailable_characters(server_name, account_name)
             }
 
@@ -80,7 +80,12 @@ class TopSearchService:
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
             keyed = name in keyed_names if keyed_names is not None else None
-            unavailable = name in unavailable_names if unavailable_names is not None else None
+            unavailable = name in unavailable_reasons if unavailable_reasons is not None else None
+            unavailable_reason = (
+                unavailable_reasons[name]
+                if unavailable and unavailable_reasons is not None
+                else None
+            )
             if owned_only and not owned:
                 continue
             if unowned_only and owned:
@@ -98,6 +103,7 @@ class TopSearchService:
                     owned=owned,
                     keyed=keyed,
                     unavailable=unavailable,
+                    unavailable_reason=unavailable_reason,
                 )
             )
 

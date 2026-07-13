@@ -795,6 +795,14 @@ def _format_optional_number(value: int | None) -> str:
     return "-" if value is None else f"{value:,}"
 
 
+def _format_rollability(unavailable: bool | None, reason: str | None) -> str:
+    if unavailable is None:
+        return "Not requested"
+    if not unavailable:
+        return "Not observed unavailable"
+    return f"Unavailable ({reason or 'disabled'})"
+
+
 def _format_observed_at(observed_at: datetime) -> str:
     """Render imported timestamps consistently as UTC in compact CLI output."""
     if observed_at.tzinfo is not None:
@@ -1780,13 +1788,7 @@ def catalog_top(
             if character.keyed
             else "No imported key"
         )
-        rollability = (
-            "Not requested"
-            if character.unavailable is None
-            else "Unavailable"
-            if character.unavailable
-            else "Not observed unavailable"
-        )
+        rollability = _format_rollability(character.unavailable, character.unavailable_reason)
         table.add_row(
             f"#{character.claim_rank:,}",
             character.character.name,
