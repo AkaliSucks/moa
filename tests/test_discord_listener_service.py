@@ -1,0 +1,40 @@
+from types import SimpleNamespace
+
+from moa.repositories.catalog_repository import CatalogRepository
+from moa.services.catalog_service import CatalogService
+from moa.services.discord_listener_service import DiscordListenerService
+
+
+def test_extract_message_text_flattens_discord_embed_content() -> None:
+    message = SimpleNamespace(
+        content="",
+        embeds=(
+            SimpleNamespace(
+                title="Mudae",
+                description="#1 - Zero Two - DARLING in the FRANXX",
+                fields=(SimpleNamespace(name="Page", value="1 / 67"),),
+                footer=SimpleNamespace(text="Mudae"),
+            ),
+        ),
+    )
+
+    text = DiscordListenerService.extract_message_text(message)
+
+    assert text == "Mudae\n#1 - Zero Two - DARLING in the FRANXX\nPage\n1 / 67\nMudae"
+
+
+def test_listener_page_metadata_reads_supported_scan_pages(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+    raw_message = "ernieuuu's harem\n#2 - Zero Two · ($wa)\nPage 1 / 38"
+
+    assert listener._page_metadata("ranked_harem", raw_message) == (1, 38)
+
+
+def test_listener_ignores_non_scan_page_metadata(tmp_path) -> None:
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    )
+
+    assert listener._page_metadata("top", "#1 - Zero Two - DARLING in the FRANXX") == (None, None)

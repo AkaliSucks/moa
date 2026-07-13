@@ -284,13 +284,16 @@ def test_parse_ranked_harem_page_from_mmrt_output_reads_roulette_types() -> None
     page = MudaeTextParser().parse_ranked_harem_page(
         "cute_beagle_91130's harem\n"
         "35 $wa, 65 $ha, 20 $wg, 20 $hg\n"
-        "#11 - Satoru Gojo · ($ha)\n"
-        "#18 - Kirby · ($wa, $ha, $wg, $hg)\n"
+        "#11 - Satoru Gojo · ($ha) - :goldkey: (1) 903 ka\n"
+        "#18 - Kirby · ($wa, $ha, $wg, $hg) - :silverkey: (3) 271 ka\n"
         "Page 1 / 5"
     )
 
     assert page.entries[0].roulette_types == ("ha",)
     assert page.entries[1].roulette_types == ("wa", "ha", "wg", "hg")
+    assert page.entries[0].key_type == "gold"
+    assert page.entries[0].key_count == 1
+    assert page.entries[0].kakera_value == 903
 
 
 def test_parse_player_bonus_preserves_metrics_and_extracts_key_modifiers() -> None:

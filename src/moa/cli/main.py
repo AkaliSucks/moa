@@ -15,6 +15,7 @@ from moa.services.action_service import ActionService
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.command_service import CommandService
+from moa.services.discord_listener_service import DiscordListenerService
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
@@ -53,6 +54,7 @@ adl_app = typer.Typer(help="Build complete antidisable series snapshots safely")
 recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
 server_app = typer.Typer(help="Compare imported server-wide configuration")
 config_app = typer.Typer(help="Manage user-local MOA profiles and account identities")
+discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot")
 config_profile_app = typer.Typer(help="Manage MOA profiles")
 config_account_app = typer.Typer(help="Manage server/account identities")
 console = Console()
@@ -74,6 +76,7 @@ app.add_typer(adl_app, name="adl")
 app.add_typer(recommend_app, name="recommend")
 app.add_typer(server_app, name="server")
 app.add_typer(config_app, name="config")
+app.add_typer(discord_app, name="discord")
 config_app.add_typer(config_profile_app, name="profile")
 config_app.add_typer(config_account_app, name="account")
 
@@ -124,6 +127,48 @@ def config_show(
             active,
         )
     console.print(table)
+
+
+@discord_app.command("listen")
+def discord_listen(
+    token: str | None = typer.Option(
+        None,
+        "--token",
+        envvar="MOA_DISCORD_BOT_TOKEN",
+        help="Discord bot token; prefer MOA_DISCORD_BOT_TOKEN instead of shell history.",
+    ),
+    profile: str | None = typer.Option(
+        None, "--profile", help="MOA profile containing Discord server/user IDs."
+    ),
+    mudae_user_id: str | None = typer.Option(
+        None,
+        "--mudae-user-id",
+        envvar="MOA_MUDAE_BOT_ID",
+        help="Optional Mudae Discord bot user ID used to filter responses.",
+    ),
+) -> None:
+    """Listen for Mudae responses and import them without clipboard copying."""
+    if not token or not token.strip():
+        console.print(
+            "[red]Discord bot token missing.[/red] Set MOA_DISCORD_BOT_TOKEN or pass --token."
+        )
+        raise typer.Exit(1)
+    parsed_mudae_user_id: int | None = None
+    if mudae_user_id:
+        try:
+            parsed_mudae_user_id = int(mudae_user_id)
+        except ValueError as error:
+            console.print("[red]--mudae-user-id must be a numeric Discord user ID.[/red]")
+            raise typer.Exit(1) from error
+    console.print(
+        "[green]Starting Discord listener.[/green] It requires Message Content Intent, "
+        "View Channel, and Read Message History permissions."
+    )
+    try:
+        DiscordListenerService(profile_name=profile).run(token, parsed_mudae_user_id)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
 
 
 @config_profile_app.command("add")
@@ -1957,7 +2002,7 @@ def harem_begin(
     server: str = typer.Option(..., "--server", "-s", help="Your label for the Mudae server."),
     account: str = typer.Option(..., "--account", "-a", help="Account whose harem you are scanning."),
     scan_kind: str = typer.Option(
-        "keys", "--kind", help="Scan `keys` with $mmy or `owned` with $mmr/$mmrk."
+        "keys", "--kind", help="Scan `keys` with $mmyk or `owned` with $mmrkty+."
     ),
 ) -> None:
     """Start a new multi-page harem scan that activates only when complete."""
@@ -1967,8 +2012,10 @@ def harem_begin(
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
     import_command = "mm" if scan.scan_kind == "keys" else "mmr"
+    mudae_command = "$mmyk" if scan.scan_kind == "keys" else "$mmrkty+"
     console.print(
         f"[green]Started {scan.scan_kind} harem scan {scan.id}[/green] for [cyan]{scan.account_name}[/cyan].\n"
+        f"In Discord, run [bold]{mudae_command}[/bold] and copy each full page.\n"
         "Import each Mudae page with:\n"
         f"[bold]uv run moa import {import_command} --scan {scan.id} --server {scan.server_name!r} "
         f"--account {scan.account_name!r} --clipboard[/bold]"

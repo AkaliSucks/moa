@@ -51,6 +51,25 @@ def test_config_service_updates_existing_identity_with_discord_ids(tmp_path: Pat
 
     assert identity.discord_server_id == "1323181920397426763"
     assert identity.discord_user_id == "146851153412358144"
+
+
+def test_config_service_resolves_identity_for_discord_listener(tmp_path: Path) -> None:
+    service = ConfigService(tmp_path / "config.json")
+    service.add_account(
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        discord_server_id="1323181920397426763",
+        discord_user_id="146851153412358144",
+    )
+
+    identity = service.identity_for_discord_ids(
+        "1323181920397426763", "146851153412358144"
+    )
+
+    assert identity is not None
+    assert identity.server == "Lake Arrowhead 2025"
+    assert identity.account == "ernieuuu"
+    assert service.identity_for_discord_ids("1323181920397426763", "999") is None
     assert service.profile().accounts[0] == identity
 
 

@@ -39,6 +39,13 @@ def test_command_service_distinguishes_display_flags_from_sort_flags() -> None:
     assert "orders the keyed subset" in keys_sorted.flags[0].definition.notes
 
 
+def test_command_service_identifies_full_ranked_harem_snapshot_flags() -> None:
+    query = CommandService().explain("$mmrkty+")
+
+    assert [flag.token for flag in query.flags] == ["r", "k", "t", "y+"]
+    assert query.flags[-1].definition.meaning == "Show the full key list."
+
+
 def test_command_service_rejects_unknown_flags() -> None:
     with pytest.raises(ValueError, match="Unknown Mudae flag"):
         CommandService().explain("$mm?")

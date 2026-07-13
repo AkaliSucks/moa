@@ -1040,6 +1040,27 @@ class CatalogRepository:
                         scan_id,
                     ),
                 )
+                if entry.key_type is not None and entry.key_count is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO harem_key_observations (
+                            account_context_id, character_id, character_name,
+                            normalized_character_name, key_type, key_count,
+                            kakera_value, observed_at, import_event_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            account_id,
+                            character_id,
+                            entry.name,
+                            normalized_name,
+                            entry.key_type,
+                            entry.key_count,
+                            entry.kakera_value,
+                            observed_at.isoformat(),
+                            import_event_id,
+                        ),
+                    )
             if scan_id is not None:
                 connection.execute(
                     "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "

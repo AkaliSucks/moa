@@ -136,6 +136,15 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
 
 
+def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
+    monkeypatch.delenv("MOA_DISCORD_BOT_TOKEN", raising=False)
+
+    result = CliRunner().invoke(main.app, ["discord", "listen"])
+
+    assert result.exit_code == 1
+    assert "Discord bot token missing" in result.stdout
+
+
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
     assert main._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"

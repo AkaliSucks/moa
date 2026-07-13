@@ -256,6 +256,26 @@ class ConfigService:
                 names.append(identity.account)
         return tuple(names)
 
+    def identity_for_discord_ids(
+        self,
+        server_id: str,
+        user_id: str,
+        profile_name: str | None = None,
+    ) -> ConfigAccount | None:
+        """Return the configured MOA identity matching a Discord guild/user pair."""
+        normalized_server_id = self._clean(server_id, "server ID")
+        normalized_user_id = self._clean(user_id, "user ID")
+        profile = self.profile(profile_name)
+        return next(
+            (
+                identity
+                for identity in profile.accounts
+                if identity.discord_server_id == normalized_server_id
+                and identity.discord_user_id == normalized_user_id
+            ),
+            None,
+        )
+
     def _save_profile(self, config: MOAConfig, updated_profile: ConfigProfile) -> None:
         profiles = tuple(
             updated_profile if profile.name.casefold() == updated_profile.name.casefold() else profile

@@ -15,6 +15,7 @@ dependencies = [
     "rapidfuzz",
     "orjson",
     "httpx",
+    "discord.py>=2.3,<3",
     "alembic>=1.18.5",
     "pydantic-settings>=2.14.2",
     "loguru>=0.7.3",

@@ -72,6 +72,7 @@ class MudaeTextParser:
     _RANKED_HAREM_ENTRY = re.compile(
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
         r"(?:\s*[\u00b7\u2022]\s*\((?P<roulette_types>\$?[a-z]+(?:\s*,\s*\$?[a-z]+)*)\))?"
+        r"(?:\s*(?:[-\u00b7\u2022]\s*)?:(?P<key_type>[a-z]+)key:\s*\((?P<key_count>\d+)\))?"
         r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
@@ -415,6 +416,10 @@ class MudaeTextParser:
                         token.strip().removeprefix("$").lower()
                         for token in (match.group("roulette_types") or "").split(",")
                         if token.strip()
+                    ),
+                    key_type=(match.group("key_type") or "").lower() or None,
+                    key_count=(
+                        int(match.group("key_count")) if match.group("key_count") else None
                     ),
                 )
             )

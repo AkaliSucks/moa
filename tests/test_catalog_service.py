@@ -269,8 +269,8 @@ def test_import_mmrt_page_persists_roulette_types(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     page_text = (
         "cute_beagle_91130's harem\n"
-        "#11 - Satoru Gojo · ($ha)\n"
-        "#18 - Kirby · ($wa, $ha, $wg, $hg)\n"
+        "#11 - Satoru Gojo · ($ha) - :goldkey: (1) 903 ka\n"
+        "#18 - Kirby · ($wa, $ha, $wg, $hg) - :silverkey: (3) 271 ka\n"
         "Page 1 / 5"
     )
 
@@ -285,6 +285,11 @@ def test_import_mmrt_page_persists_roulette_types(tmp_path) -> None:
     entries = service.owned_characters("Lake Arrowhead 2025", "cute_beagle_91130")
     assert entries[0].roulette_types == ("ha",)
     assert entries[1].roulette_types == ("wa", "ha", "wg", "hg")
+    keys = service.harem_keys("Lake Arrowhead 2025", "cute_beagle_91130")
+    assert [(entry.character_name, entry.key_type, entry.key_count, entry.kakera_value) for entry in keys] == [
+        ("Satoru Gojo", "gold", 1, 903),
+        ("Kirby", "silver", 3, 271),
+    ]
 
 
 def test_complete_harem_scan_activates_only_after_every_page_is_imported(tmp_path) -> None:

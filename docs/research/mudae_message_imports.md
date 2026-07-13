@@ -58,13 +58,14 @@ provides reliable identity metadata.
 into a multi-page harem scan.
 
 `moa import mmr --server <label> --account <label> --clipboard` records direct
-owned-character evidence from one ranked `$mmr`, `$mmrk`, or `$mmrt` page. The
-parser keeps the claim rank, optional displayed Kakera value, and `$wa`/`$ha`/
-`$wg`/`$hg` roulette types when `$mmrt` provides them. Gender markers come
-from `$im` character details and may contain both `:female:` and `:male:`.
-Names link to the catalog only when unique. `moa import auto` recognizes this
-format as `ranked_harem` too. Use `moa catalog top --owned-only` to restrict
-the imported `$top` list to characters directly observed in those pages.
+owned-character evidence from one ranked `$mmr`, `$mmrk`, `$mmrt`, or combined
+`$mmrkty+` page. The parser keeps the claim rank, optional displayed Kakera
+value, `$wa`/`$ha`/`$wg`/`$hg` roll types, and key markers when the combined
+command provides them. Gender markers come from `$im` character details and
+may contain both `:female:` and `:male:`. Names link to the catalog only when
+unique. `moa import auto` recognizes this format as `ranked_harem` too. Use
+`moa catalog top --owned-only` to restrict the imported `$top` list to
+characters directly observed in those pages.
 
 MOA preserves Mudae's roll-type markers exactly: `$w`/`$wx` and `$m`/`$mx`
 cover animanga and games together, `$wa`/`$ma` are animanga-only, `$wg`/`$mg`
@@ -75,7 +76,8 @@ Missing owned evidence is not proof of unownership: a single `$mm` page is
 only a partial observation until every page has been imported.
 
 For a complete ownership snapshot, start an owned scan and import every ranked
-harem page:
+harem page. Prefer `$mmrkty+` so one page set supplies ownership, ranks, Kakera,
+roll types, and keys:
 
 ```powershell
 uv run moa harem begin --kind owned --server "Lake Arrowhead 2025" --account "ernieuuu"
@@ -122,6 +124,26 @@ The `3` is the scan ID printed by `moa adl begin`; replace it with your actual
 scan ID. `$ad <series>` modifies that list, so MOA matches antidisable state to
 the character's catalog series and does not model it as an individual-character
 setting.
+
+## Discord listener
+
+The first Discord ingestion path is available through `moa discord listen`.
+Create a Discord bot application, enable Message Content Intent, invite it to
+the target server with View Channel and Read Message History permissions, and
+keep its token outside the repository:
+
+```powershell
+$env:MOA_DISCORD_BOT_TOKEN = "your-bot-token"
+moa discord listen
+```
+
+MOA associates a configured Discord server ID and user ID with the latest
+`$`/slash command in each channel, then imports recognized Mudae responses and
+message edits through the existing automatic importer. It automatically opens
+and completes harem/antidisable scans when it sees page 1 through the final
+page. `--mudae-user-id` or `MOA_MUDAE_BOT_ID` can optionally restrict imports to
+the real Mudae bot. The bot does not impersonate the user or click Mudae
+components; pagination still follows the user's normal Discord interaction.
 
 ## Intentional limits
 
