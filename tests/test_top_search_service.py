@@ -62,6 +62,7 @@ class InMemoryTopCatalog:
                 character=self._top[1].character,
                 claim_rank=3,
                 kakera_value=1426,
+                roulette_types=("wa",),
                 observed_at=observed_at,
             ),
         )
@@ -117,6 +118,7 @@ def test_top_search_cross_references_keyed_and_unavailable_evidence() -> None:
     assert keyed[0].unavailable_reason is None
     assert unavailable[0].rollability_status == "Unavailable ($togglewestern)"
     assert unavailable[0].unavailable_reason == "$togglewestern"
+    assert unavailable[0].roulette_types == ("wa",)
 
 
 def test_top_search_uses_topo_owner_as_unavailable_reason() -> None:

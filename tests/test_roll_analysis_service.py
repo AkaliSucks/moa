@@ -55,7 +55,7 @@ def test_roll_analysis_combines_direct_roll_with_imported_wishlist_and_key_conte
     )
 
     assert analysis.wishlist_state == "Starwish"
-    assert analysis.keyed_harem_state == "5 — Silver"
+    assert analysis.keyed_harem_state == ":silverkey: (5)"
     assert analysis.rollability_state == "Observed rolling now (available at import time)"
     assert analysis.claim_window_state == "No imported claim-window state"
     assert analysis.kakera_value == 1448

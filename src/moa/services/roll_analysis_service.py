@@ -3,6 +3,7 @@
 from moa.models.catalog import RollAnalysis
 from moa.models.character import RollObservation
 from moa.services.catalog_service import CatalogService
+from moa.utils.display import format_mudae_key_marker
 
 
 class RollAnalysisService:
@@ -39,7 +40,7 @@ class RollAnalysisService:
             None,
         )
         keyed_harem_state = (
-            f"{keyed_entry.key_count} — {keyed_entry.key_type.title()}"
+            format_mudae_key_marker(keyed_entry.key_type, keyed_entry.key_count)
             if keyed_entry is not None
             else "No saved key record imported"
         )

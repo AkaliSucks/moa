@@ -86,13 +86,15 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert "Timer snapshot" in result.stdout
     assert "2m 5s old | 2026-07-12 23:45 UTC" in result.stdout
     assert "Latest reaction" in result.stdout
-    assert "+350 Kakera | :kakeraY: | 2026-07-12 23:45 UTC" in result.stdout
+    assert "+350:kakeraY: | 2026-07-12 23:45 UTC" in result.stdout
     assert "Latest roll" in result.stdout
     assert "Chisato Nishikigi" in result.stdout
-    assert "209 Kakera" in result.stdout
+    assert "209:kakera:" in result.stdout
     assert "#484" in result.stdout
     assert "2026-07-12 23:45 UTC" in result.stdout
-    assert "Mai Sakurajima | 7 - Gold | 2026-07-12 23:45 UTC" in result.stdout
+    assert "Mai Sakurajima" in result.stdout
+    assert ":goldkey: (7)" in result.stdout
+    assert "2026-07-12 23:45 UTC" in result.stdout
 
 
 def test_catalog_top_displays_unavailable_reasons() -> None:
@@ -136,6 +138,7 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
 
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
+    assert main._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"
     assert main._format_catalog_keys(False, None, None) == "-"
     assert main._format_catalog_keys(None, None, None) == "Not requested"
 

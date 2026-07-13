@@ -152,6 +152,18 @@ def test_parse_character_details_from_copied_im_output() -> None:
     assert character.like_rank == 19
 
 
+def test_parse_character_details_accepts_ambiguous_gender_markers() -> None:
+    character = MudaeTextParser().parse_character_details(
+        "Kirby\n"
+        "Kirby series :female::male:\n"
+        "Game roulette · 500 Kakera\n"
+        "Claim Rank: #1\n"
+        "Like Rank: #2\n"
+    )
+
+    assert character.gender == "female,male"
+
+
 def test_parse_current_im_layout_with_visual_kakera_and_key_icons() -> None:
     character = MudaeTextParser().parse_character_details(CURRENT_CHARACTER_DETAILS)
 
@@ -266,6 +278,19 @@ def test_parse_ranked_harem_page_from_mmrk_output() -> None:
         ("Rem", 3, 1426),
         ("Saber", 4, 1478),
     ]
+
+
+def test_parse_ranked_harem_page_from_mmrt_output_reads_roulette_types() -> None:
+    page = MudaeTextParser().parse_ranked_harem_page(
+        "cute_beagle_91130's harem\n"
+        "35 $wa, 65 $ha, 20 $wg, 20 $hg\n"
+        "#11 - Satoru Gojo · ($ha)\n"
+        "#18 - Kirby · ($wa, $ha, $wg, $hg)\n"
+        "Page 1 / 5"
+    )
+
+    assert page.entries[0].roulette_types == ("ha",)
+    assert page.entries[1].roulette_types == ("wa", "ha", "wg", "hg")
 
 
 def test_parse_player_bonus_preserves_metrics_and_extracts_key_modifiers() -> None:

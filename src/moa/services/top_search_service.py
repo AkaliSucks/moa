@@ -1,6 +1,10 @@
 """Cross-reference imported global ranks with account-scoped evidence."""
 
-from moa.models.catalog import CatalogTopSearchEntry, HaremKeyObservation
+from moa.models.catalog import (
+    CatalogTopSearchEntry,
+    HaremKeyObservation,
+    OwnedCharacterObservation,
+)
 from moa.services.catalog_service import CatalogService
 
 
@@ -58,6 +62,7 @@ class TopSearchService:
             )
 
         owned_names: set[str] | None = None
+        owned_observations: dict[str, OwnedCharacterObservation] | None = None
         keyed_names: set[str] | None = None
         key_observations: dict[str, HaremKeyObservation] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
@@ -70,10 +75,11 @@ class TopSearchService:
                 account.casefold()
                 for account in (owned_account_names or (account_name,))
             }
-            owned_names = {
-                entry.character_name.casefold()
+            owned_observations = {
+                entry.character_name.casefold(): entry
                 for entry in self._catalog.owned_characters(server_name, account_name)
             }
+            owned_names = set(owned_observations)
             key_observations = {
                 entry.character_name.casefold(): entry
                 for entry in self._catalog.harem_keys(server_name, account_name)
@@ -109,6 +115,11 @@ class TopSearchService:
 
             name = entry.character.name.casefold()
             owned = name in owned_names if owned_names is not None else None
+            owned_observation = (
+                owned_observations.get(name)
+                if owned_observations is not None
+                else None
+            )
             keyed = name in keyed_names if keyed_names is not None else None
             key_observation = (
                 key_observations.get(name)
@@ -195,6 +206,7 @@ class TopSearchService:
                     key_type=key_observation.key_type if key_observation else None,
                     key_count=key_observation.key_count if key_observation else None,
                     kakera_value=key_observation.kakera_value if key_observation else None,
+                    roulette_types=(owned_observation.roulette_types if owned_observation else ()),
                 )
             )
 

@@ -71,13 +71,16 @@ class MudaeTextParser:
     )
     _RANKED_HAREM_ENTRY = re.compile(
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
+        r"(?:\s*[\u00b7\u2022]\s*\((?P<roulette_types>\$?[a-z]+(?:\s*,\s*\$?[a-z]+)*)\))?"
         r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
     _TOTAL_HAREM_VALUE = re.compile(
         r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
     )
-    _GENDER = re.compile(r"\s+:(?P<gender>female|male):\s*$", re.IGNORECASE)
+    _GENDER = re.compile(
+        r"\s+(?P<gender>(?::(?:female|male):)+)\s*$", re.IGNORECASE
+    )
     _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
     _WISHLIST_HEADER = re.compile(
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
@@ -275,7 +278,13 @@ class MudaeTextParser:
         return CharacterDetails(
             name=lines[roulette_index - 2],
             series=series,
-            gender=gender_match.group("gender").lower() if gender_match else None,
+            gender=(
+                ",".join(
+                    re.findall(r"(?::(female|male):)", gender_match.group("gender"), re.IGNORECASE)
+                ).lower()
+                if gender_match
+                else None
+            ),
             roulette=roulette_line.group("roulette").strip().lower(),
             kakera_value=self._number(roulette_line.group("value")),
             claim_rank=claim_rank,
@@ -401,6 +410,11 @@ class MudaeTextParser:
                         self._number(match.group("kakera_value"))
                         if match.group("kakera_value")
                         else None
+                    ),
+                    roulette_types=tuple(
+                        token.strip().removeprefix("$").lower()
+                        for token in (match.group("roulette_types") or "").split(",")
+                        if token.strip()
                     ),
                 )
             )

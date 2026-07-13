@@ -58,11 +58,19 @@ provides reliable identity metadata.
 into a multi-page harem scan.
 
 `moa import mmr --server <label> --account <label> --clipboard` records direct
-owned-character evidence from one ranked `$mmr` or `$mmrk` page. The parser
-keeps the claim rank and optional displayed Kakera value, and links names to
-the catalog only when the name is unique. `moa import auto` recognizes this
+owned-character evidence from one ranked `$mmr`, `$mmrk`, or `$mmrt` page. The
+parser keeps the claim rank, optional displayed Kakera value, and `$wa`/`$ha`/
+`$wg`/`$hg` roulette types when `$mmrt` provides them. Gender markers come
+from `$im` character details and may contain both `:female:` and `:male:`.
+Names link to the catalog only when unique. `moa import auto` recognizes this
 format as `ranked_harem` too. Use `moa catalog top --owned-only` to restrict
 the imported `$top` list to characters directly observed in those pages.
+
+MOA preserves Mudae's roll-type markers exactly: `$w`/`$wx` and `$m`/`$mx`
+cover animanga and games together, `$wa`/`$ma` are animanga-only, `$wg`/`$mg`
+are games-only, and the corresponding husbando forms are `$h`/`$hx`, `$ha`,
+and `$hg`. The catalog displays these as a `Roll type` field rather than
+guessing from a character's gender or general `$im` roulette label.
 Missing owned evidence is not proof of unownership: a single `$mm` page is
 only a partial observation until every page has been imported.
 

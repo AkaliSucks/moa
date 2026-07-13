@@ -1023,8 +1023,9 @@ class CatalogRepository:
                     """
                     INSERT INTO owned_character_observations (
                         account_context_id, character_id, character_name, normalized_character_name,
-                        claim_rank, kakera_value, observed_at, import_event_id, harem_scan_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        claim_rank, kakera_value, roulette_types_json, observed_at,
+                        import_event_id, harem_scan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -1033,6 +1034,7 @@ class CatalogRepository:
                         normalized_name,
                         entry.claim_rank,
                         entry.kakera_value,
+                        json.dumps(list(entry.roulette_types)),
                         observed_at.isoformat(),
                         import_event_id,
                         scan_id,
@@ -1082,7 +1084,8 @@ class CatalogRepository:
             rows = connection.execute(
                 f"""
                 SELECT observations.character_name, observations.claim_rank,
-                       observations.kakera_value, observations.observed_at,
+                       observations.kakera_value, observations.roulette_types_json,
+                       observations.observed_at,
                        characters.id AS character_id, characters.name,
                        characters.series, characters.gender, characters.roulette
                 FROM account_contexts
@@ -1130,6 +1133,7 @@ class CatalogRepository:
                 ),
                 claim_rank=row["claim_rank"],
                 kakera_value=row["kakera_value"],
+                roulette_types=tuple(json.loads(row["roulette_types_json"] or "[]")),
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
@@ -2540,6 +2544,7 @@ class CatalogRepository:
                     normalized_character_name TEXT NOT NULL,
                     claim_rank INTEGER NOT NULL,
                     kakera_value INTEGER,
+                    roulette_types_json TEXT NOT NULL DEFAULT '[]',
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id),
                     harem_scan_id INTEGER REFERENCES harem_scans(id)
@@ -2819,6 +2824,11 @@ class CatalogRepository:
                 connection.execute(
                     "ALTER TABLE owned_character_observations ADD COLUMN harem_scan_id INTEGER "
                     "REFERENCES harem_scans(id)"
+                )
+            if "roulette_types_json" not in owned_columns:
+                connection.execute(
+                    "ALTER TABLE owned_character_observations "
+                    "ADD COLUMN roulette_types_json TEXT NOT NULL DEFAULT '[]'"
                 )
             loot_columns = {
                 row["name"]

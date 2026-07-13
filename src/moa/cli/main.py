@@ -27,6 +27,13 @@ from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
+from moa.utils.display import (
+    format_mudae_gender,
+    format_mudae_kakera,
+    format_mudae_key_marker,
+    format_mudae_reaction_kakera,
+    format_mudae_roulette_types,
+)
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 command_app = typer.Typer(help="Mudae command and flag reference")
@@ -300,7 +307,7 @@ def account_activity(
         latest_reaction = recent_reactions[0]
         table.add_row(
             "Latest reaction",
-            f"+{latest_reaction.kakera_earned:,} Kakera | {latest_reaction.reaction_label} | "
+            f"{format_mudae_reaction_kakera(latest_reaction.kakera_earned, latest_reaction.reaction_label)} | "
             f"{_format_observed_at(latest_reaction.observed_at)}",
         )
     else:
@@ -309,7 +316,7 @@ def account_activity(
         latest_roll = recent_rolls[0]
         table.add_row(
             "Latest roll",
-            f"{latest_roll.character.name} | {_format_optional_number(latest_roll.kakera_value)} Kakera | "
+            f"{latest_roll.character.name} | {format_mudae_kakera(latest_roll.kakera_value)} | "
             f"{_format_optional_rank(latest_roll.claim_rank)} | {_format_observed_at(latest_roll.observed_at)}",
         )
     else:
@@ -340,7 +347,8 @@ def account_activity(
         target = keyfarm[0]
         table.add_row(
             "Top key-farm target",
-            f"{target.character_name} | {target.kakera_value:,} Kakera | {target.key_count} - {target.key_type.title()} | {target.wishlist_status}",
+            f"{target.character_name} | {format_mudae_kakera(target.kakera_value)} | "
+            f"{format_mudae_key_marker(target.key_type, target.key_count)} | {target.wishlist_status}",
         )
     else:
         table.add_row("Top key-farm target", "No eligible valued harem entry imported")
@@ -348,7 +356,7 @@ def account_activity(
         gain = recent_gains[0]
         table.add_row(
             "Latest key observation",
-            f"{gain.character_name} | {gain.key_count} - {gain.key_type.title()} | "
+            f"{gain.character_name} | {format_mudae_key_marker(gain.key_type, gain.key_count)} | "
             f"{_format_observed_at(gain.observed_at)}",
         )
     else:
@@ -529,7 +537,7 @@ def recent_rolls(
             roll.character.name,
             roll.character.series,
             _format_optional_rank(roll.claim_rank),
-            _format_optional_number(roll.kakera_value),
+            format_mudae_kakera(roll.kakera_value),
         )
     console.print(table)
 
@@ -1006,8 +1014,7 @@ def _format_catalog_keys(
         return "Not requested"
     if not keyed or key_count is None:
         return "-"
-    marker = f":{key_type}key:" if key_type else ":key:"
-    return f"{marker} ({key_count})"
+    return format_mudae_key_marker(key_type, key_count)
 
 
 def _format_observed_at(observed_at: datetime) -> str:
@@ -1086,7 +1093,7 @@ def parse_im(
     console.print(f"[bold cyan]{character.name}[/bold cyan] — {character.series}")
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(character.claim_rank)}")
     console.print(f"[bold]Like rank:[/bold] {_format_optional_rank(character.like_rank)}")
-    console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(character.kakera_value)}")
+    console.print(f"[bold]Kakera value:[/bold] {format_mudae_kakera(character.kakera_value)}")
 
 
 @parse_app.command("roll")
@@ -1103,9 +1110,12 @@ def parse_roll(
 
     console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
     console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
-    console.print(f"[bold]Kakera value:[/bold] {_format_optional_number(roll.kakera_value)}")
+    console.print(f"[bold]Kakera value:[/bold] {format_mudae_kakera(roll.kakera_value)}")
     if roll.displayed_key_count is not None:
-        console.print(f"[bold]Displayed keys:[/bold] {roll.displayed_key_count} — {roll.displayed_key_type.title()}")
+        console.print(
+            f"[bold]Displayed keys:[/bold] "
+            f"{format_mudae_key_marker(roll.displayed_key_type, roll.displayed_key_count)}"
+        )
 
 
 @parse_app.command("reaction")
@@ -1119,8 +1129,10 @@ def parse_kakera_reaction(
     except MudaeParseError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
-    console.print(f"[bold cyan]{receipt.account_name}[/bold cyan] received [green]+{receipt.kakera_earned:,} Kakera[/green]")
-    console.print(f"Reaction label: {receipt.reaction_label}")
+    console.print(
+        f"[bold cyan]{receipt.account_name}[/bold cyan] received "
+        f"[green]{format_mudae_reaction_kakera(receipt.kakera_earned, receipt.reaction_label)}[/green]"
+    )
 
 
 @app.command("analyze-roll")
@@ -1143,9 +1155,14 @@ def analyze_roll(
     table.add_column("Imported/direct value")
     table.add_row("Series", analysis.series)
     table.add_row("Claim rank", _format_optional_rank(analysis.claim_rank))
-    table.add_row("This roll's Kakera", _format_optional_number(analysis.kakera_value))
+    table.add_row("This roll's Kakera", format_mudae_kakera(analysis.kakera_value))
     if analysis.displayed_key_count is not None:
-        table.add_row("Displayed keys", f"{analysis.displayed_key_count} — {analysis.displayed_key_type.title()}")
+        table.add_row(
+            "Displayed keys",
+            format_mudae_key_marker(
+                analysis.displayed_key_type, analysis.displayed_key_count
+            ),
+        )
     table.add_row("Wishlist", analysis.wishlist_state)
     table.add_row("Saved key state", analysis.keyed_harem_state)
     table.add_row("Rollability", analysis.rollability_state)
@@ -1177,15 +1194,13 @@ def parse_mm(
     console.print(f"[bold cyan]Keyed harem - {page_label}[/bold cyan]")
     table = Table()
     table.add_column("Character", style="green")
-    table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
     table.add_column("Kakera", justify="right", style="magenta")
     for entry in page.entries:
         table.add_row(
             entry.name,
-            entry.key_type.title(),
-            str(entry.key_count),
-            _format_optional_number(entry.kakera_value),
+            format_mudae_key_marker(entry.key_type, entry.key_count),
+            format_mudae_kakera(entry.kakera_value),
         )
     console.print(table)
     if page.total_harem_value is not None:
@@ -1214,10 +1229,10 @@ def parse_bonus(
 
 @parse_app.command("mmr")
 def parse_mmr(
-    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk page."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk/$mmrt page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Parse one copied ranked `$mmr`/`$mmrk` owned-harem page."""
+    """Parse one copied ranked `$mmr`/`$mmrk`/`$mmrt` owned-harem page."""
     try:
         page = MudaeTextParser().parse_ranked_harem_page(_read_message_source(path, clipboard))
     except MudaeParseError as error:
@@ -1233,12 +1248,14 @@ def parse_mmr(
     table = Table()
     table.add_column("Claim rank", justify="right", style="cyan")
     table.add_column("Character", style="green")
+    table.add_column("Roulette")
     table.add_column("Kakera", justify="right", style="magenta")
     for entry in page.entries:
         table.add_row(
             f"#{entry.claim_rank:,}",
             entry.name,
-            _format_optional_number(entry.kakera_value),
+            format_mudae_roulette_types(entry.roulette_types),
+            format_mudae_kakera(entry.kakera_value),
         )
     console.print(table)
 
@@ -1557,7 +1574,7 @@ def import_im(
     result = CatalogService().import_character_details(details, server, raw_message, source)
     console.print(
         f"[green]Imported {details.name} for {result.server_name}.[/green] "
-        f"Recorded [cyan]{_format_optional_number(details.kakera_value)} Kakera[/cyan]."
+        f"Recorded [cyan]{format_mudae_kakera(details.kakera_value)}[/cyan]."
     )
 
 
@@ -1611,10 +1628,10 @@ def import_mmr(
     scan: int | None = typer.Option(
         None, "--scan", help="Optional owned-harem scan ID created by `moa harem begin --kind owned`."
     ),
-    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk page."),
+    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk/$mmrt page."),
     clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
 ) -> None:
-    """Parse and persist one ranked `$mmr`/`$mmrk` owned-harem page."""
+    """Parse and persist one ranked `$mmr`/`$mmrk`/`$mmrt` owned-harem page."""
     raw_message = _read_message_source(path, clipboard)
     try:
         page = MudaeTextParser().parse_ranked_harem_page(raw_message)
@@ -2085,6 +2102,8 @@ def catalog_top(
     table.add_column("Ownership")
     table.add_column("Keys")
     table.add_column("Kakera value")
+    table.add_column("Roulette")
+    table.add_column("Gender")
     table.add_column("Rollability")
     table.add_column("Observed (UTC)")
     for character in characters:
@@ -2112,7 +2131,9 @@ def catalog_top(
             character.character.series,
             ownership,
             key_state,
-            _format_optional_number(character.kakera_value),
+            format_mudae_kakera(character.kakera_value),
+            format_mudae_roulette_types(character.roulette_types),
+            format_mudae_gender(character.character.gender),
             rollability,
             character.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
@@ -2153,7 +2174,7 @@ def catalog_show(
     for observation in profile.server_observations:
         table.add_row(
             observation.server_name,
-            _format_optional_number(observation.kakera_value),
+            format_mudae_kakera(observation.kakera_value),
             observation.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
     console.print(table)
@@ -2199,7 +2220,6 @@ def catalog_harem(
     table = Table(title=f"{account} - keyed harem search")
     table.add_column("Character", style="green")
     table.add_column("Series")
-    table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
     table.add_column("Kakera", justify="right", style="magenta")
     table.add_column("Catalog link")
@@ -2208,9 +2228,8 @@ def catalog_harem(
         table.add_row(
             entry.character_name,
             entry.character.series if entry.character else "Needs $im",
-            entry.key_type.title(),
-            str(entry.key_count),
-            _format_optional_number(entry.kakera_value),
+            format_mudae_key_marker(entry.key_type, entry.key_count),
+            format_mudae_kakera(entry.kakera_value),
             "Resolved" if entry.character else "Needs $im",
             entry.observed_at.strftime("%Y-%m-%d %H:%M"),
         )
@@ -2250,7 +2269,6 @@ def catalog_keyfarm(
     table = Table(title=f"{account} - current key-farm shortlist")
     table.add_column("Character", style="green")
     table.add_column("Kakera", justify="right", style="magenta")
-    table.add_column("Key type")
     table.add_column("Keys", justify="right", style="cyan")
     table.add_column("Wishlist")
     table.add_column("Rollability")
@@ -2263,9 +2281,8 @@ def catalog_keyfarm(
         )
         table.add_row(
             entry.character_name,
-            _format_optional_number(entry.kakera_value),
-            entry.key_type.title(),
-            str(entry.key_count),
+            format_mudae_kakera(entry.kakera_value),
+            format_mudae_key_marker(entry.key_type, entry.key_count),
             wishlist_status,
             "Unavailable" if entry.character_name.casefold() in unavailable_names else "Unknown",
         )
@@ -2298,7 +2315,7 @@ def catalog_keyprogress(
     for entry in progress[:limit]:
         table.add_row(
             entry.character_name,
-            str(entry.key_count),
+            format_mudae_key_marker(entry.current_tier, entry.key_count),
             entry.current_tier,
             str(entry.next_milestone_key_count) if entry.next_milestone_key_count is not None else "-",
             str(entry.keys_until_next_milestone) if entry.keys_until_next_milestone is not None else "-",
@@ -2326,15 +2343,13 @@ def catalog_key_gains(
     table.add_column("Observed (UTC)")
     table.add_column("Character", style="green")
     table.add_column("Keys", justify="right", style="cyan")
-    table.add_column("Tier")
     table.add_column("Kakera", justify="right", style="magenta")
     for observation in observations:
         table.add_row(
             observation.observed_at.strftime("%Y-%m-%d %H:%M"),
             observation.character_name,
-            str(observation.key_count),
-            observation.key_type.title(),
-            _format_optional_number(observation.kakera_value),
+            format_mudae_key_marker(observation.key_type, observation.key_count),
+            format_mudae_kakera(observation.kakera_value),
         )
     console.print(table)
 
@@ -2369,8 +2384,8 @@ def recommend_keyfarm(
         table.add_row(
             str(index),
             entry.character_name,
-            f"{entry.kakera_value:,}",
-            f"{entry.key_count} — {entry.key_type.title()}",
+            format_mudae_kakera(entry.kakera_value),
+            format_mudae_key_marker(entry.key_type, entry.key_count),
             entry.wishlist_status,
             f"{entry.relative_spawn_multiplier:.2f}x",
             f"+{entry.additional_key_chance_percent}%",

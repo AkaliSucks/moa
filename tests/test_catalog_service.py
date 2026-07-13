@@ -265,6 +265,28 @@ def test_import_mmrk_page_persists_direct_owned_evidence(tmp_path) -> None:
     assert entries[1].character is None
 
 
+def test_import_mmrt_page_persists_roulette_types(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    page_text = (
+        "cute_beagle_91130's harem\n"
+        "#11 - Satoru Gojo · ($ha)\n"
+        "#18 - Kirby · ($wa, $ha, $wg, $hg)\n"
+        "Page 1 / 5"
+    )
+
+    service.import_ranked_harem_page(
+        MudaeTextParser().parse_ranked_harem_page(page_text),
+        "Lake Arrowhead 2025",
+        "cute_beagle_91130",
+        page_text,
+        "clipboard",
+    )
+
+    entries = service.owned_characters("Lake Arrowhead 2025", "cute_beagle_91130")
+    assert entries[0].roulette_types == ("ha",)
+    assert entries[1].roulette_types == ("wa", "ha", "wg", "hg")
+
+
 def test_complete_harem_scan_activates_only_after_every_page_is_imported(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     scan = service.begin_harem_scan("Lake Arrowhead 2025", "ernieuuu")
