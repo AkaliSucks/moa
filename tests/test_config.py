@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from moa.core.config import ConfigService
 
 
@@ -16,6 +18,28 @@ def test_config_service_persists_profiles_accounts_and_active_context(tmp_path: 
     assert service.resolve_context("Explicit", "Account") == ("Explicit", "Account")
     assert service.owned_account_names("Lake Arrowhead 2025") == ("ernieuuu", "ernie_alt")
     assert service.owned_account_names("Second Server") == ("solo_account",)
+
+
+def test_config_service_tracks_observed_users_without_treating_them_as_owned(
+    tmp_path: Path,
+) -> None:
+    service = ConfigService(tmp_path / "config.json")
+    service.add_account(
+        "LEAGUE OF DRAVEN",
+        "friend_account",
+        "observed",
+        discord_server_id="1402543612549398538",
+        discord_user_id="999999999999999999",
+    )
+
+    identity = service.identity_for_discord_ids(
+        "1402543612549398538",
+        "999999999999999999",
+    )
+
+    assert identity is not None
+    assert identity.role == "observed"
+    assert service.owned_account_names("LEAGUE OF DRAVEN") == ()
 
 
 def test_config_service_selects_active_context_by_discord_ids(tmp_path: Path) -> None:
@@ -101,3 +125,27 @@ def test_config_service_supports_named_profiles(tmp_path: Path) -> None:
     assert profile.active_server == "Travel Server"
     assert profile.active_account == "travel_account"
     assert profile.accounts[0].role == "primary"
+
+
+def test_config_service_rejects_non_numeric_discord_ids(tmp_path: Path) -> None:
+    service = ConfigService(tmp_path / "config.json")
+
+    with pytest.raises(ValueError, match="Server ID must be a numeric Discord ID"):
+        service.add_account(
+            "New Server",
+            "new_account",
+            discord_server_id="PASTE_SERVER_ID_HERE",
+            discord_user_id="123456789",
+        )
+    assert not service.path.exists()
+
+    with pytest.raises(ValueError, match="User ID must be a numeric Discord ID"):
+        service.add_account(
+            "New Server",
+            "new_account",
+            discord_server_id="123456789",
+            discord_user_id="PASTE_USER_ID_HERE",
+        )
+
+    with pytest.raises(ValueError, match="Server ID must be a numeric Discord ID"):
+        service.use_identity_ids("YOUR_SERVER_ID", "123456789")

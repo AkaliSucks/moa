@@ -7,6 +7,8 @@ from moa.models.character import (
     BadgeLevel,
     DisableListEntry,
     KakeralootStateSnapshot,
+    MudapinSnapshot,
+    ProfileSnapshot,
     PlayerBonusMetric,
     ServerSettingMetric,
     SphereResultSnapshot,
@@ -167,6 +169,37 @@ class OwnedCharacterObservation(MOAModel):
     claim_rank: int
     kakera_value: int | None
     roulette_types: tuple[str, ...] = ()
+    observed_at: datetime
+
+
+class ClaimImportResult(MOAModel):
+    """Summary of one persisted Mudae claim confirmation."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    character_name: str
+    character_id: int | None
+    observed_at: datetime
+
+
+class ClaimObservation(MOAModel):
+    """The latest account-scoped claim evidence for one character name."""
+
+    character_name: str
+    character: CatalogCharacter | None
+    observed_at: datetime
+
+
+class DivorceImportResult(MOAModel):
+    """Summary of one persisted Mudae divorce confirmation."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    character_name: str
+    character_id: int | None
+    kakera_refund: int | None
     observed_at: datetime
 
 
@@ -456,6 +489,42 @@ class KakeralootSettingsObservation(MOAModel):
     loot_cost: int
     quantity_quality_base_cost: int
     quantity_quality_level_increment: int
+    observed_at: datetime
+
+
+class ProfileImportResult(MOAModel):
+    """Summary of one persisted `$profile` account snapshot."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class ProfileObservation(MOAModel):
+    """The latest imported Mudae profile summary for one account."""
+
+    server_name: str
+    account_name: str
+    snapshot: ProfileSnapshot
+    observed_at: datetime
+
+
+class MudapinImportResult(MOAModel):
+    """Summary of one persisted `$mp` Mudapin inventory import."""
+
+    import_event_id: int
+    server_name: str
+    account_name: str
+    observed_at: datetime
+
+
+class MudapinObservation(MOAModel):
+    """The latest imported Mudapin inventory for one account."""
+
+    server_name: str
+    account_name: str
+    snapshot: MudapinSnapshot
     observed_at: datetime
 
 

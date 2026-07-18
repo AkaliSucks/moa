@@ -46,12 +46,41 @@ class RollObservation(MOAModel):
     displayed_key_count: int | None = None
 
 
+class ClaimConfirmation(MOAModel):
+    """The account and character named in a Mudae marriage confirmation."""
+
+    account_name: str
+    character_name: str
+
+
+class DivorcePrompt(MOAModel):
+    """The character and refund shown before Mudae asks to confirm a divorce."""
+
+    character_name: str
+    kakera_refund: int | None = None
+
+
+class DivorceConfirmation(MOAModel):
+    """The account, character, and refund reported after a divorce is confirmed."""
+
+    account_name: str
+    character_name: str
+    kakera_refund: int | None = None
+
+
 class KakeraReactionReceipt(MOAModel):
     """One standalone Kakera amount reported after a player reacts."""
 
     reaction_label: str
     account_name: str
     kakera_earned: int
+
+
+class KakeraReactionBlocked(MOAModel):
+    """A compact response shown when a Kakera button cannot be clicked."""
+
+    account_name: str
+    cooldown_minutes: int
 
 
 class MudaeMessageDetection(MOAModel):
@@ -275,6 +304,33 @@ class KakeralootSettingsSnapshot(MOAModel):
     quantity_quality_level_increment: int
 
 
+class ProfileSnapshot(MOAModel):
+    """Account progress summary parsed from a Mudae `$profile` response."""
+
+    profile_name: str
+    collection_size: int
+    female_percent: int
+    male_percent: int
+    pokedex_count: int | None
+    pokedex_pokemon: tuple[str, ...]
+    kakera_reacts: dict[str, int]
+    mudapins_collected: int | None
+    mudapins_total: int | None
+    kakera_balance: int | None
+    bronze_keys: int
+    silver_keys: int
+    gold_keys: int
+    sphere_stock: int | None
+    spheres: dict[str, int]
+    displayed_badges: tuple[str, ...]
+
+
+class MudapinSnapshot(MOAModel):
+    """Mudapin markers parsed from a copied `$mp` inventory response."""
+
+    pin_markers: tuple[str, ...]
+
+
 class TimerStateSnapshot(MOAModel):
     """Account-scoped action timers parsed from `$tu`."""
 
@@ -303,6 +359,7 @@ class TimerStateSnapshot(MOAModel):
     ouro_refill_minutes: int | None
     rolls_reset_status: str | None = None
     rolls_per_hour_limit: int | None = None
+    rt_reset_minutes: int | None = None
 
 
 class ServerSettingMetric(MOAModel):

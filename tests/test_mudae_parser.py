@@ -152,6 +152,55 @@ def test_parse_character_details_from_copied_im_output() -> None:
     assert character.like_rank == 19
 
 
+def test_parse_claim_confirmation_from_copied_mudae_output() -> None:
+    claim = MudaeTextParser().parse_claim_confirmation(
+        "💖 **ernieuuu** and **Pakunoda** are now married! 💖\n"
+        "+128:kakera:(Emerald IV bonus) +30 :sp:"
+    )
+
+    assert claim.account_name == "ernieuuu"
+    assert claim.character_name == "Pakunoda"
+
+
+def test_parse_divorce_prompt_from_copied_mudae_output() -> None:
+    prompt = MudaeTextParser().parse_divorce_prompt(
+        "Professor Layton: Do you confirm the divorce? (y/n/yes/no)\n"
+        "Characters divorced by $divorce are also removed from the $restorelist "
+        "(+54:kakera:if you confirm)"
+    )
+
+    assert prompt.character_name == "Professor Layton"
+    assert prompt.kakera_refund == 54
+    MudaeTextParser().parse_divorce_declined("Divorce declined.")
+
+
+def test_parse_completed_divorce_from_copied_mudae_output() -> None:
+    divorce = MudaeTextParser().parse_divorce_confirmation(
+        "💔 Professor Layton and cute_beagle_91130 are now divorced. 💔 (+54:kakera:)"
+    )
+
+    assert divorce.character_name == "Professor Layton"
+    assert divorce.account_name == "cute_beagle_91130"
+    assert divorce.kakera_refund == 54
+
+
+@pytest.mark.parametrize(
+    ("kind", "response"),
+    [
+        ("gift_kakera", "ernieuuu, do you really want to give 1:kakera: ? (y/n/yes/no)"),
+        ("gift_kakera", "@ernieuuu just gifted 1:kakera: to @friend"),
+        ("gift_spheres", "ernieuuu, do you really want to give 1 :sp: ? (y/n/yes/no)"),
+        ("gift_spheres", "@ernieuuu just gifted 1 :sp: to @friend"),
+        ("gift_character", "@friend, ernieuuu wants to give you Megumi Sakura. Do you confirm?"),
+        ("gift_character", "Megumi Sakura given to @friend"),
+        ("trade", "Type the name(s) of the character(s) to trade:"),
+        ("trade", "The exchange is over: Tsubame Koyasu vs Megumi Sakura"),
+    ],
+)
+def test_parse_transaction_steps(kind: str, response: str) -> None:
+    MudaeTextParser().parse_transaction(response, kind)
+
+
 def test_parse_character_details_accepts_discord_custom_emojis_and_same_line_key() -> None:
     character = MudaeTextParser().parse_character_details(
         "Kaede Azusagawa\n"
@@ -249,6 +298,20 @@ def test_parse_roll_without_claim_rank_when_rank_display_is_disabled() -> None:
     assert roll.kakera_value == 30
 
 
+def test_parse_roll_ignores_wished_by_prefix_before_character_name() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Wished by <@147839232239599616>\n"
+        "Marin Kitagawa\n"
+        "Sono Bisque Doll wa Koi wo Suru\n"
+        "Claims: #22\n"
+        "813:kakera:"
+    )
+
+    assert roll.name == "Marin Kitagawa"
+    assert roll.series == "Sono Bisque Doll wa Koi wo Suru"
+    assert roll.claim_rank == 22
+
+
 def test_parse_roll_accepts_a_positive_kakera_prefix() -> None:
     roll = MudaeTextParser().parse_roll("Mai Sakurajima\nSeishun Buta Yarou\n+1,386:kakera:")
 
@@ -287,6 +350,148 @@ def test_parse_roll_accepts_current_ranked_roll_card_layout() -> None:
     assert roll.displayed_key_count == 7
 
 
+def test_parse_roll_removes_starwish_marker_from_series() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Satoru Gojo\n"
+        "Jujutsu Kaisen :sw:\n"
+        ":bronzekey: (1) $embedcolor unlocked!\n"
+        "1,133:kakera:\n"
+        "(⭐1) · Belongs to cute_beagle_91130"
+    )
+
+    assert roll.name == "Satoru Gojo"
+    assert roll.series == "Jujutsu Kaisen"
+    assert roll.displayed_key_type == "bronze"
+    assert roll.displayed_key_count == 1
+
+
+def test_parse_roll_rejoins_a_wrapped_long_series_name() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Darkness\n"
+        "Kono Subarashii Sekai ni Shukufuku\n"
+        "wo!\n"
+        "55:kakera:"
+    )
+
+    assert roll.name == "Darkness"
+    assert roll.series == "Kono Subarashii Sekai ni Shukufuku wo!"
+    assert roll.kakera_value == 55
+
+
+def test_parse_roll_rejoins_a_wrapped_series_with_a_multiword_suffix() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Hestia\n"
+        "Dungeon ni Deai wo Motomeru no\n"
+        "wa Machigatteiru Darou ka\n"
+        "55:kakera:"
+    )
+
+    assert roll.name == "Hestia"
+    assert roll.series == "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka"
+
+
+def test_parse_roll_rejoins_a_wrapped_series_with_an_uppercase_continuation() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Dark Rouge\n"
+        "Yes! PreCure 5 the Movie: The Mirror\n"
+        "Kingdom's Miraculous Adventure!\n"
+        "28:kakera:"
+    )
+
+    assert roll.name == "Dark Rouge"
+    assert roll.series == "Yes! PreCure 5 the Movie: The Mirror Kingdom's Miraculous Adventure!"
+    assert roll.kakera_value == 28
+
+
+def test_parse_roll_rejoins_wrapped_series_after_mudae_embed_title() -> None:
+    roll = MudaeTextParser().parse_roll(
+        "Mudae\n"
+        "Hestia\n"
+        "Dungeon ni Deai wo Motomeru no\n"
+        "wa Machigatteiru Darou ka\n"
+        "55:kakera:"
+    )
+
+    assert roll.name == "Hestia"
+    assert roll.series == "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka"
+
+
+def test_parse_roll_rejects_a_likely_title_series_split() -> None:
+    with pytest.raises(MudaeParseError, match="Ambiguous Mudae roll identity"):
+        MudaeTextParser().parse_roll(
+            "Gyaru That Becomes Menhera After\n"
+            "10 Days\n"
+            "40:kakera:"
+        )
+
+
+def test_parse_timer_state_accepts_specialized_timer_commands() -> None:
+    parser = MudaeTextParser()
+
+    assert parser.parse_timer_state("$rt is available!").rt_available is True
+    assert (
+        parser.parse_timer_state(
+            "The cooldown of $rt is not over. Time left: 10h 12 min. ($rtu)"
+        ).rt_reset_minutes
+        == 612
+    )
+    assert (
+        parser.parse_timer_state(
+            "The cooldown of $rt is not over. Time left: 10h 12 min. ($rtu)"
+        ).rt_available
+        is False
+    )
+    assert (
+        parser.parse_timer_state(
+            "You didn't unlock this command yet! Maybe in a distant future... ($kakera)"
+        ).rt_available
+        is False
+    )
+    assert parser.parse_timer_state("Next $dk in 5h 47 min.").daily_kakera_ready is False
+    assert parser.parse_timer_state("$dk is ready!").daily_kakera_ready is True
+    assert (
+        parser.parse_timer_state(
+            "(Keys LVL 6+) 4,500:kakera:to collect before the next reset (1h 45 min.)"
+        ).gold_key_stock_remaining
+        == 4500
+    )
+    timer = parser.parse_timer_state(
+        "You have **0** rolls left. Next rolls reset in **49** min."
+    )
+    assert timer.rolls_left == 0
+    assert timer.rolls_reset_minutes == 49
+
+
+def test_parse_timer_state_accepts_kakera_reaction_cooldown() -> None:
+    timer = MudaeTextParser().parse_timer_state(
+        "You can't react to kakera for 11 min.\n"
+        "Power: 32%\n"
+        "Each kakera button consumes 36% of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (18%)\n"
+        "Stock: 33,441:kakera:"
+    )
+
+    assert timer.can_react_kakera_now is False
+    assert timer.reaction_power_percent == 32
+    assert timer.kakera_button_power_cost_percent == 36
+    assert timer.soulmate_button_power_cost_percent == 18
+    assert timer.kakera_stock == 33441
+
+
+def test_parse_kakera_reaction_blocked_is_not_a_timer_snapshot() -> None:
+    parser = MudaeTextParser()
+    blocked = parser.parse_kakera_reaction_blocked(
+        "**cute_beagle_91130**, You can't react to kakera for **34** min. ($ku)"
+    )
+
+    assert blocked.account_name == "cute_beagle_91130"
+    assert blocked.cooldown_minutes == 34
+    with pytest.raises(MudaeParseError):
+        parser.parse_timer_state(
+            "**cute_beagle_91130**, You can't react to kakera for **34** min. ($ku)"
+        )
+
+
 def test_parse_kakera_reaction_receipt() -> None:
     receipt = MudaeTextParser().parse_kakera_reaction_receipt(
         ":kakeraY: cute_beagle_91130 +497 ($k)"
@@ -295,6 +500,37 @@ def test_parse_kakera_reaction_receipt() -> None:
     assert receipt.reaction_label == ":kakeraY:"
     assert receipt.account_name == "cute_beagle_91130"
     assert receipt.kakera_earned == 497
+
+
+def test_parse_bold_kakera_reaction_receipt() -> None:
+    receipt = MudaeTextParser().parse_kakera_reaction_receipt(
+        ":kakeraY: **ernieuuu +524** ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraY:"
+    assert receipt.account_name == "ernieuuu"
+    assert receipt.kakera_earned == 524
+
+
+def test_parse_free_bold_kakera_reaction_receipt() -> None:
+    receipt = MudaeTextParser().parse_kakera_reaction_receipt(
+        ":kakeraP: (Free) **ernieuuu +110** ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraP:"
+    assert receipt.account_name == "ernieuuu"
+    assert receipt.kakera_earned == 110
+
+
+def test_parse_kakera_breakdown_reaction_receipt() -> None:
+    receipt = MudaeTextParser().parse_kakera_reaction_receipt(
+        ":kakeraL: breaks down into:kakeraB: +:kakeraB: +:kakeraB: "
+        "+:kakeraR: +:kakeraB: => **ernieuuu +2,202** ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraL:"
+    assert receipt.account_name == "ernieuuu"
+    assert receipt.kakera_earned == 2202
 
 
 def test_parse_keyed_harem_page_from_mmy_output() -> None:
@@ -343,6 +579,52 @@ def test_parse_ranked_harem_page_from_mmrk_output() -> None:
         ("Zero Two", 2, 1440),
         ("Rem", 3, 1426),
         ("Saber", 4, 1478),
+    ]
+
+
+def test_parse_ranked_harem_page_from_mmr_and_mmrk_compact_output() -> None:
+    parser = MudaeTextParser()
+    mmr = parser.parse_ranked_harem_page(
+        "ernieuuu's harem\n"
+        "AVG: 4,867\n"
+        "Top 15 value: 2,630\n"
+        "#2 - Zero Two\n"
+        "#4 - Saber\n"
+        "Page 1 / 3"
+    )
+    mmrk = parser.parse_ranked_harem_page(
+        "ernieuuu's harem\n"
+        "AVG: 4,867\n"
+        "Top 15 value: 2,630\n"
+        "Total value: 9,588:kakera:\n"
+        "#2 - Zero Two 1,052 ka\n"
+        "#4 - Saber 996 ka\n"
+        "Page 1 / 3"
+    )
+
+    assert [(entry.name, entry.kakera_value) for entry in mmr.entries] == [
+        ("Zero Two", None),
+        ("Saber", None),
+    ]
+    assert [(entry.name, entry.kakera_value) for entry in mmrk.entries] == [
+        ("Zero Two", 1052),
+        ("Saber", 996),
+    ]
+
+
+def test_parse_ranked_harem_page_ignores_discord_markdown_emphasis() -> None:
+    page = MudaeTextParser().parse_ranked_harem_page(
+        "ernieuuu's harem\n"
+        "AVG: 4,867\n"
+        "Top 15 value: 2,630\n"
+        "**#2** - **Zero Two** **1,052** ka\n"
+        "**#4 - Saber 996 ka**\n"
+        "Page 1 / 3"
+    )
+
+    assert [(entry.name, entry.claim_rank, entry.kakera_value) for entry in page.entries] == [
+        ("Zero Two", 2, 1052),
+        ("Saber", 4, 996),
     ]
 
 
@@ -470,6 +752,20 @@ def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:
     ]
 
 
+def test_parse_topx_accepts_the_actual_discord_unavailable_marker() -> None:
+    page = MudaeTextParser().parse_unavailable_characters(
+        "🏆 TOP 1000\n"
+        "#10 - 2B - NieR: Automata 🚫\n"
+        "#88 - Venom - Marvel 🚫 ($togglewestern)\n"
+        "Page 1 / 67"
+    )
+
+    assert [(character.name, character.reason) for character in page.characters] == [
+        ("2B", None),
+        ("Venom", "$togglewestern"),
+    ]
+
+
 def test_parse_kakera_state_reads_balance_and_maxed_badges() -> None:
     state = MudaeTextParser().parse_kakera_state(
         "You have 7,673:kakera:!\n"
@@ -492,6 +788,25 @@ def test_parse_kakera_state_reads_balance_and_maxed_badges() -> None:
         ("emerald", 4, True),
         ("diamond", 4, True),
     ]
+
+
+def test_parse_kakera_state_accepts_discord_emphasis_and_emoji_spacing() -> None:
+    state = MudaeTextParser().parse_kakera_state(
+        "How to collect kakera in your server (change the options with $togglekakera):\n"
+        "$dailykakera\n"
+        "You have **23,523** :kakera: !\n"
+        ":BronzeIV: **Bronze IV** · Max reached!\n"
+        ":SilverIV: **Silver IV** · Max reached!\n"
+        ":GoldIV: **Gold IV** · Max reached!\n"
+        ":SapphireIV: **Sapphire IV** · Max reached!\n"
+        ":RubyIV: **Ruby IV** · Max reached!\n"
+        ":EmeraldIV: **Emerald IV** · Max reached!\n"
+        ":DiamondIV: **Diamond IV** · Max reached!"
+    )
+
+    assert state.kakera_balance == 23523
+    assert len(state.badges) == 7
+    assert all(badge.max_reached for badge in state.badges)
 
 
 def test_parse_tower_state_reads_current_level_cost_balance_and_built_perks() -> None:
@@ -561,6 +876,24 @@ def test_parse_kakeraloot_state_accepts_the_no_loots_message() -> None:
     assert state.quantity_level is None
 
 
+def test_parse_kakeraloot_state_accepts_the_buy_loots_guard_message() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "You need to buy kakeraloots before using this command ($kl)\n"
+        "Type $infokl to get more infos about kakeraloots."
+    )
+
+    assert not state.has_kakeraloots
+    assert state.status_note == "No Kakeraloots bought; Mudae did not report loot statistics."
+
+
+def test_parse_kakeraloot_state_accepts_prerequisite_guard_message() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "Prerequisites: Sapphire I + Ruby I + Emerald I ($infokl)"
+    )
+
+    assert not state.has_kakeraloots
+
+
 def test_parse_kakeraloot_state_accepts_layout_without_rolls_stacked() -> None:
     state = MudaeTextParser().parse_kakeraloot_state(
         ":disablemore: $disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
@@ -579,6 +912,44 @@ def test_parse_kakeraloot_state_accepts_layout_without_rolls_stacked() -> None:
     assert state.quantity_level == 23
     assert state.usage_count == 256
     assert state.kakera_balance == 20831
+
+
+def test_parse_kakeraloot_state_accepts_compact_new_account_layout() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "cute_beagle_91130 - Kakeraloots\n"
+        "Quantity LVL 5\n"
+        "Quality LVL 0\n"
+        "$kl usage: 1\n"
+        "31,271:kakera:"
+    )
+
+    assert state.quantity_level == 5
+    assert state.quality_level == 0
+    assert state.usage_count == 1
+    assert state.kakera_balance == 31271
+    assert state.disable_wa_ha_reduction is None
+    assert state.protected_wish_level is None
+
+
+def test_parse_kakeraloot_state_accepts_live_custom_emoji_format() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "ernieuuu - Kakeraloots\n"
+        "<:disablemore:123> $disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+        "<:wishprotect:123> Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+        "<:mudapin:123> Mudapins: 22 ($mp)\n"
+        "<:rtcd:123> $rt: -2h cooldown\n"
+        "<:addroll:123> +1 permanent roll\n"
+        "<:sw:123> 1 star branch (+0 $sw)\n\n"
+        "Quantity LVL 23\n"
+        "Quality LVL 6\n"
+        "$kl usage: 256 (<:kakeraC:123>+1)\n"
+        "23,965 <:kakera:123>"
+    )
+
+    assert state.quantity_level == 23
+    assert state.quality_level == 6
+    assert state.usage_count == 256
+    assert state.kakera_balance == 23965
 
 
 def test_parse_sphere_result_reads_color_gains_total_and_stock() -> None:
@@ -642,6 +1013,17 @@ def test_parse_personal_rare_reads_the_account_override() -> None:
     assert state.personal_rare_multiplier == 1
 
 
+def test_parse_personal_rare_accepts_discord_emphasis_and_help_text() -> None:
+    state = MudaeTextParser().parse_personal_rare(
+        "Syntax: $personalrare <Number between 1 and the current $setrare value for your server>\n"
+        "Effect: if you want claimed characters to appear more often during YOUR rolls, lower the value.\n"
+        "Current $setrare value for your server (admin command): 4\n"
+        "**Your current $personalrare: 1**"
+    )
+
+    assert state.personal_rare_multiplier == 1
+
+
 def test_parse_kakeraloot_settings_reads_server_costs() -> None:
     settings = MudaeTextParser().parse_kakeraloot_settings(
         "Kakeraloots\n"
@@ -653,6 +1035,106 @@ def test_parse_kakeraloot_settings_reads_server_costs() -> None:
     assert settings.loot_cost == 500
     assert settings.quantity_quality_base_cost == 2000
     assert settings.quantity_quality_level_increment == 200
+
+
+def test_parse_kakeraloot_settings_accepts_discord_formatting_and_custom_emoji() -> None:
+    settings = MudaeTextParser().parse_kakeraloot_settings(
+        "Kakeraloots\n"
+        "Each $kl costs **500** <:kakera:123456789> (admins can change this value with $klvalue)\n"
+        "Reaching the level 1 of quantity or quality costs **2,000** <:kakera:123456789> "
+        "(increased by **200**/level, values can't be changed)"
+    )
+
+    assert settings.loot_cost == 500
+    assert settings.quantity_quality_base_cost == 2000
+    assert settings.quantity_quality_level_increment == 200
+
+
+def test_parse_profile_reads_progress_totals_and_markers() -> None:
+    profile = MudaeTextParser().parse_profile(
+        "ernieuuu\n"
+        "Collection size: 567 (100%:female: 0% :male:)\n"
+        "Pokédex: 4 Pokémon :piplup: :sentret: :toedscool: :psyduck:\n"
+        "Reacts:\n"
+        "48x:kakeraP: 36x:kakera: 62x:kakeraT: 585x:kakeraY: 9x:kakeraC:\n"
+        "Mudapins: 22/2,347\n"
+        "23,965:kakera:\n"
+        "Keys: 409:bronzekey: 82:silverkey: 6:goldkey:\n"
+        "3,827 :sp:\n"
+        "208x:spP: 573x:spB: 317x:spT: 105x:sp:\n"
+        ":silvmudae::MudaeBirthday7::BronzeIV::DiamondIV:"
+    )
+
+    assert profile.profile_name == "ernieuuu"
+    assert profile.collection_size == 567
+    assert (profile.female_percent, profile.male_percent) == (100, 0)
+    assert profile.pokedex_pokemon == ("piplup", "sentret", "toedscool", "psyduck")
+    assert profile.kakera_reacts[":kakeraY:"] == 585
+    assert profile.mudapins_collected == 22
+    assert profile.mudapins_total == 2347
+    assert profile.kakera_balance == 23965
+    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (409, 82, 6)
+    assert profile.sphere_stock == 3827
+    assert profile.spheres[":spP:"] == 208
+    assert profile.displayed_badges == (":silvmudae:", ":MudaeBirthday7:", ":BronzeIV:", ":DiamondIV:")
+
+
+def test_parse_profile_allows_profiles_without_mudapins() -> None:
+    profile = MudaeTextParser().parse_profile(
+        "cute_beagle_91130\n"
+        "Collection size: 35 (100%:female: 0% :male:)\n"
+        "Pokédex: 2 Pokémon :gulpin: :piloswine:\n"
+        "Reacts:\n"
+        "1x:kakeraP: 7x:kakera: 1x:kakeraT:\n"
+        "812:kakera:\n"
+        "Keys: 3:bronzekey:\n"
+        "110 :sp:\n"
+        "2x:spP: 12x:spB: 7x:spT: 4x:spG: 1x:spY: 1x:sp: 4x:spL:\n"
+        ":silvmudae::MudaeBirthday7::MudaeBirthday8::DiamondI:"
+    )
+
+    assert profile.profile_name == "cute_beagle_91130"
+    assert profile.mudapins_collected is None
+    assert profile.mudapins_total is None
+    assert profile.pokedex_pokemon == ("gulpin", "piloswine")
+    assert profile.kakera_balance == 812
+    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (3, 0, 0)
+
+
+def test_parse_profile_accepts_an_empty_profile() -> None:
+    profile = MudaeTextParser().parse_profile(
+        "moa\n"
+        "Collection size: 0 (0%:female: 0% :male:)"
+    )
+
+    assert profile.profile_name == "moa"
+    assert profile.collection_size == 0
+    assert profile.kakera_reacts == {}
+    assert profile.kakera_balance is None
+    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (0, 0, 0)
+    assert profile.sphere_stock is None
+
+
+def test_parse_mudapins_reads_pin_and_logopin_markers() -> None:
+    snapshot = MudaeTextParser().parse_mudapins(
+        ":pin139::pin182::pin2157::logopin6::logopin141:"
+    )
+
+    assert snapshot.pin_markers == (
+        ":pin139:",
+        ":pin182:",
+        ":pin2157:",
+        ":logopin6:",
+        ":logopin141:",
+    )
+
+
+def test_parse_mudapins_accepts_empty_inventory() -> None:
+    snapshot = MudaeTextParser().parse_mudapins(
+        "No mudapins found! Collect them with kakeraloots ($kl)"
+    )
+
+    assert snapshot.pin_markers == ()
 
 
 def test_parse_timer_state_keeps_detailed_action_categories() -> None:
@@ -681,6 +1163,10 @@ def test_parse_timer_state_keeps_detailed_action_categories() -> None:
     assert state.daily_kakera_ready
     assert state.kakera_stock == 12114
     assert state.oq_stored == 1
+    assert state.can_react_kakera_now is True
+    assert state.reaction_power_percent == 72
+    assert state.kakera_button_power_cost_percent == 36
+    assert state.soulmate_button_power_cost_percent == 18
 
 
 def test_parse_timer_state_accepts_a_shorter_customized_layout() -> None:
@@ -707,6 +1193,43 @@ def test_parse_timer_state_accepts_a_shorter_customized_layout() -> None:
     assert state.oq_stored == 0
 
 
+def test_parse_timer_state_normalizes_discord_emphasis() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "**ernieuuu**, you can claim right now! The next claim reset is in **6** min.\n"
+        "You have **17** rolls left. Next rolls reset in **6** min.\n"
+        "You have **1** rolls reset in stock.\n"
+        "You may vote again in **10h 50 min**.\n"
+        "Next $daily reset in **17h 13 min**.\n"
+        "$rt is available!\n"
+        "**You can react to kakera right now!**\n"
+        "**Power: 110%**\n"
+        "Each kakera button consumes **36%** of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (**18%**)\n"
+        "**Stock: 23,282:kakera:**\n"
+        "**(Keys LVL 6+) 5,000:kakera:to collect before the next reset (6 min.)**\n"
+        "Probability to complete + reset $bku on your next $sw: **10%**\n"
+        "0 $oh left for today, 0 $oc, 0 $oq (**+1 stored**) and 0 $ot.\n"
+        "**52 min before the refill.**"
+    )
+
+    assert state.can_claim_now is True
+    assert state.claim_reset_minutes == 6
+    assert state.rolls_left == 17
+    assert state.rolls_reset_stock == 1
+    assert state.vote_reset_minutes == 650
+    assert state.daily_reset_minutes == 1033
+    assert state.rt_available is True
+    assert state.can_react_kakera_now is True
+    assert state.reaction_power_percent == 110
+    assert state.kakera_button_power_cost_percent == 36
+    assert state.soulmate_button_power_cost_percent == 18
+    assert state.kakera_stock == 23282
+    assert state.gold_key_stock_remaining == 5000
+    assert state.gold_key_reset_minutes == 6
+    assert state.bku_reset_probability_percent == 10
+    assert state.oq_stored == 1
+
+
 def test_parse_timer_state_distinguishes_roll_limit_and_vote_reset_prompt() -> None:
     parser = MudaeTextParser()
 
@@ -724,6 +1247,26 @@ def test_parse_timer_state_distinguishes_roll_limit_and_vote_reset_prompt() -> N
     assert limited.rolls_reset_minutes == 50
     assert prompt.rolls_reset_status == "vote_required"
     assert prompt.rolls_per_hour_limit is None
+
+
+def test_parse_timer_state_accepts_bold_roll_limit_duration() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "cute_beagle_91130, the roulette is limited to 10 uses per hour. **55** min left.\n"
+        "Upvote Mudae to reset the timer: $vote. Website: https://mudae.net/"
+    )
+
+    assert state.rolls_reset_status == "limited_timer"
+    assert state.rolls_reset_minutes == 55
+
+
+def test_parse_timer_state_accepts_claim_interval_waiting_response() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "@ernieuuu, For this server, you can claim once per interval of 3h. "
+        "The next interval begins in **53** min."
+    )
+
+    assert state.can_claim_now is False
+    assert state.claim_reset_minutes == 53
 
 
 def test_parse_top_page_rejects_unrecognized_text() -> None:

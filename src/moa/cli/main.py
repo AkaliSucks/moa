@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import logging
+import shutil
 from pathlib import Path
 
 import typer
@@ -7,6 +8,7 @@ from rich.console import Console
 from rich.table import Table
 
 from moa.core.config import ConfigService
+from moa.database.sqlite import DEFAULT_DATABASE_PATH
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.services.badge_service import BadgeService
@@ -148,7 +150,7 @@ def discord_listen(
         help="Optional Mudae Discord bot user ID used to filter responses.",
     ),
     status: str = typer.Option(
-        "Mudae progress",
+        "bugs are cracking me",                                               
         "--status",
         help="Text shown in the bot's Watching presence while the listener runs.",
     ),
@@ -193,14 +195,16 @@ def config_profile_add(name: str) -> None:
 def config_account_add(
     server: str = typer.Option(..., "--server", "-s", help="Mudae server label."),
     account: str = typer.Option(..., "--account", "-a", help="Mudae account name."),
-    role: str = typer.Option("primary", "--role", help="Identity role: primary or alt."),
+    role: str = typer.Option(
+        "primary", "--role", help="Identity role: primary, alt, or observed."
+    ),
     profile: str | None = typer.Option(None, "--profile", help="Profile to update."),
     server_id: str | None = typer.Option(None, "--server-id", help="Stable Discord server ID from `$myid`."),
     user_id: str | None = typer.Option(None, "--user-id", help="Stable Discord user ID from `$myid`."),
 ) -> None:
-    """Add one primary or alternate account identity to a profile."""
-    if role not in {"primary", "alt"}:
-        console.print("[red]--role must be `primary` or `alt`.[/red]")
+    """Add one owned or observed account identity to a profile."""
+    if role not in {"primary", "alt", "observed"}:
+        console.print("[red]--role must be `primary`, `alt`, or `observed`.[/red]")
         raise typer.Exit(1)
     try:
         identity = ConfigService().add_account(
@@ -2840,6 +2844,91 @@ def catalog_delete_import(import_event_id: int) -> None:
         console.print("[red]Import event not found.[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Deleted import event {import_event_id}.[/green]")
+
+
+@catalog_app.command("reset")
+def catalog_reset(
+    confirm: bool = typer.Option(
+        False,
+        "--confirm",
+        help="Delete the current catalog after making a timestamped backup.",
+    ),
+) -> None:
+    """Reset imported catalog data while preserving the MOA configuration."""
+    database_path = DEFAULT_DATABASE_PATH
+    if not confirm:
+        console.print(
+            "[yellow]No changes made. This removes all imported catalog data but keeps your "
+            "MOA config.[/yellow]"
+        )
+        console.print("Run `uv run moa catalog reset --confirm` after stopping the listener.")
+        return
+
+    if not database_path.exists():
+        console.print("[green]No catalog database exists; it will be created on the next import.[/green]")
+        return
+
+    backup_path = database_path.with_name(
+        f"{database_path.name}.bak-full-reset-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
+    suffix = 1
+    while backup_path.exists():
+        backup_path = database_path.with_name(
+            f"{database_path.name}.bak-full-reset-"
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+        )
+        suffix += 1
+    shutil.copy2(database_path, backup_path)
+    database_path.unlink()
+    console.print("[green]Catalog database reset. MOA config was preserved.[/green]")
+    console.print(f"Backup saved to: {backup_path}")
+
+
+@catalog_app.command("repair-bugged-data")
+def catalog_repair_bugged_data(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Apply the targeted cleanup. Without this flag, only a dry-run report is shown.",
+    ),
+) -> None:
+    """Remove known timer-as-roll imports and orphaned malformed characters."""
+    service = CatalogService()
+    import_count, character_count = service.inspect_bugged_imports()
+    if not apply:
+        console.print(
+            f"Found {import_count} suspicious import event(s) and "
+            f"{character_count} suspicious character row(s)."
+        )
+        console.print(
+            "[yellow]Dry run only; no database changes were made. "
+            "Stop the Discord listener, then rerun with --apply to clean these candidates.[/yellow]"
+        )
+        return
+
+    if import_count == 0 and character_count == 0:
+        console.print("[green]No targeted bugged data was found; nothing changed.[/green]")
+        return
+
+    database_path = DEFAULT_DATABASE_PATH
+    backup_path = database_path.with_name(
+        f"{database_path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    )
+    suffix = 1
+    while backup_path.exists():
+        backup_path = database_path.with_name(
+            f"{database_path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+        )
+        suffix += 1
+    shutil.copy2(database_path, backup_path)
+
+    cleaned_imports, deleted_characters = service.repair_bugged_imports()
+    console.print(
+        f"[green]Cleaned {cleaned_imports} suspicious import event(s) "
+        "(timer misimports removed; stale character links repaired).[/green]"
+    )
+    console.print(f"[green]Deleted {deleted_characters} orphaned character row(s).[/green]")
+    console.print(f"Backup saved to: {backup_path}")
 
 
 @tower_app.command("list")

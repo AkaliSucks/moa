@@ -162,6 +162,22 @@ def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert main._format_catalog_keys(None, None, None) == "Not requested"
 
 
+def test_catalog_reset_requires_confirmation_and_backs_up_database(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    database_path.write_text("catalog", encoding="utf-8")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+    runner = CliRunner()
+
+    dry_run = runner.invoke(main.app, ["catalog", "reset"])
+    applied = runner.invoke(main.app, ["catalog", "reset", "--confirm"])
+
+    assert dry_run.exit_code == 0
+    assert "No changes made" in dry_run.stdout
+    assert applied.exit_code == 0
+    assert not database_path.exists()
+    assert len(list(tmp_path.glob("moa.db.bak-full-reset-*"))) == 1
+
+
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
     assert main._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
         "Claimed 💞 => cute_beagle_91130"
@@ -223,6 +239,57 @@ def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_p
     assert shown.exit_code == 0
     assert "ernie_alt" in shown.stdout
     assert "Active" in shown.stdout
+
+
+def test_config_commands_allow_observed_users(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main.app,
+        [
+            "config",
+            "account",
+            "add",
+            "--server",
+            "LEAGUE OF DRAVEN",
+            "--account",
+            "friend_account",
+            "--role",
+            "observed",
+            "--server-id",
+            "1402543612549398538",
+            "--user-id",
+            "999999999999999999",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Added observed account friend_account" in result.stdout
+
+
+def test_config_account_add_rejects_placeholder_discord_ids(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "config",
+            "account",
+            "add",
+            "--server",
+            "NEW SERVER NAME",
+            "--account",
+            "new_account",
+            "--server-id",
+            "PASTE_SERVER_ID_HERE",
+            "--user-id",
+            "PASTE_USER_ID_HERE",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Server ID must be a numeric Discord ID" in result.stdout
 
 
 def test_config_use_accepts_discord_ids(monkeypatch, tmp_path) -> None:

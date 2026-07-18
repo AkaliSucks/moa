@@ -3,11 +3,12 @@
 MOA keeps user-specific server and account selection outside the repository and
 outside the imported SQLite catalog, in a local config file. A profile can
 contain one simple server/account pair or many server/account identities,
-including alts.
+including alts and consented observed users.
 
 ```powershell
 moa config account add --server "Lake Arrowhead 2025" --account "ernieuuu" --role primary --server-id "1323181920397426763" --user-id "146851153412358144"
 moa config account add --server "Lake Arrowhead 2025" --account "ernie_alt" --role alt --server-id "1323181920397426763" --user-id "<alt Discord user ID>"
+moa config account add --server "LEAGUE OF DRAVEN" --account "friend_account" --role observed --server-id "1402543612549398538" --user-id "<friend Discord user ID>"
 moa config use --server-id "1323181920397426763" --user-id "146851153412358144"
 moa config show
 ```
@@ -26,5 +27,6 @@ moa config use --profile travel --server "Travel Server" --account "travel_accou
 
 Explicit `--server` and `--account` values remain overrides. Catalog top
 currently uses the active context and all configured primary/alt identities on
-that server when deciding whether a `$topo` owner belongs to you; the same
-resolver will be applied to the remaining account commands.
+that server when deciding whether a `$topo` owner belongs to you. An
+`observed` identity is tracked by the Discord listener and stored under its
+own account name, but is excluded from the user's self-owned account set.

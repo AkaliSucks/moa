@@ -11,6 +11,9 @@ from moa.models.catalog import (
     CatalogCharacter,
     CatalogRankSnapshot,
     CharacterDetailsImportResult,
+    ClaimImportResult,
+    ClaimObservation,
+    DivorceImportResult,
     CharacterProfile,
     HaremKeyImportResult,
     HaremKeyObservation,
@@ -43,6 +46,10 @@ from moa.models.catalog import (
     KakeralootStateObservation,
     KakeralootSettingsImportResult,
     KakeralootSettingsObservation,
+    ProfileImportResult,
+    ProfileObservation,
+    MudapinImportResult,
+    MudapinObservation,
     TowerStateImportResult,
     TowerStateObservation,
     TimerStateImportResult,
@@ -57,6 +64,8 @@ from moa.models.catalog import (
 )
 from moa.models.character import (
     CharacterDetails,
+    ClaimConfirmation,
+    DivorceConfirmation,
     AntidisablePage,
     DisableListSnapshot,
     HaremKeyPage,
@@ -64,6 +73,8 @@ from moa.models.character import (
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
+    ProfileSnapshot,
+    MudapinSnapshot,
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
@@ -76,10 +87,17 @@ from moa.models.character import (
     UnavailableCharacterPage,
     WishlistSnapshot,
 )
+from moa.parser.mudae import MudaeParseError, MudaeTextParser
 
 
 class CatalogRepositoryProtocol(Protocol):
     """Storage contract required by :class:`CatalogService`."""
+
+    def import_command_observation(
+        self, command_name: str, raw_message: str, source: str
+    ) -> None:
+        """Persist a raw response for a command without a typed state importer."""
+        ...
 
     def import_top_page(
         self,
@@ -123,6 +141,28 @@ class CatalogRepositoryProtocol(Protocol):
         source: str,
     ) -> RollImportResult: ...
 
+    def import_claim(
+        self,
+        claim: ClaimConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ClaimImportResult: ...
+
+    def claim_observations(
+        self, server_name: str, account_name: str
+    ) -> tuple[ClaimObservation, ...]: ...
+
+    def import_divorce(
+        self,
+        divorce: DivorceConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DivorceImportResult: ...
+
     def recent_rolls(
         self, server_name: str, account_name: str, limit: int
     ) -> tuple[StoredRollObservation, ...]: ...
@@ -140,6 +180,10 @@ class CatalogRepositoryProtocol(Protocol):
     def recent_imports(self, limit: int) -> tuple[ImportEventSummary, ...]: ...
 
     def delete_import_event(self, import_event_id: int) -> bool: ...
+
+    def inspect_bugged_imports(self) -> tuple[int, int]: ...
+
+    def repair_bugged_imports(self) -> tuple[int, int]: ...
 
     def import_harem_key_page(
         self,
@@ -333,6 +377,28 @@ class CatalogRepositoryProtocol(Protocol):
 
     def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None: ...
 
+    def import_profile(
+        self,
+        snapshot: ProfileSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ProfileImportResult: ...
+
+    def profile(self, server_name: str, account_name: str) -> ProfileObservation | None: ...
+
+    def import_mudapins(
+        self,
+        snapshot: MudapinSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> MudapinImportResult: ...
+
+    def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None: ...
+
     def import_server_settings(
         self,
         settings: ServerSettingsSnapshot,
@@ -350,6 +416,26 @@ class CatalogRepository:
     def __init__(self, database_path: Path | None = None) -> None:
         self._database_path = database_path
         self._initialize()
+
+    def import_command_observation(
+        self, command_name: str, raw_message: str, source: str
+    ) -> None:
+        """Persist an audited response for a supported state-changing command."""
+        normalized_command = command_name.strip().casefold().lstrip("$/") or "unknown"
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO import_events (kind, source, observed_at, raw_message)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "command_observation",
+                    f"{source}:command=${normalized_command}",
+                    observed_at.isoformat(),
+                    raw_message,
+                ),
+            )
 
     def import_sphere_result(
         self,
@@ -686,6 +772,226 @@ class CatalogRepository:
             account_name=account_name.strip(),
             character_id=character_id,
             observed_at=observed_at,
+        )
+
+    def import_claim(
+        self,
+        claim: ClaimConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ClaimImportResult:
+        """Store claim evidence without inventing a character series."""
+        observed_at = datetime.now(timezone.utc)
+        normalized_name = self._normalize(claim.character_name)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("claim", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+
+            character_row = connection.execute(
+                """
+                SELECT characters.id
+                FROM roll_observations
+                JOIN characters ON characters.id = roll_observations.character_id
+                WHERE roll_observations.account_context_id = ?
+                  AND characters.normalized_name = ?
+                ORDER BY roll_observations.id DESC
+                LIMIT 1
+                """,
+                (account_id, normalized_name),
+            ).fetchone()
+            character_id = int(character_row["id"]) if character_row is not None else None
+            if character_id is None:
+                candidates = connection.execute(
+                    "SELECT id FROM characters WHERE normalized_name = ?",
+                    (normalized_name,),
+                ).fetchall()
+                if len(candidates) == 1:
+                    character_id = int(candidates[0]["id"])
+
+            connection.execute(
+                """
+                INSERT INTO claim_observations (
+                    account_context_id, character_id, character_name,
+                    normalized_character_name, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    character_id,
+                    claim.character_name,
+                    normalized_name,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return ClaimImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            character_name=claim.character_name,
+            character_id=character_id,
+            observed_at=observed_at,
+        )
+
+    def import_divorce(
+        self,
+        divorce: DivorceConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DivorceImportResult:
+        """Store a divorce tombstone so older claim/harem evidence is no longer current."""
+        observed_at = datetime.now(timezone.utc)
+        normalized_name = self._normalize(divorce.character_name)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("divorce", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+
+            character_id: int | None = None
+            for table in (
+                "claim_observations",
+                "owned_character_observations",
+                "harem_key_observations",
+            ):
+                row = connection.execute(
+                    f"""
+                    SELECT character_id
+                    FROM {table}
+                    WHERE account_context_id = ?
+                      AND normalized_character_name = ?
+                      AND character_id IS NOT NULL
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (account_id, normalized_name),
+                ).fetchone()
+                if row is not None:
+                    character_id = int(row["character_id"])
+                    break
+            if character_id is None:
+                row = connection.execute(
+                    """
+                    SELECT observations.character_id
+                    FROM roll_observations AS observations
+                    JOIN characters ON characters.id = observations.character_id
+                    WHERE observations.account_context_id = ?
+                      AND characters.normalized_name = ?
+                    ORDER BY observations.id DESC
+                    LIMIT 1
+                    """,
+                    (account_id, normalized_name),
+                ).fetchone()
+                if row is not None:
+                    character_id = int(row["character_id"])
+            if character_id is None:
+                candidates = connection.execute(
+                    "SELECT id FROM characters WHERE normalized_name = ?",
+                    (normalized_name,),
+                ).fetchall()
+                if len(candidates) == 1:
+                    character_id = int(candidates[0]["id"])
+
+            connection.execute(
+                """
+                INSERT INTO divorce_observations (
+                    account_context_id, character_id, character_name,
+                    normalized_character_name, kakera_refund, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    character_id,
+                    divorce.character_name,
+                    normalized_name,
+                    divorce.kakera_refund,
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return DivorceImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            character_name=divorce.character_name,
+            character_id=character_id,
+            kakera_refund=divorce.kakera_refund,
+            observed_at=observed_at,
+        )
+
+    def claim_observations(
+        self, server_name: str, account_name: str
+    ) -> tuple[ClaimObservation, ...]:
+        """Return the latest claim evidence per character for one account."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT observations.character_name, observations.observed_at,
+                       characters.id AS character_id, characters.name,
+                       characters.series, characters.gender, characters.roulette
+                FROM claim_observations AS observations
+                JOIN account_contexts ON account_contexts.id = observations.account_context_id
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                LEFT JOIN characters ON characters.id = observations.character_id
+                    OR (
+                        observations.character_id IS NULL
+                        AND characters.normalized_name = observations.normalized_character_name
+                        AND 1 = (
+                            SELECT COUNT(*)
+                            FROM characters AS candidates
+                            WHERE candidates.normalized_name = observations.normalized_character_name
+                        )
+                    )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM divorce_observations AS divorces
+                      WHERE divorces.account_context_id = observations.account_context_id
+                        AND divorces.normalized_character_name = observations.normalized_character_name
+                        AND divorces.import_event_id > observations.import_event_id
+                  )
+                  AND observations.id = (
+                      SELECT latest.id
+                      FROM claim_observations AS latest
+                      WHERE latest.account_context_id = observations.account_context_id
+                        AND latest.normalized_character_name = observations.normalized_character_name
+                      ORDER BY latest.id DESC
+                      LIMIT 1
+                  )
+                ORDER BY observations.id DESC
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchall()
+        return tuple(
+            ClaimObservation(
+                character_name=row["character_name"],
+                character=(
+                    CatalogCharacter(
+                        id=row["character_id"],
+                        name=row["name"],
+                        series=row["series"],
+                        gender=row["gender"],
+                        roulette=row["roulette"],
+                    )
+                    if row["character_id"] is not None
+                    else None
+                ),
+                observed_at=datetime.fromisoformat(row["observed_at"]),
+            )
+            for row in rows
         )
 
     def recent_rolls(
@@ -1264,6 +1570,13 @@ class CatalogRepository:
                 WHERE server_contexts.normalized_name = ?
                   AND account_contexts.normalized_name = ?
                   {outer_scan_filter}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM divorce_observations AS divorces
+                      WHERE divorces.account_context_id = observations.account_context_id
+                        AND divorces.normalized_character_name = observations.normalized_character_name
+                        AND divorces.import_event_id > observations.import_event_id
+                  )
                 ORDER BY observations.claim_rank ASC, observations.character_name COLLATE NOCASE
                 """,
                 params,
@@ -1337,6 +1650,13 @@ class CatalogRepository:
                 WHERE server_contexts.normalized_name = ?
                   AND account_contexts.normalized_name = ?
                   AND {scan_filter}
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM divorce_observations AS divorces
+                      WHERE divorces.account_context_id = harem_key_observations.account_context_id
+                        AND divorces.normalized_character_name = harem_key_observations.normalized_character_name
+                        AND divorces.import_event_id > harem_key_observations.import_event_id
+                  )
                 ORDER BY harem_key_observations.kakera_value DESC NULLS LAST,
                          harem_key_observations.key_count DESC,
                          harem_key_observations.character_name COLLATE NOCASE
@@ -2452,6 +2772,175 @@ class CatalogRepository:
             observed_at=datetime.fromisoformat(row["observed_at"]),
         )
 
+    def import_profile(
+        self,
+        snapshot: ProfileSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ProfileImportResult:
+        """Store one account-scoped `$profile` progress snapshot."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("profile", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO profile_observations (
+                    account_context_id, profile_name, collection_size, female_percent, male_percent,
+                    pokedex_count, pokedex_json, kakera_reacts_json, mudapins_collected,
+                    mudapins_total, kakera_balance, bronze_keys, silver_keys, gold_keys,
+                    sphere_stock, spheres_json, displayed_badges_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    snapshot.profile_name,
+                    snapshot.collection_size,
+                    snapshot.female_percent,
+                    snapshot.male_percent,
+                    snapshot.pokedex_count,
+                    json.dumps(list(snapshot.pokedex_pokemon)),
+                    json.dumps(snapshot.kakera_reacts),
+                    snapshot.mudapins_collected,
+                    snapshot.mudapins_total,
+                    snapshot.kakera_balance,
+                    snapshot.bronze_keys,
+                    snapshot.silver_keys,
+                    snapshot.gold_keys,
+                    snapshot.sphere_stock,
+                    json.dumps(snapshot.spheres),
+                    json.dumps(list(snapshot.displayed_badges)),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return ProfileImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def profile(self, server_name: str, account_name: str) -> ProfileObservation | None:
+        """Return the latest `$profile` snapshot for one account."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT profile_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN profile_observations ON profile_observations.id = (
+                    SELECT observations.id FROM profile_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        snapshot = ProfileSnapshot(
+            profile_name=row["profile_name"],
+            collection_size=row["collection_size"],
+            female_percent=row["female_percent"],
+            male_percent=row["male_percent"],
+            pokedex_count=row["pokedex_count"],
+            pokedex_pokemon=tuple(json.loads(row["pokedex_json"])),
+            kakera_reacts=dict(json.loads(row["kakera_reacts_json"])),
+            mudapins_collected=row["mudapins_collected"],
+            mudapins_total=row["mudapins_total"],
+            kakera_balance=row["kakera_balance"],
+            bronze_keys=row["bronze_keys"],
+            silver_keys=row["silver_keys"],
+            gold_keys=row["gold_keys"],
+            sphere_stock=row["sphere_stock"],
+            spheres=dict(json.loads(row["spheres_json"])),
+            displayed_badges=tuple(json.loads(row["displayed_badges_json"])),
+        )
+        return ProfileObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            snapshot=snapshot,
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    def import_mudapins(
+        self,
+        snapshot: MudapinSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> MudapinImportResult:
+        """Store one account-scoped `$mp` Mudapin inventory."""
+        observed_at = datetime.now(timezone.utc)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+                ("mudapins", source, observed_at.isoformat(), raw_message),
+            )
+            import_event_id = int(cursor.lastrowid)
+            server_id = self._upsert_server(connection, server_name, observed_at)
+            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+            connection.execute(
+                """
+                INSERT INTO mudapin_observations (
+                    account_context_id, pin_markers_json, pin_count, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    json.dumps(list(snapshot.pin_markers)),
+                    len(snapshot.pin_markers),
+                    observed_at.isoformat(),
+                    import_event_id,
+                ),
+            )
+        return MudapinImportResult(
+            import_event_id=import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None:
+        """Return the latest `$mp` inventory for one account."""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT mudapin_observations.*, server_contexts.name AS server_name,
+                       account_contexts.name AS account_name
+                FROM account_contexts
+                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+                JOIN mudapin_observations ON mudapin_observations.id = (
+                    SELECT observations.id FROM mudapin_observations AS observations
+                    WHERE observations.account_context_id = account_contexts.id
+                    ORDER BY observations.id DESC LIMIT 1
+                )
+                WHERE server_contexts.normalized_name = ?
+                  AND account_contexts.normalized_name = ?
+                """,
+                (self._normalize(server_name), self._normalize(account_name)),
+            ).fetchone()
+        if row is None:
+            return None
+        return MudapinObservation(
+            server_name=row["server_name"],
+            account_name=row["account_name"],
+            snapshot=MudapinSnapshot(pin_markers=tuple(json.loads(row["pin_markers_json"]))),
+            observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
     def import_server_settings(
         self,
         settings: ServerSettingsSnapshot,
@@ -2552,57 +3041,328 @@ class CatalogRepository:
             ).fetchone()
             if exists is None:
                 return False
-
-            connection.execute(
-                "DELETE FROM server_character_observations WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            for table in (
-                "roll_observations",
-                "kakera_reaction_observations",
-                "player_bonus_observations",
-                "wishlist_observations",
-                "disablelist_observations",
-                "unavailable_character_observations",
-                "kakera_state_observations",
-                "personal_rare_observations",
-                "tower_state_observations",
-                "timer_state_observations",
-                "sphere_result_observations",
-                "kakeraloot_state_observations",
-                "kakeraloot_settings_observations",
-                "server_settings_observations",
-            ):
-                connection.execute(
-                    f"DELETE FROM {table} WHERE import_event_id = ?",
-                    (import_event_id,),
-                )
-            connection.execute(
-                "DELETE FROM harem_key_observations WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute(
-                "DELETE FROM owned_character_observations WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute(
-                "DELETE FROM harem_scan_pages WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute(
-                "DELETE FROM antidisable_series_observations WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute(
-                "DELETE FROM rank_snapshots WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute(
-                "DELETE FROM top_owner_observations WHERE import_event_id = ?",
-                (import_event_id,),
-            )
-            connection.execute("DELETE FROM import_events WHERE id = ?", (import_event_id,))
+            self._delete_import_event_from_connection(connection, import_event_id)
         return True
+
+    def inspect_bugged_imports(self) -> tuple[int, int]:
+        """Count timer-as-roll imports and imports reparsed by the fixed parser."""
+        with self._connection() as connection:
+            import_event_ids, character_ids, _ = self._bugged_import_candidates(connection)
+        return len(import_event_ids), len(character_ids)
+
+    def repair_bugged_imports(self) -> tuple[int, int]:
+        """Repair or remove only evidence identified from its preserved raw text.
+
+        This intentionally leaves all canonical characters with any remaining
+        observation untouched. Timer responses misclassified as rolls are
+        removed; older roll and `$im` rows are reparsed with the current parser
+        so wrapped series such as `Dungeon ni ... no` + `wa ...` are corrected.
+        """
+        with self._connection() as connection:
+            import_event_ids, character_ids, repairs = self._bugged_import_candidates(connection)
+            for import_event_id in import_event_ids - repairs.keys():
+                self._delete_import_event_from_connection(connection, import_event_id)
+            for import_event_id, (kind, old_character_id, observation) in repairs.items():
+                if kind == "roll":
+                    self._repair_roll_event(
+                        connection, import_event_id, old_character_id, observation
+                    )
+                else:
+                    self._repair_character_details_event(
+                        connection, import_event_id, old_character_id, observation
+                    )
+
+            deleted_characters = 0
+            for character_id in character_ids:
+                if self._character_has_references(connection, character_id):
+                    continue
+                cursor = connection.execute(
+                    "DELETE FROM characters WHERE id = ?", (character_id,)
+                )
+                deleted_characters += cursor.rowcount
+
+        return len(import_event_ids), deleted_characters
+
+    @staticmethod
+    def _delete_import_event_from_connection(
+        connection: sqlite3.Connection, import_event_id: int
+    ) -> None:
+        connection.execute(
+            "DELETE FROM server_character_observations WHERE import_event_id = ?",
+            (import_event_id,),
+        )
+        for table in (
+            "roll_observations",
+            "claim_observations",
+            "divorce_observations",
+            "kakera_reaction_observations",
+            "player_bonus_observations",
+            "wishlist_observations",
+            "disablelist_observations",
+            "unavailable_character_observations",
+            "kakera_state_observations",
+            "personal_rare_observations",
+            "tower_state_observations",
+            "timer_state_observations",
+            "sphere_result_observations",
+            "kakeraloot_state_observations",
+            "kakeraloot_settings_observations",
+            "server_settings_observations",
+        ):
+            connection.execute(
+                f"DELETE FROM {table} WHERE import_event_id = ?",
+                (import_event_id,),
+            )
+        for table in (
+            "harem_key_observations",
+            "owned_character_observations",
+            "harem_scan_pages",
+            "antidisable_series_observations",
+            "rank_snapshots",
+            "top_owner_observations",
+        ):
+            connection.execute(
+                f"DELETE FROM {table} WHERE import_event_id = ?",
+                (import_event_id,),
+            )
+        connection.execute("DELETE FROM import_events WHERE id = ?", (import_event_id,))
+
+    def _bugged_import_candidates(
+        self,
+        connection: sqlite3.Connection,
+    ) -> tuple[
+        set[int],
+        set[int],
+        dict[int, tuple[str, int, CharacterDetails | RollObservation]],
+    ]:
+        parser = MudaeTextParser()
+        import_event_ids: set[int] = set()
+        character_ids: set[int] = set()
+        repairs: dict[int, tuple[str, int, CharacterDetails | RollObservation]] = {}
+
+        roll_rows = connection.execute(
+            """
+            SELECT import_events.id AS import_event_id, import_events.raw_message,
+                   roll_observations.character_id, characters.name, characters.series
+            FROM import_events
+            JOIN roll_observations ON roll_observations.import_event_id = import_events.id
+            JOIN characters ON characters.id = roll_observations.character_id
+            WHERE import_events.kind = 'roll'
+            """
+        ).fetchall()
+        for row in roll_rows:
+            event_id = int(row["import_event_id"])
+            character_id = int(row["character_id"])
+            if self._is_timer_like_message(row["raw_message"]):
+                import_event_ids.add(event_id)
+                character_ids.add(character_id)
+                continue
+            try:
+                parsed = parser.parse_roll(row["raw_message"])
+            except MudaeParseError:
+                continue
+            if (
+                self._normalize(parsed.name) != self._normalize(row["name"])
+                or self._normalize(parsed.series) != self._normalize(row["series"])
+            ):
+                import_event_ids.add(event_id)
+                character_ids.add(character_id)
+                repairs[event_id] = ("roll", character_id, parsed)
+
+        details_rows = connection.execute(
+            """
+            SELECT DISTINCT import_events.id AS import_event_id, import_events.raw_message,
+                   server_character_observations.character_id,
+                   characters.name, characters.series
+            FROM import_events
+            JOIN server_character_observations
+              ON server_character_observations.import_event_id = import_events.id
+            JOIN characters ON characters.id = server_character_observations.character_id
+            WHERE import_events.kind = 'character_details'
+            """
+        ).fetchall()
+        for row in details_rows:
+            event_id = int(row["import_event_id"])
+            character_id = int(row["character_id"])
+            try:
+                parsed = parser.parse_character_details(row["raw_message"])
+            except MudaeParseError:
+                continue
+            if (
+                self._normalize(parsed.name) != self._normalize(row["name"])
+                or self._normalize(parsed.series) != self._normalize(row["series"])
+            ):
+                import_event_ids.add(event_id)
+                character_ids.add(character_id)
+                repairs[event_id] = ("character_details", character_id, parsed)
+
+        malformed_rows = connection.execute(
+            """
+            SELECT id, name, series
+            FROM characters
+            WHERE lower(name) LIKE 'each kakera button consumes %'
+               OR lower(series) LIKE 'your characters with 10+ keys consume %'
+               OR (
+                   length(trim(name)) >= 20
+                   AND length(trim(series)) <= 4
+                   AND substr(trim(series), -1) IN ('!', '?', '.')
+               )
+            """
+        ).fetchall()
+        character_ids.update(int(row["id"]) for row in malformed_rows)
+
+        return import_event_ids, character_ids, repairs
+
+    @staticmethod
+    def _is_timer_like_message(raw_message: str) -> bool:
+        normalized = raw_message.casefold()
+        return any(
+            marker in normalized
+            for marker in (
+                "next rolls reset in",
+                "you have ",
+                "each kakera button consumes",
+                "roulette is limited to",
+            )
+        ) and (
+            "next rolls reset in" in normalized
+            or "rolls left" in normalized
+            or "each kakera button consumes" in normalized
+            or "roulette is limited to" in normalized
+        )
+
+    def _repair_roll_event(
+        self,
+        connection: sqlite3.Connection,
+        import_event_id: int,
+        old_character_id: int,
+        roll: RollObservation,
+    ) -> None:
+        new_character_id = self._upsert_character(
+            connection,
+            name=roll.name,
+            series=roll.series,
+            gender=None,
+            roulette=None,
+            observed_at=datetime.now(timezone.utc),
+        ).fetchone()["id"]
+        connection.execute(
+            """
+            UPDATE roll_observations
+            SET character_id = ?, claim_rank = ?, kakera_value = ?
+            WHERE import_event_id = ?
+            """,
+            (new_character_id, roll.claim_rank, roll.kakera_value, import_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE rank_snapshots
+            SET character_id = ?, claim_rank = ?
+            WHERE import_event_id = ?
+            """,
+            (new_character_id, roll.claim_rank, import_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE server_character_observations
+            SET character_id = ?, kakera_value = ?
+            WHERE import_event_id = ?
+            """,
+            (new_character_id, roll.kakera_value, import_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE harem_key_observations
+            SET character_id = ?, character_name = ?, normalized_character_name = ?,
+                key_type = COALESCE(?, key_type), key_count = COALESCE(?, key_count),
+                kakera_value = COALESCE(?, kakera_value)
+            WHERE import_event_id = ?
+            """,
+            (
+                new_character_id,
+                roll.name,
+                self._normalize(roll.name),
+                roll.displayed_key_type,
+                roll.displayed_key_count,
+                roll.kakera_value,
+                import_event_id,
+            ),
+        )
+        if new_character_id == old_character_id:
+            return
+
+    def _repair_character_details_event(
+        self,
+        connection: sqlite3.Connection,
+        import_event_id: int,
+        old_character_id: int,
+        details: CharacterDetails,
+    ) -> None:
+        new_character_id = self._upsert_character(
+            connection,
+            name=details.name,
+            series=details.series,
+            gender=details.gender,
+            roulette=details.roulette,
+            observed_at=datetime.now(timezone.utc),
+        ).fetchone()["id"]
+        connection.execute(
+            """
+            UPDATE rank_snapshots
+            SET character_id = ?, claim_rank = ?, like_rank = ?
+            WHERE import_event_id = ?
+            """,
+            (new_character_id, details.claim_rank, details.like_rank, import_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE server_character_observations
+            SET character_id = ?, kakera_value = ?
+            WHERE import_event_id = ?
+            """,
+            (new_character_id, details.kakera_value, import_event_id),
+        )
+        connection.execute(
+            """
+            UPDATE harem_key_observations
+            SET character_id = ?, character_name = ?, normalized_character_name = ?,
+                key_type = COALESCE(?, key_type), key_count = COALESCE(?, key_count),
+                kakera_value = COALESCE(?, kakera_value)
+            WHERE import_event_id = ?
+            """,
+            (
+                new_character_id,
+                details.name,
+                self._normalize(details.name),
+                details.key_type,
+                details.key_count,
+                details.kakera_value,
+                import_event_id,
+            ),
+        )
+        if new_character_id == old_character_id:
+            return
+
+    @staticmethod
+    def _character_has_references(
+        connection: sqlite3.Connection, character_id: int
+    ) -> bool:
+        for table in (
+            "rank_snapshots",
+            "top_owner_observations",
+            "server_character_observations",
+            "roll_observations",
+            "claim_observations",
+            "harem_key_observations",
+            "owned_character_observations",
+            "unavailable_character_observations",
+        ):
+            if connection.execute(
+                f"SELECT 1 FROM {table} WHERE character_id = ? LIMIT 1",
+                (character_id,),
+            ).fetchone():
+                return True
+        return False
 
     def _initialize(self) -> None:
         with self._connection() as connection:
@@ -2681,6 +3441,27 @@ class CatalogRepository:
                     character_id INTEGER NOT NULL REFERENCES characters(id),
                     claim_rank INTEGER,
                     kakera_value INTEGER,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS claim_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    character_id INTEGER REFERENCES characters(id),
+                    character_name TEXT NOT NULL,
+                    normalized_character_name TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS divorce_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    character_id INTEGER REFERENCES characters(id),
+                    character_name TEXT NOT NULL,
+                    normalized_character_name TEXT NOT NULL,
+                    kakera_refund INTEGER,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );
@@ -2811,7 +3592,7 @@ class CatalogRepository:
                 CREATE TABLE IF NOT EXISTS kakera_state_observations (
                     id INTEGER PRIMARY KEY,
                     account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
-                    kakera_balance INTEGER NOT NULL,
+                    kakera_balance INTEGER,
                     badges_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
@@ -2884,6 +3665,38 @@ class CatalogRepository:
                     loot_cost INTEGER NOT NULL,
                     quantity_quality_base_cost INTEGER NOT NULL,
                     quantity_quality_level_increment INTEGER NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS profile_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    profile_name TEXT NOT NULL,
+                    collection_size INTEGER NOT NULL,
+                    female_percent INTEGER NOT NULL,
+                    male_percent INTEGER NOT NULL,
+                    pokedex_count INTEGER,
+                    pokedex_json TEXT NOT NULL,
+                    kakera_reacts_json TEXT NOT NULL,
+                    mudapins_collected INTEGER,
+                    mudapins_total INTEGER,
+                    kakera_balance INTEGER,
+                    bronze_keys INTEGER NOT NULL,
+                    silver_keys INTEGER NOT NULL,
+                    gold_keys INTEGER NOT NULL,
+                    sphere_stock INTEGER,
+                    spheres_json TEXT NOT NULL,
+                    displayed_badges_json TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS mudapin_observations (
+                    id INTEGER PRIMARY KEY,
+                    account_context_id INTEGER NOT NULL REFERENCES account_contexts(id),
+                    pin_markers_json TEXT NOT NULL,
+                    pin_count INTEGER NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)
                 );

@@ -2,6 +2,9 @@
 
 from moa.models.catalog import (
     CharacterDetailsImportResult,
+    ClaimImportResult,
+    ClaimObservation,
+    DivorceImportResult,
     CharacterProfile,
     CatalogRankSnapshot,
     HaremKeyImportResult,
@@ -36,6 +39,10 @@ from moa.models.catalog import (
     KakeralootStateObservation,
     KakeralootSettingsImportResult,
     KakeralootSettingsObservation,
+    ProfileImportResult,
+    ProfileObservation,
+    MudapinImportResult,
+    MudapinObservation,
     TowerStateImportResult,
     TowerStateObservation,
     TimerStateImportResult,
@@ -48,12 +55,16 @@ from moa.models.catalog import (
 )
 from moa.models.character import (
     CharacterDetails,
+    ClaimConfirmation,
+    DivorceConfirmation,
     DisableListSnapshot,
     HaremKeyPage,
     RankedHaremPage,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
+    ProfileSnapshot,
+    MudapinSnapshot,
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
     TowerStateSnapshot,
@@ -75,6 +86,11 @@ class CatalogService:
 
     def __init__(self, repository: CatalogRepositoryProtocol | None = None) -> None:
         self._repository = repository or CatalogRepository()
+
+    def import_command_observation(
+        self, command_name: str, raw_message: str, source: str
+    ) -> None:
+        self._repository.import_command_observation(command_name, raw_message, source)
 
     def import_top_page(
         self,
@@ -118,6 +134,35 @@ class CatalogService:
     ) -> RollImportResult:
         return self._repository.import_roll(roll, server_name, account_name, raw_message, source)
 
+    def import_claim(
+        self,
+        claim: ClaimConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ClaimImportResult:
+        return self._repository.import_claim(
+            claim, server_name, account_name, raw_message, source
+        )
+
+    def claim_observations(
+        self, server_name: str, account_name: str
+    ) -> tuple[ClaimObservation, ...]:
+        return self._repository.claim_observations(server_name, account_name)
+
+    def import_divorce(
+        self,
+        divorce: DivorceConfirmation,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> DivorceImportResult:
+        return self._repository.import_divorce(
+            divorce, server_name, account_name, raw_message, source
+        )
+
     def recent_rolls(
         self, server_name: str, account_name: str, limit: int = 20
     ) -> tuple[StoredRollObservation, ...]:
@@ -151,6 +196,12 @@ class CatalogService:
 
     def delete_import_event(self, import_event_id: int) -> bool:
         return self._repository.delete_import_event(import_event_id)
+
+    def inspect_bugged_imports(self) -> tuple[int, int]:
+        return self._repository.inspect_bugged_imports()
+
+    def repair_bugged_imports(self) -> tuple[int, int]:
+        return self._repository.repair_bugged_imports()
 
     def import_harem_key_page(
         self,
@@ -403,6 +454,36 @@ class CatalogService:
 
     def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
         return self._repository.kakeraloot_settings(server_name)
+
+    def import_profile(
+        self,
+        snapshot: ProfileSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> ProfileImportResult:
+        return self._repository.import_profile(
+            snapshot, server_name, account_name, raw_message, source
+        )
+
+    def profile(self, server_name: str, account_name: str) -> ProfileObservation | None:
+        return self._repository.profile(server_name, account_name)
+
+    def import_mudapins(
+        self,
+        snapshot: MudapinSnapshot,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+    ) -> MudapinImportResult:
+        return self._repository.import_mudapins(
+            snapshot, server_name, account_name, raw_message, source
+        )
+
+    def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None:
+        return self._repository.mudapins(server_name, account_name)
 
     def import_server_settings(
         self,

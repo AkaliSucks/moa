@@ -23,6 +23,45 @@ class MudaeMessageRouter:
             pass
         else:
             return self._detected("reaction_receipt", "Mudae Kakera reaction amount and recipient found.")
+        try:
+            self._parser.parse_kakera_reaction_blocked(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected(
+                "reaction_blocked",
+                "Mudae Kakera reaction was blocked by the account cooldown.",
+            )
+        if (
+            "substep completed" in normalized
+            or "step completed!" in normalized
+            or re.search(r"\bstep\s+\d+\s+completed!", normalized)
+            or re.search(r"\b\d+\s*/\s*\d+\s*-\s*tutorial\b", normalized)
+        ):
+            return self._detected("tutorial", "Mudae tutorial progress response found.")
+        if "mudae help" in normalized or "looking for a specific command" in normalized:
+            return self._detected("help", "Mudae help response found.")
+        for transaction_kind in ("gift_kakera", "gift_spheres", "gift_character", "trade"):
+            try:
+                self._parser.parse_transaction(text, transaction_kind)
+            except MudaeParseError:
+                continue
+            return self._detected(transaction_kind, f"Mudae {transaction_kind} response found.")
+        if "mudapins are collectable badges" in normalized and "$mp" in normalized:
+            return self._detected("help", "Mudae Mudapin information response found.")
+        try:
+            self._parser.parse_mudapins(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("mudapins", "Mudae Mudapin inventory found.")
+        if "collection size:" in normalized:
+            try:
+                self._parser.parse_profile(text)
+            except MudaeParseError:
+                pass
+            else:
+                return self._detected("profile", "Mudae account profile summary found.")
         if "harem" in normalized:
             try:
                 self._parser.parse_ranked_harem_page(text)
@@ -42,6 +81,30 @@ class MudaeMessageRouter:
             return self._detected("infokl", "Mudae Kakeraloot pricing text found.")
         if "player bonuses" in normalized:
             return self._detected("bonus", "Mudae Player Bonuses header found.")
+        try:
+            self._parser.parse_claim_confirmation(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("claim", "Mudae character-claim confirmation found.")
+        try:
+            self._parser.parse_divorce_prompt(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("divorce_prompt", "Mudae divorce confirmation prompt found.")
+        try:
+            self._parser.parse_divorce_declined(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("divorce_declined", "Mudae divorce was declined.")
+        try:
+            self._parser.parse_divorce_confirmation(text)
+        except MudaeParseError:
+            pass
+        else:
+            return self._detected("divorce_complete", "Mudae completed a character divorce.")
         try:
             self._parser.parse_sphere_result(text)
         except MudaeParseError:
@@ -64,13 +127,31 @@ class MudaeMessageRouter:
         if (
             "you can claim right now" in normalized
             or "you can't claim for another" in normalized
+            or "the next interval begins in" in normalized
             or "roulette is limited to" in normalized
+            or re.search(
+                r"(?m)^you can't react to kakera for\s+\*?.+?\*?\.\s*$",
+                normalized,
+            )
+            or "next rolls reset in" in normalized
+            or re.search(r"you have\s+\d+\s+rolls? left\.", normalized)
             or "reset your rolls timer for one server" in normalized
         ):
             return self._detected("timers", "Mudae action-timer claim state found.")
         if "current level is" in normalized and "list of perks" in normalized:
             return self._detected("towerstate", "Mudae Kakera Tower state found.")
-        if " - kakeraloots" in normalized or "no kakeraloots bought" in normalized:
+        if (
+            " - kakeraloots" in normalized
+            or "no kakeraloots bought" in normalized
+            or "need to buy kakeraloots before using this command" in normalized
+            or (
+                "prerequisites:" in normalized
+                and "sapphire i" in normalized
+                and "ruby i" in normalized
+                and "emerald i" in normalized
+                and "$infokl" in normalized
+            )
+        ):
             return self._detected("lootstate", "Mudae account Kakeraloot state found.")
         if "how to collect kakera" in normalized and "melt your kakera" in normalized:
             return self._detected("kakera", "Mudae Kakera balance and badge text found.")

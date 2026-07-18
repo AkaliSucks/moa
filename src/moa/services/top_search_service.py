@@ -2,6 +2,7 @@
 
 from moa.models.catalog import (
     CatalogTopSearchEntry,
+    ClaimObservation,
     HaremKeyObservation,
     OwnedCharacterObservation,
 )
@@ -63,6 +64,7 @@ class TopSearchService:
 
         owned_names: set[str] | None = None
         owned_observations: dict[str, OwnedCharacterObservation] | None = None
+        claim_observations: dict[str, ClaimObservation] | None = None
         keyed_names: set[str] | None = None
         key_observations: dict[str, HaremKeyObservation] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
@@ -81,7 +83,15 @@ class TopSearchService:
                 entry.character_name.casefold(): entry
                 for entry in self._catalog.owned_characters(server_name, account_name)
             }
-            owned_names = set(owned_observations)
+            claim_observations = {
+                entry.character_name.casefold(): entry
+                for entry in (
+                    self._catalog.claim_observations(server_name, account_name)
+                    if hasattr(self._catalog, "claim_observations")
+                    else ()
+                )
+            }
+            owned_names = set(owned_observations) | set(claim_observations)
             key_observations = {
                 entry.character_name.casefold(): entry
                 for entry in self._catalog.harem_keys(server_name, account_name)
@@ -131,7 +141,11 @@ class TopSearchService:
             topo_observed = name in topo_owner_names if topo_owner_names is not None else None
             owner_name = (
                 topo_owner_names[name]
-                if topo_observed and topo_owner_names is not None
+                if topo_observed
+                and topo_owner_names is not None
+                and topo_owner_names[name] is not None
+                else account_name
+                if claim_observations is not None and name in claim_observations
                 else None
             )
             topx_unavailable = (

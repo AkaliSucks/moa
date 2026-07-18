@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, replace
 from typing import Any
 
 import discord
@@ -26,13 +27,16 @@ class DiscordCommandContext:
     identity: ConfigAccount
     captured_at: float
     expected_kind: str | None = None
+    personal_rare_value: int | None = None
+    personal_rare_argument_supplied: bool = False
 
 
 class DiscordListenerService:
     """Listen for Mudae messages and reuse the existing automatic import pipeline."""
 
     _CONTEXT_TTL_SECONDS = 300.0
-    _DEFAULT_STATUS_TEXT = "Mudae progress"
+    _UNATTRIBUTED_ROLL_WARNING_TTL_SECONDS = 300.0
+    _DEFAULT_STATUS_TEXT = "Testing commands"
     _MAX_STATUS_LENGTH = 128
     _SCAN_KINDS = {
         "harem": "keys",
@@ -81,9 +85,12 @@ class DiscordListenerService:
         self._status_text = self._normalize_status_text(status_text)
         self._logger = logger or logging.getLogger("moa.discord")
         self._contexts: dict[int, DiscordCommandContext] = {}
+        self._command_contexts: dict[int, DiscordCommandContext] = {}
         self._scan_ids: dict[tuple[str, str, str], int] = {}
+        self._scan_contexts: dict[tuple[int, int, str], DiscordCommandContext] = {}
         self._seen_payloads: set[tuple[int, str]] = set()
         self._message_cache: dict[int, discord.Message] = {}
+        self._unattributed_roll_warning_at: dict[tuple[int, int], float] = {}
         self._mudae_user_id: int | None = None
 
     def run(self, token: str, mudae_user_id: int | None = None) -> None:
@@ -153,28 +160,144 @@ class DiscordListenerService:
         if identity is None:
             return
         content = (message.content or "").lstrip()
-        if not content:
+        if content.startswith(("$", "/")):
+            command = content.split(maxsplit=1)[0]
+        else:
+            command = self._message_interaction_command_name(message)
+        if not content and command is None:
             self._logger.warning(
                 "Configured user's Discord message %s had no readable content; "
-                "enable Message Content Intent for prefix-command tracking.",
+                "enable Message Content Intent for prefix-command tracking or use "
+                "the slash-command interaction event.",
                 message.id,
             )
             return
-        if not content.startswith(("$", "/")):
+        if command is None:
+            if self._track_divorce_confirmation(message, identity, content):
+                return
+            if self._track_transaction_input(message, identity, content):
+                return
             return
-        self._contexts[message.channel.id] = DiscordCommandContext(
+        expected_kind = self._expected_kind_for_command(command)
+        if expected_kind is None:
+            self._contexts.pop(message.channel.id, None)
+            self._logger.info(
+                "Ignoring unsupported Discord command %s from account %s on server %s",
+                command,
+                identity.account,
+                identity.server,
+            )
+            return
+        context = DiscordCommandContext(
             server_id=str(message.guild.id),
             user_id=str(message.author.id),
             identity=identity,
             captured_at=time.monotonic(),
-            expected_kind=self._expected_kind_for_command(content.split(maxsplit=1)[0]),
+            expected_kind=expected_kind,
+            personal_rare_value=(
+                self._personal_rare_command_value(content)
+                if expected_kind == "personalrare"
+                else None
+            ),
+            personal_rare_argument_supplied=(
+                self._personal_rare_argument_supplied(content)
+                if expected_kind == "personalrare" and content
+                else False
+            ),
+        )
+        self._contexts[message.channel.id] = context
+        self._command_contexts[message.id] = context
+        if len(self._command_contexts) > 2000:
+            self._command_contexts = dict(list(self._command_contexts.items())[-1000:])
+        if content:
+            self._logger.info(
+                "Tracking Discord command %s for %s / %s",
+                command,
+                identity.server,
+                identity.account,
+            )
+        else:
+            self._logger.info(
+                "Tracking Discord slash command /%s for %s / %s from the user command event",
+                command.lstrip("$/"),
+                identity.server,
+                identity.account,
+            )
+
+    async def handle_interaction(self, interaction: discord.Interaction) -> None:
+        """Track a configured user's slash command before its bot response arrives."""
+        guild_id = getattr(interaction, "guild_id", None)
+        channel_id = getattr(interaction, "channel_id", None)
+        user = getattr(interaction, "user", None)
+        if guild_id is None or channel_id is None or user is None:
+            return
+        identity = self._identity_for_ids(str(guild_id), str(user.id))
+        if identity is None:
+            return
+        command = self._interaction_command_name(interaction)
+        expected_kind = self._expected_kind_for_command(command or "")
+        if expected_kind is None:
+            self._logger.info(
+                "Ignoring unsupported Discord interaction /%s from account %s on server %s",
+                command or "unknown",
+                identity.account,
+                identity.server,
+            )
+            return
+        self._contexts[int(channel_id)] = DiscordCommandContext(
+            server_id=str(guild_id),
+            user_id=str(user.id),
+            identity=identity,
+            captured_at=time.monotonic(),
+            expected_kind=expected_kind,
         )
         self._logger.info(
-            "Tracking Discord command %s for %s / %s",
-            content.split(maxsplit=1)[0],
+            "Tracking Discord interaction /%s for %s / %s",
+            command,
             identity.server,
             identity.account,
         )
+
+    @staticmethod
+    def _interaction_command_name(interaction: discord.Interaction) -> str | None:
+        """Read a slash command name across discord.py command representations."""
+        command = getattr(interaction, "command", None)
+        command_name = getattr(command, "name", None)
+        if command_name:
+            return str(command_name)
+        data = getattr(interaction, "data", None) or {}
+        if not isinstance(data, dict):
+            return None
+        command_name = data.get("name")
+        options = data.get("options") or []
+        while options:
+            option = options[0]
+            if not isinstance(option, dict):
+                break
+            option_name = option.get("name")
+            if option_name:
+                command_name = option_name
+            options = option.get("options") or []
+        return str(command_name) if command_name else None
+
+    @staticmethod
+    def _message_interaction_command_name(message: discord.Message) -> str | None:
+        """Read a user-authored slash command message when Discord emits one."""
+        metadata = getattr(message, "interaction_metadata", None)
+        if metadata is None and not isinstance(message, discord.Message):
+            with warnings.catch_warnings():
+                # discord.py may emit a deprecation warning from the property
+                # implementation itself, with a category that varies by
+                # supported version. This is only a compatibility probe; do
+                # not let it pollute the listener's normal logs.
+                warnings.simplefilter("ignore")
+                metadata = getattr(message, "interaction", None)
+        if metadata is None:
+            return None
+        command_name = getattr(metadata, "name", None)
+        if command_name is None:
+            command_name = getattr(getattr(metadata, "command", None), "name", None)
+        return str(command_name) if command_name else None
 
     async def handle_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
         """Process an edit only when the original message is already cached.
@@ -202,23 +325,108 @@ class DiscordListenerService:
         """Track configured-user reactions so Mudae Kakera receipts stay account-scoped."""
         if payload.guild_id is None:
             return
+        pending_context = self._command_contexts.get(payload.message_id)
+        if pending_context is not None and pending_context.expected_kind == "personalrare":
+            self._logger.info(
+                "Observed reaction %s from Discord user %s on pending $persr message %s",
+                self._reaction_name(payload),
+                payload.user_id,
+                payload.message_id,
+            )
+        if self._is_mudae_success_reaction(payload):
+            await self._handle_mudae_command_acknowledgement(payload)
+            return
         identity = self._identity_for_ids(str(payload.guild_id), str(payload.user_id))
         if identity is None:
             return
-        self._contexts[payload.channel_id] = DiscordCommandContext(
-            server_id=str(payload.guild_id),
-            user_id=str(payload.user_id),
-            identity=identity,
-            captured_at=time.monotonic(),
-            expected_kind="reaction_receipt",
-        )
         self._logger.info(
-            "Tracking reaction %s on Discord message %s for %s / %s",
+            "Observed reaction %s on Discord message %s for %s / %s; "
+            "waiting for Mudae's receipt",
             payload.emoji,
             payload.message_id,
             identity.server,
             identity.account,
         )
+
+    async def _handle_mudae_command_acknowledgement(
+        self, payload: discord.RawReactionActionEvent
+    ) -> None:
+        """Import state for commands Mudae confirms only with a check reaction."""
+        context = self._command_contexts.get(payload.message_id)
+        if context is None or context.personal_rare_value is None:
+            return
+        if time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
+            return
+        acknowledgement_key = (payload.message_id, "personalrare")
+        if acknowledgement_key in self._seen_payloads:
+            return
+        self._seen_payloads.add(acknowledgement_key)
+        if len(self._seen_payloads) > 2000:
+            self._seen_payloads = set(list(self._seen_payloads)[-1000:])
+
+        value = context.personal_rare_value
+        raw_message = f"Your current $personalrare: {value}"
+        source = (
+            f"discord:guild={payload.guild_id}:channel={payload.channel_id}:"
+            f"message={payload.message_id}:reaction={self._reaction_name(payload)}"
+        )
+        self._logger.info(
+            "Detected Mudae acknowledgement for $persr %s on Discord message %s "
+            "for %s / %s",
+            value,
+            payload.message_id,
+            context.identity.server,
+            context.identity.account,
+        )
+        try:
+            result = self._importer.import_message(
+                raw_message,
+                source,
+                context.identity.server,
+                context.identity.account,
+                detected_kind="personalrare",
+            )
+        except Exception as error:  # Keep one acknowledgement from stopping the listener.
+            self._logger.warning(
+                "Could not import Mudae acknowledgement for message %s: %s",
+                payload.message_id,
+                error,
+            )
+            return
+        self._logger.info(
+            "Imported Discord Mudae acknowledgement %s: %s",
+            payload.message_id,
+            result.message,
+        )
+
+    @staticmethod
+    def _personal_rare_command_value(content: str) -> int | None:
+        """Return a numeric `$persr` argument, including 0 for server-default mode."""
+        arguments = content.split()
+        if len(arguments) < 2 or not arguments[1].isdigit():
+            return None
+        return int(arguments[1])
+
+    @staticmethod
+    def _personal_rare_argument_supplied(content: str) -> bool:
+        """Tell default/help `$persr` apart from a value-setting attempt."""
+        return len(content.split()) >= 2
+
+    def _is_mudae_success_reaction(self, payload: discord.RawReactionActionEvent) -> bool:
+        """Identify Mudae's standard checkmark acknowledgement reaction."""
+        context = self._command_contexts.get(payload.message_id)
+        if context is None or context.personal_rare_value is None:
+            return False
+        if self._mudae_user_id is not None and payload.user_id != self._mudae_user_id:
+            return False
+        if self._mudae_user_id is None and payload.user_id == int(context.user_id):
+            return False
+        return self._reaction_name(payload) in {"✅", "✔️", "☑️", "white_check_mark"}
+
+    @staticmethod
+    def _reaction_name(payload: discord.RawReactionActionEvent) -> str:
+        emoji = getattr(payload, "emoji", "")
+        return str(getattr(emoji, "name", None) or emoji)
 
     async def handle_bot_response(self, message: discord.Message) -> None:
         """Import one bot-authored Mudae response when a configured context exists."""
@@ -232,16 +440,104 @@ class DiscordListenerService:
         raw_message = self.extract_message_text(message)
         if not raw_message:
             return
-        context = self._context_from_interaction(message)
+        # A paginated harem message is edited in place. Its later edits can
+        # arrive after another command (for example `$tu`) has replaced the
+        # channel's latest-command context, so keep active scan context
+        # independent from that per-channel command context.
+        context = self._context_from_active_scan(message, raw_message)
+        if context is None:
+            context = self._context_from_interaction(message, raw_message)
         if context is None:
             context = self._context_from_reaction_receipt(message, raw_message)
         if context is None:
-            context = self._contexts.get(message.channel.id)
-        if context is None or time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
+            existing = self._contexts.get(message.channel.id)
+            if existing is not None and time.monotonic() - existing.captured_at <= self._CONTEXT_TTL_SECONDS:
+                context = existing
+        if context is None:
+            context = self._context_from_active_roll(message, raw_message)
+        if context is None:
+            if self._router.detect(raw_message).kind == "roll":
+                self._warn_once_for_unattributed_roll(message)
+            return
+        if time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
+            context = self._context_from_active_roll(message, raw_message)
+            if context is None:
+                return
+        if context.expected_kind == "personalrare" and context.personal_rare_argument_supplied:
+            self._logger.info(
+                "Ignoring textual Mudae response %s for a value-setting $persr command; "
+                "waiting for the command acknowledgement reaction",
+                message.id,
+            )
             return
         kind = self._resolve_message_kind(context.expected_kind, raw_message)
         if kind is None:
+            detected = self._router.detect(raw_message)
+            self._logger.warning(
+                "Ignored Mudae response %s while tracking %s; parser did not accept it "
+                "(router=%s, lines=%d)",
+                message.id,
+                context.expected_kind or "unknown",
+                detected.kind,
+                len(raw_message.splitlines()),
+            )
             return
+        import_identity = context.identity
+        if kind == "claim":
+            # The claimant printed in Mudae's marriage confirmation is the
+            # authoritative account.  The confirmation can arrive after a
+            # burst of rolls from multiple configured accounts, so the
+            # channel's latest command context may belong to somebody else.
+            claim = self._parser.parse_claim_confirmation(raw_message)
+            target_identity = self._config.identity_for_discord_server_account(
+                str(message.guild.id), claim.account_name, self._profile_name
+            )
+            if target_identity is None:
+                self._logger.info(
+                    "Ignoring Mudae claim %s for unconfigured account %s in %s",
+                    message.id,
+                    claim.account_name,
+                    context.identity.server,
+                )
+                return
+            if target_identity.account.casefold() != context.identity.account.casefold():
+                self._logger.info(
+                    "Attributed Mudae claim %s to %s / %s from the confirmation claimant "
+                    "instead of stale context %s / %s",
+                    message.id,
+                    target_identity.server,
+                    target_identity.account,
+                    context.identity.server,
+                    context.identity.account,
+                )
+            import_identity = target_identity
+        if kind == "reaction_blocked":
+            try:
+                blocked = self._parser.parse_kakera_reaction_blocked(raw_message)
+            except MudaeParseError:
+                return
+            if blocked.account_name.casefold() != context.identity.account.casefold():
+                self._logger.info(
+                    "Ignored blocked Kakera reaction %s for %s while tracking %s",
+                    message.id,
+                    blocked.account_name,
+                    context.identity.account,
+                )
+                return
+        if kind == "profile":
+            profile = self._parser.parse_profile(raw_message)
+            target_identity = self._config.identity_for_discord_server_account(
+                str(message.guild.id), profile.profile_name, self._profile_name
+            )
+            if target_identity is None:
+                self._logger.info(
+                    "Ignoring Mudae profile %s for unconfigured account %s in %s",
+                    message.id,
+                    profile.profile_name,
+                    context.identity.server,
+                )
+                return
+            import_identity = target_identity
         if kind == "reaction_receipt":
             try:
                 receipt = self._parser.parse_kakera_reaction_receipt(raw_message)
@@ -266,15 +562,21 @@ class DiscordListenerService:
             "Detected Mudae %s message %s for %s / %s",
             kind,
             message.id,
-            context.identity.server,
-            context.identity.account,
+            import_identity.server,
+            import_identity.account,
         )
 
         scan_id = self._scan_id_for_page(
             kind,
             raw_message,
-            context.identity,
+            import_identity,
         )
+        if kind in self._SCAN_KINDS:
+            self._scan_contexts[(int(message.guild.id), int(message.channel.id), kind)] = replace(
+                context,
+                expected_kind=kind,
+                captured_at=time.monotonic(),
+            )
         source = (
             f"discord:guild={message.guild.id}:channel={message.channel.id}:message={message.id}"
         )
@@ -282,8 +584,8 @@ class DiscordListenerService:
             result = self._importer.import_message(
                 raw_message,
                 source,
-                context.identity.server,
-                context.identity.account,
+                import_identity.server,
+                import_identity.account,
                 harem_scan_id=scan_id,
                 detected_kind=kind,
             )
@@ -295,25 +597,189 @@ class DiscordListenerService:
             message.id,
             result.message,
         )
+        if kind == "divorce_declined" and self._contexts.get(message.channel.id) is context:
+            self._contexts.pop(message.channel.id, None)
+        if kind == "divorce_complete" and self._contexts.get(message.channel.id) is context:
+            self._contexts.pop(message.channel.id, None)
+        if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
+            if self._contexts.get(message.channel.id) is context:
+                self._contexts.pop(message.channel.id, None)
         self._complete_scan_if_last_page(
             kind,
             raw_message,
-            context.identity,
+            import_identity,
             scan_id,
         )
 
-    def _context_from_interaction(self, message: discord.Message) -> DiscordCommandContext | None:
-        """Recover account context when Mudae answered a slash interaction."""
+    def _context_from_active_scan(
+        self,
+        message: discord.Message,
+        raw_message: str,
+    ) -> DiscordCommandContext | None:
+        """Keep an active page scan attributable after another command runs.
+
+        Mudae reuses one Discord message for pagination. The edited page may
+        arrive after the user has run an unrelated command in the channel, so
+        the latest-command context is not sufficient for scan pages.
+        """
+        if message.guild is None:
+            return None
+        kind = self._router.detect(raw_message).kind
+        if kind not in self._SCAN_KINDS:
+            return None
+        key = (int(message.guild.id), int(message.channel.id), kind)
+        context = self._scan_contexts.get(key)
+        if context is None:
+            return None
+        scan_key = (
+            context.identity.server.casefold(),
+            context.identity.account.casefold(),
+            self._SCAN_KINDS[kind],
+        )
+        if scan_key not in self._scan_ids:
+            self._scan_contexts.pop(key, None)
+            return None
+        return context
+
+    def _warn_once_for_unattributed_roll(self, message: discord.Message) -> None:
+        """Avoid flooding the console when untagged roll responses arrive in a busy channel."""
+        if message.guild is None:
+            return
+        key = (int(message.guild.id), int(message.channel.id))
+        now = time.monotonic()
+        last_warning = self._unattributed_roll_warning_at.get(key)
+        if (
+            last_warning is not None
+            and now - last_warning < self._UNATTRIBUTED_ROLL_WARNING_TTL_SECONDS
+        ):
+            return
+        self._unattributed_roll_warning_at[key] = now
+        if len(self._unattributed_roll_warning_at) > 2000:
+            self._unattributed_roll_warning_at = dict(
+                list(self._unattributed_roll_warning_at.items())[-1000:]
+            )
+        self._logger.warning(
+            "Could not attribute Mudae roll %s: Discord provided no user slash "
+            "metadata or command context, and multiple accounts are configured "
+            "for this server; roll was not imported",
+            message.id,
+        )
+
+    def _context_from_active_roll(
+        self,
+        message: discord.Message,
+        raw_message: str,
+    ) -> DiscordCommandContext | None:
+        """Use the selected account for an untagged slash-roll response.
+
+        Mudae is a separate application from MOA, so Discord may omit the
+        slash interaction metadata when Mudae posts its response. Restricting
+        this fallback to a parsed roll and the active configured guild/account
+        keeps it useful for slash-only workflows without guessing between
+        configured alts.
+        """
+        if message.guild is None or self._router.detect(raw_message).kind != "roll":
+            return None
+        try:
+            identity = self._config.active_identity_for_discord_server(
+                str(message.guild.id),
+                self._profile_name,
+            )
+        except ValueError:
+            return None
+        if identity is None:
+            return None
+        context = DiscordCommandContext(
+            server_id=str(message.guild.id),
+            user_id=identity.discord_user_id or "",
+            identity=identity,
+            captured_at=time.monotonic(),
+            expected_kind="roll",
+        )
+        self._contexts[message.channel.id] = context
+        self._logger.info(
+            "Using active configured context for untagged Mudae roll %s in %s / %s; "
+            "slash interaction metadata was unavailable",
+            message.id,
+            identity.server,
+            identity.account,
+        )
+        return context
+
+    def _context_from_interaction(
+        self,
+        message: discord.Message,
+        raw_message: str | None = None,
+    ) -> DiscordCommandContext | None:
+        """Recover account context when Mudae answered a slash interaction.
+
+        ``discord.py`` exposes the invoking user on the current
+        ``interaction_metadata`` object, but the command name is not part of
+        that object. When the legacy interaction name is unavailable, infer
+        the response kind from the Mudae payload instead of discarding the
+        sender identity.
+        """
         metadata = getattr(message, "interaction_metadata", None)
+        if metadata is None and not isinstance(message, discord.Message):
+            # discord.py 2.7 still exposes interaction data through the legacy
+            # property on test doubles and older/webhook-style message shapes.
+            # Real discord.py messages expose the deprecated property, which
+            # would create a warning for every non-slash Mudae response.
+            with warnings.catch_warnings():
+                # See the equivalent compatibility probe above.
+                warnings.simplefilter("ignore")
+                metadata = getattr(message, "interaction", None)
         user = getattr(metadata, "user", None)
         command_name = getattr(metadata, "name", None)
+        if command_name is None:
+            command_name = getattr(getattr(metadata, "command", None), "name", None)
         if user is None or message.guild is None:
             return None
         identity = self._identity_for_ids(str(message.guild.id), str(user.id))
         if identity is None:
             return None
-        expected_kind = self._expected_kind_for_command(command_name) if command_name else None
         existing = self._contexts.get(message.channel.id)
+        if command_name is None:
+            detected_kind = self._router.detect(raw_message).kind if raw_message else "unknown"
+            # Some follow-up Mudae messages carry interaction metadata without
+            # the original command name. Preserve the live channel context so
+            # a claim confirmation cannot downgrade it to ``unknown``. When
+            # the payload is clearly a new kind, refresh the context instead;
+            # otherwise an ``$im`` response can swallow the next ``/wa`` roll.
+            if (
+                existing is not None
+                and existing.user_id == str(user.id)
+                and (detected_kind == "unknown" or existing.expected_kind == detected_kind)
+            ):
+                return existing
+            expected_kind = detected_kind if detected_kind != "unknown" else None
+            if expected_kind is None:
+                return None
+            context = DiscordCommandContext(
+                server_id=str(message.guild.id),
+                user_id=str(user.id),
+                identity=identity,
+                captured_at=time.monotonic(),
+                expected_kind=expected_kind,
+            )
+            self._contexts[message.channel.id] = context
+            self._logger.info(
+                "Attributed Mudae response %s to %s / %s via interaction metadata; "
+                "command name was unavailable",
+                message.id,
+                identity.server,
+                identity.account,
+            )
+            return context
+        expected_kind = self._expected_kind_for_command(command_name) if command_name else None
+        if command_name and expected_kind is None:
+            self._logger.info(
+                "Ignoring unsupported Discord interaction /%s from account %s on server %s",
+                command_name,
+                identity.account,
+                identity.server,
+            )
+            return None
         if (
             existing is not None
             and existing.user_id == str(user.id)
@@ -360,7 +826,6 @@ class DiscordListenerService:
             captured_at=time.monotonic(),
             expected_kind="reaction_receipt",
         )
-        self._contexts[message.channel.id] = context
         self._logger.info(
             "Resolved Kakera receipt for %s / %s from Mudae's receipt message",
             identity.server,
@@ -370,13 +835,98 @@ class DiscordListenerService:
 
     def _resolve_message_kind(self, expected_kind: str | None, raw_message: str) -> str | None:
         detected_kind = self._router.detect(raw_message).kind
+        if expected_kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"}:
+            try:
+                self._parser.parse_transaction(raw_message, expected_kind)
+            except MudaeParseError:
+                return None
+            return expected_kind
         if detected_kind == "reaction_receipt":
             return detected_kind
-        if expected_kind == "roll":
+        if detected_kind == "reaction_blocked":
+            try:
+                self._parser.parse_kakera_reaction_blocked(raw_message)
+            except MudaeParseError:
+                return None
+            return detected_kind
+        if detected_kind == "claim":
+            # A marriage confirmation is authoritative even when a stale
+            # timer, wishlist, or roll context is still attached to the
+            # channel. Validate it here before importing claim evidence.
+            try:
+                self._parser.parse_claim_confirmation(raw_message)
+            except MudaeParseError:
+                return None
+            return "claim"
+        if detected_kind == "divorce_prompt":
+            try:
+                self._parser.parse_divorce_prompt(raw_message)
+            except MudaeParseError:
+                return None
+            return "divorce_prompt"
+        if detected_kind == "divorce_declined":
+            try:
+                self._parser.parse_divorce_declined(raw_message)
+            except MudaeParseError:
+                return None
+            return "divorce_declined"
+        if detected_kind == "divorce_complete":
+            try:
+                self._parser.parse_divorce_confirmation(raw_message)
+            except MudaeParseError:
+                return None
+            return "divorce_complete"
+        if detected_kind == "roll" and expected_kind in {"wishlist", "reaction_receipt"}:
+            # One-shot commands such as `$wl` can leave a channel context
+            # behind. Trust a separately validated character card instead of
+            # rejecting it because the previous command had another format.
             try:
                 self._parser.parse_roll(raw_message)
             except MudaeParseError:
                 return None
+            return "roll"
+        if detected_kind == "timers" and expected_kind == "reaction_receipt":
+            # Recover a real standalone `$ku` snapshot after a receipt
+            # context without treating the response as a roll.
+            try:
+                self._parser.parse_timer_state(raw_message)
+            except MudaeParseError:
+                return None
+            return "timers"
+        if expected_kind == "roll" and detected_kind == "timers":
+            return "timers"
+        if expected_kind == "timers" and detected_kind == "roll":
+            # A slash-roll follow-up can arrive without command metadata. In
+            # that case the channel may still contain the previous $tu
+            # context, but the router has already identified this response as
+            # a character card. Let the card parser decide instead of
+            # discarding a valid roll because of stale timer context.
+            try:
+                self._parser.parse_roll(raw_message)
+            except MudaeParseError:
+                return None
+            return "roll"
+        if expected_kind == "top":
+            try:
+                self._parser.parse_top_page(raw_message)
+            except MudaeParseError:
+                return None
+            return "top"
+        if expected_kind == "topx":
+            try:
+                self._parser.parse_unavailable_characters(raw_message)
+            except MudaeParseError:
+                return None
+            return "topx"
+        if expected_kind == "roll":
+            try:
+                self._parser.parse_roll(raw_message)
+            except MudaeParseError:
+                try:
+                    self._parser.parse_timer_state(raw_message)
+                except MudaeParseError:
+                    return None
+                return "timers"
             return "roll"
         if expected_kind == "kakera":
             try:
@@ -414,15 +964,59 @@ class DiscordListenerService:
             except MudaeParseError:
                 return None
             return "lootstate"
+        if expected_kind == "wishlist":
+            try:
+                self._parser.parse_wishlist(raw_message)
+            except MudaeParseError:
+                return None
+            return "wishlist"
+        if expected_kind == "personalrare":
+            try:
+                self._parser.parse_personal_rare(raw_message)
+            except MudaeParseError:
+                return None
+            return "personalrare"
+        if expected_kind == "infokl":
+            try:
+                self._parser.parse_kakeraloot_settings(raw_message)
+            except MudaeParseError:
+                return None
+            return "infokl"
+        if expected_kind == "profile":
+            try:
+                self._parser.parse_profile(raw_message)
+            except MudaeParseError:
+                return None
+            return "profile"
+        if expected_kind == "mudapins":
+            try:
+                self._parser.parse_mudapins(raw_message)
+            except MudaeParseError:
+                return None
+            return "mudapins"
         if expected_kind == "im":
             try:
                 self._parser.parse_character_details(raw_message)
             except MudaeParseError:
                 return None
             return "im"
+        if expected_kind in {"divorce", "divorce_confirmation"}:
+            if detected_kind == "divorce_prompt":
+                return "divorce_prompt"
+            if detected_kind == "divorce_declined":
+                return "divorce_declined"
+            if detected_kind == "divorce_complete":
+                return "divorce_complete"
+            return None
         if expected_kind in {"settings", "bonus"}:
             return expected_kind if detected_kind == expected_kind else None
         if expected_kind == "reaction_receipt":
+            return None
+        if expected_kind == "help":
+            return "help"
+        if expected_kind == "tutorial":
+            if detected_kind == "tutorial":
+                return "tutorial"
             return None
         if expected_kind in self._SCAN_KINDS:
             try:
@@ -465,6 +1059,9 @@ class DiscordListenerService:
                         receipt.kakera_earned,
                     )
                 )
+            if kind == "claim":
+                claim = self._parser.parse_claim_confirmation(raw_message)
+                return f"claim|{claim.account_name}|{claim.character_name}"
         except MudaeParseError:
             pass
         return raw_message
@@ -483,16 +1080,48 @@ class DiscordListenerService:
         normalized = command.casefold().lstrip("$/")
         if normalized.startswith("mmr"):
             return "ranked_harem"
-        if normalized.startswith("mmy") or normalized == "mm":
+        if normalized.startswith("mm"):
             return "harem"
         if normalized.startswith("adl"):
             return "antidisable"
+        if normalized == "topx":
+            return "topx"
+        if normalized in {"top", "topo"}:
+            return "top"
+        if normalized in {"wl", "wishlist"}:
+            return "wishlist"
+        if normalized in {"persr", "personalrare"}:
+            return "personalrare"
+        if normalized in {"infokl", "kakeralootinfo"}:
+            return "infokl"
+        if normalized in {"profile", "pr"}:
+            return "profile"
+        if normalized in {"mp", "mudapins", "mudapin"}:
+            return "mudapins"
         if normalized in {"k", "kakera"}:
             return "kakera"
-        if normalized in {"tu", "rolls"}:
-            return "timers"
         if normalized in {"settings", "set"}:
             return "settings"
+        if normalized in {"help", "tuarrange", "ta", "infopin"}:
+            return "help"
+        if normalized in {"tuto", "tutorial"}:
+            return "tutorial"
+        if normalized in {
+            "tu",
+            "timersup",
+            "mu",
+            "ru",
+            "du",
+            "ku",
+            "dk",
+            "dku",
+            "bku",
+            "rtu",
+            "ohu",
+            "rolls",
+            "daily",
+        }:
+            return "timers"
         if normalized in {"bonus", "bonuses"}:
             return "bonus"
         if normalized in {"oq", "ouroquest"}:
@@ -501,13 +1130,107 @@ class DiscordListenerService:
             return "towerstate"
         if normalized in {"lk", "kakeraloots"}:
             return "lootstate"
+        if normalized == "kl":
+            return "lootstate"
         if normalized in {"im", "info"}:
             return "im"
+        if normalized in {"divorce", "div"}:
+            return "divorce"
+        if normalized in {"givek", "givekakera"}:
+            return "gift_kakera"
+        if normalized in {"givesp", "givespheres"}:
+            return "gift_spheres"
+        if normalized == "give":
+            return "gift_character"
+        if normalized == "trade":
+            return "trade"
         if normalized.startswith("dl"):
             return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:
             return "roll"
         return None
+
+    def _track_divorce_confirmation(
+        self,
+        message: discord.Message,
+        identity: ConfigAccount,
+        content: str,
+    ) -> bool:
+        """Keep the channel linked while the user answers Mudae's divorce prompt."""
+        answer = content.casefold().strip()
+        if answer not in {"y", "yes", "n", "no"}:
+            return False
+        existing = self._contexts.get(message.channel.id)
+        if (
+            existing is None
+            or existing.expected_kind not in {"divorce", "divorce_confirmation"}
+            or existing.user_id != str(message.author.id)
+            or time.monotonic() - existing.captured_at > self._CONTEXT_TTL_SECONDS
+        ):
+            return False
+        if answer in {"n", "no"}:
+            self._contexts[message.channel.id] = replace(
+                existing,
+                captured_at=time.monotonic(),
+                expected_kind="divorce_confirmation",
+            )
+            self._logger.info(
+                "Tracking declined divorce confirmation for %s in %s",
+                identity.account,
+                identity.server,
+            )
+            return True
+        self._contexts[message.channel.id] = replace(
+            existing,
+            captured_at=time.monotonic(),
+            expected_kind="divorce_confirmation",
+        )
+        self._logger.info(
+            "Tracking divorce confirmation %s for %s / %s",
+            answer,
+            identity.server,
+            identity.account,
+        )
+        return True
+
+    def _track_transaction_input(
+        self,
+        message: discord.Message,
+        identity: ConfigAccount,
+        content: str,
+    ) -> bool:
+        """Keep a gift/trade flow linked across plain-text follow-up messages."""
+        existing = self._contexts.get(message.channel.id)
+        transaction_kinds = {"gift_kakera", "gift_spheres", "gift_character", "trade"}
+        if (
+            existing is None
+            or existing.expected_kind not in transaction_kinds
+            or time.monotonic() - existing.captured_at > self._CONTEXT_TTL_SECONDS
+        ):
+            return False
+        if existing.expected_kind in {"gift_kakera", "gift_spheres"} and existing.user_id != str(message.author.id):
+            return False
+        if not content.strip():
+            return False
+        self._contexts[message.channel.id] = replace(existing, captured_at=time.monotonic())
+        self._logger.info(
+            "Tracking %s follow-up from account %s on server %s",
+            existing.expected_kind,
+            identity.account,
+            identity.server,
+        )
+        return True
+
+    @staticmethod
+    def _transaction_is_terminal(kind: str, raw_message: str) -> bool:
+        normalized = raw_message.casefold()
+        if "syntax:" in normalized:
+            return True
+        if kind in {"gift_kakera", "gift_spheres"}:
+            return "just gifted" in normalized
+        if kind == "gift_character":
+            return " given to @" in normalized
+        return "the exchange is over" in normalized
 
     def _identity_for_ids(self, server_id: str, user_id: str) -> ConfigAccount | None:
         return self._config.identity_for_discord_ids(server_id, user_id, self._profile_name)
@@ -550,10 +1273,13 @@ class DiscordListenerService:
     ) -> None:
         if scan_id is None:
             return
-        page_number, page_count = self._page_metadata(kind, raw_message)
-        if page_number is None or page_count is None or page_number != page_count:
-            return
         scan_kind = self._SCAN_KINDS[kind]
+        progress = self._catalog.harem_scan_progress(scan_id)
+        if progress is None or progress.completed_at is not None or not progress.is_complete:
+            # Pagination edits can arrive out of order. A page numbered N is
+            # not necessarily the final missing page, so defer completion
+            # until the persisted scan actually contains every page.
+            return
         try:
             if scan_kind == "antidisable":
                 scan = self._catalog.complete_antidisable_scan(scan_id)
@@ -570,6 +1296,13 @@ class DiscordListenerService:
             identity.account,
         )
         self._scan_ids.pop((identity.server.casefold(), identity.account.casefold(), scan_kind), None)
+        for context_key, scan_context in list(self._scan_contexts.items()):
+            if (
+                context_key[2] == kind
+                and scan_context.identity.server.casefold() == identity.server.casefold()
+                and scan_context.identity.account.casefold() == identity.account.casefold()
+            ):
+                self._scan_contexts.pop(context_key, None)
 
     def _page_metadata(self, kind: str, raw_message: str) -> tuple[int | None, int | None]:
         try:
@@ -643,7 +1376,11 @@ class _MOADiscordClient(discord.Client):
     async def on_ready(self) -> None:
         self._listener._logger.info("Discord listener connected as %s", self.user)
         self._listener._logger.info(
-            "Waiting for configured-user Mudae commands, rolls, message edits, and reactions."
+            "Mudae bot ID filter: %s",
+            self._listener._mudae_user_id if self._listener._mudae_user_id is not None else "not set",
+        )
+        self._listener._logger.info(
+            "Waiting for configured-user and observed-user Mudae commands, rolls, message edits, and reactions."
         )
         await self.change_presence(
             status=discord.Status.online,
@@ -655,6 +1392,9 @@ class _MOADiscordClient(discord.Client):
             await self._listener.handle_bot_response(message)
         else:
             await self._listener.handle_message(message)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        await self._listener.handle_interaction(interaction)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         await self._listener.handle_message_edit(before, after)

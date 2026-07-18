@@ -137,7 +137,7 @@ $env:MOA_DISCORD_BOT_TOKEN = "your-bot-token"
 moa discord listen
 ```
 
-The listener sets the bot presence to `Watching Mudae progress`. Customize it
+The listener sets the bot presence to `Watching Testing commands`. Customize it
 with `--status`, for example:
 
 ```powershell

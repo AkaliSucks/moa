@@ -2,6 +2,7 @@ import sqlite3
 
 import pytest
 
+from moa.models.character import RollObservation
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.catalog_service import CatalogService
@@ -57,6 +58,41 @@ def test_import_top_page_updates_a_character_without_duplicate_catalog_rows(tmp_
 
     assert service.character_count() == 1
     assert service.top()[0].claim_rank == 1
+
+
+def test_claim_observation_marks_catalog_entry_as_owned(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    top_text = "#1 - Pakunoda - Hunter × Hunter"
+    roll_text = "Pakunoda\nHunter × Hunter\n116:kakera:"
+    claim_text = "💖 **ernieuuu** and **Pakunoda** are now married! 💖\n+128:kakera:"
+
+    service.import_top_page(
+        MudaeTextParser().parse_top_page(top_text),
+        top_text,
+        "discord",
+        server_name="Lake Arrowhead 2025",
+    )
+    service.import_roll(
+        MudaeTextParser().parse_roll(roll_text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        roll_text,
+        "discord",
+    )
+    service.import_claim(
+        MudaeTextParser().parse_claim_confirmation(claim_text),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        claim_text,
+        "discord",
+    )
+
+    entry = TopSearchService(service).search(
+        server_name="Lake Arrowhead 2025", account_name="ernieuuu"
+    )[0]
+    assert entry.owned is True
+    assert entry.owner_name == "ernieuuu"
+    assert entry.rollability_status == "Claimed"
 
 
 def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:
@@ -179,6 +215,79 @@ def test_delete_import_removes_only_its_derived_observations(tmp_path) -> None:
     assert [item.server_name for item in profile.server_observations] == ["Correct Server"]
     assert not service.delete_import_event(mistaken.import_event_id)
     assert service.recent_imports()[0].id == correct.import_event_id
+
+
+def test_repair_bugged_imports_removes_timer_rolls_and_orphaned_split_rows(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    timer_text = (
+        "You have 0 rolls left. Next rolls reset in 36 min.\n"
+        "You can react to kakera right now!\n"
+        "Power: 100%\n"
+        "Each kakera button consumes 100% of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (50%)\n"
+        "Stock: 0:kakera:"
+    )
+
+    service.import_roll(
+        RollObservation(
+            name="Each kakera button consumes 100% of your reaction power.",
+            series="Your characters with 10+ keys consume half the power (50%)",
+            claim_rank=None,
+            kakera_value=0,
+        ),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        timer_text,
+        "discord",
+    )
+    service.import_roll(
+        RollObservation(
+            name="Dungeon ni Deai wo Motomeru no",
+            series="wa Machigatteiru Darou ka",
+            claim_rank=None,
+            kakera_value=55,
+        ),
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        "Hestia\nDungeon ni Deai wo Motomeru no\nwa Machigatteiru Darou ka\n55:kakera:",
+        "discord",
+    )
+
+    assert service.character_count() == 2
+    assert service.inspect_bugged_imports() == (2, 2)
+    assert service.repair_bugged_imports() == (2, 2)
+    assert service.character_count() == 1
+    assert service.recent_rolls("Lake Arrowhead 2025", "ernieuuu", 1)[0].character.name == "Hestia"
+    assert (
+        service.recent_rolls("Lake Arrowhead 2025", "ernieuuu", 1)[0].character.series
+        == "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka"
+    )
+    assert service.inspect_bugged_imports() == (0, 0)
+
+
+def test_repair_bugged_imports_preserves_character_with_other_observations(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    timer_text = "You have 0 rolls left. Next rolls reset in 36 min."
+    bad_roll = RollObservation(
+        name="Each kakera button consumes 100% of your reaction power.",
+        series="Your characters with 10+ keys consume half the power (50%)",
+        claim_rank=None,
+        kakera_value=0,
+    )
+    good_roll = RollObservation(
+        name="Each kakera button consumes 100% of your reaction power.",
+        series="Your characters with 10+ keys consume half the power (50%)",
+        claim_rank=None,
+        kakera_value=1,
+    )
+
+    service.import_roll(bad_roll, "Server", "account", timer_text, "discord")
+    service.import_roll(good_roll, "Server", "account", "A real roll card", "clipboard")
+
+    assert service.repair_bugged_imports() == (1, 0)
+    assert service.character_count() == 1
 
 
 def test_import_mmy_page_keeps_unresolved_names_without_losing_key_data(tmp_path) -> None:
