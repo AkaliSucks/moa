@@ -10,11 +10,11 @@ from typing import Literal
 from moa.models.base import MOAModel
 
 
-ConfigRole = Literal["primary", "alt"]
+ConfigRole = Literal["primary", "alt", "observed"]
 
 
 class ConfigAccount(MOAModel):
-    """One user-owned account identity attached to a Mudae server."""
+    """One tracked Mudae account identity attached to a server."""
 
     server: str
     account: str
@@ -102,8 +102,8 @@ class ConfigService:
             server=self._clean(server, "server"),
             account=self._clean(account, "account"),
             role=role,
-            discord_server_id=self._clean_optional(discord_server_id),
-            discord_user_id=self._clean_optional(discord_user_id),
+            discord_server_id=self._clean_optional_discord_id(discord_server_id, "Server ID"),
+            discord_user_id=self._clean_optional_discord_id(discord_user_id, "User ID"),
         )
         existing_index = next(
             (
@@ -189,8 +189,8 @@ class ConfigService:
         """Select an active context by stable Discord IDs."""
         config = self.load()
         profile = self.profile(profile_name)
-        normalized_server_id = self._clean(server_id, "server ID")
-        normalized_user_id = self._clean(user_id, "user ID")
+        normalized_server_id = self._clean_discord_id(server_id, "Server ID")
+        normalized_user_id = self._clean_discord_id(user_id, "User ID")
         identity = next(
             (
                 item
@@ -243,12 +243,20 @@ class ConfigService:
         return profile.active_server, profile.active_account
 
     def owned_account_names(self, server: str, profile_name: str | None = None) -> tuple[str, ...]:
-        """Return configured primary/alt identities for one server."""
+        """Return only the user's primary/alt identities for one server.
+
+        Observed identities are intentionally excluded so another player's
+        ownership does not make a character appear self-owned in rollability
+        searches.
+        """
         profile = self.profile(profile_name)
         seen: set[str] = set()
         names: list[str] = []
         for identity in profile.accounts:
-            if identity.server.casefold() != server.casefold():
+            if (
+                identity.server.casefold() != server.casefold()
+                or identity.role not in {"primary", "alt"}
+            ):
                 continue
             key = identity.account.casefold()
             if key not in seen:
@@ -263,8 +271,8 @@ class ConfigService:
         profile_name: str | None = None,
     ) -> ConfigAccount | None:
         """Return the configured MOA identity matching a Discord guild/user pair."""
-        normalized_server_id = self._clean(server_id, "server ID")
-        normalized_user_id = self._clean(user_id, "user ID")
+        normalized_server_id = self._clean_discord_id(server_id, "Server ID")
+        normalized_user_id = self._clean_discord_id(user_id, "User ID")
         profile = self.profile(profile_name)
         return next(
             (
@@ -283,7 +291,7 @@ class ConfigService:
         profile_name: str | None = None,
     ) -> ConfigAccount | None:
         """Resolve a configured account name within one Discord server."""
-        normalized_server_id = self._clean(server_id, "server ID")
+        normalized_server_id = self._clean_discord_id(server_id, "Server ID")
         normalized_account = self._clean(account_name, "account")
         profile = self.profile(profile_name)
         return next(
@@ -295,6 +303,47 @@ class ConfigService:
             ),
             None,
         )
+
+    def active_identity_for_discord_server(
+        self,
+        server_id: str,
+        profile_name: str | None = None,
+    ) -> ConfigAccount | None:
+        """Return the active configured account when it belongs to one guild.
+
+        Discord slash responses from another bot do not always retain the
+        original interaction metadata. The listener may use this explicit
+        active context as a conservative fallback, but only for the selected
+        Discord server and account.
+        """
+        normalized_server_id = self._clean_discord_id(server_id, "Server ID")
+        profile = self.profile(profile_name)
+        if profile.active_server_id != normalized_server_id:
+            return None
+        configured_user_ids = {
+            identity.discord_user_id
+            for identity in profile.accounts
+            if identity.discord_server_id == normalized_server_id
+            and identity.role in {"primary", "alt"}
+            and identity.discord_user_id is not None
+        }
+        if len(configured_user_ids) > 1:
+            return None
+        if profile.active_user_id:
+            identity = self.identity_for_discord_ids(
+                normalized_server_id,
+                profile.active_user_id,
+                profile_name,
+            )
+            if identity is not None:
+                return identity
+        if profile.active_account:
+            return self.identity_for_discord_server_account(
+                normalized_server_id,
+                profile.active_account,
+                profile_name,
+            )
+        return None
 
     def _save_profile(self, config: MOAConfig, updated_profile: ConfigProfile) -> None:
         profiles = tuple(
@@ -311,8 +360,14 @@ class ConfigService:
         return cleaned
 
     @staticmethod
-    def _clean_optional(value: str | None) -> str | None:
+    def _clean_discord_id(value: str, label: str) -> str:
+        cleaned = ConfigService._clean(value, label)
+        if not cleaned.isascii() or not cleaned.isdecimal():
+            raise ValueError(f"{label} must be a numeric Discord ID.")
+        return cleaned
+
+    @staticmethod
+    def _clean_optional_discord_id(value: str | None, label: str) -> str | None:
         if value is None:
             return None
-        cleaned = value.strip()
-        return cleaned or None
+        return ConfigService._clean_discord_id(value, label)

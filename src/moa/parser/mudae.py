@@ -8,12 +8,18 @@ import re
 
 from moa.models.character import (
     CharacterDetails,
+    ClaimConfirmation,
+    DivorceConfirmation,
+    DivorcePrompt,
     AntidisablePage,
+    KakeraReactionBlocked,
     KakeraReactionReceipt,
     BadgeLevel,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
+    MudapinSnapshot,
+    ProfileSnapshot,
     PersonalRareSnapshot,
     ServerSettingMetric,
     ServerSettingsSnapshot,
@@ -75,9 +81,45 @@ class MudaeTextParser:
         re.IGNORECASE,
     )
     _KAKERA_REACTION_RECEIPT = re.compile(
-        r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?P<account>.+?)\s+\+(?P<value>[\d,]+)\s+\(\$k\)$",
+        r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
+        r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
         re.IGNORECASE,
     )
+    _KAKERA_REACTION_BREAKDOWN_RECEIPT = re.compile(
+        r"^(?P<reaction>:[a-z0-9_]+:)\s+breaks down into.+?=>\s*"
+        r"(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
+        r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
+        re.IGNORECASE,
+    )
+    _KAKERA_REACTION_BLOCKED = re.compile(
+        r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
+        r"(?P<duration>.+?)\.\s*\(\$ku\)$",
+        re.IGNORECASE,
+    )
+    _CLAIM_CONFIRMATION = re.compile(
+        r"^(?P<account>.+?)\s+and\s+(?P<character>.+?)\s+are now married!",
+        re.IGNORECASE,
+    )
+    _DIVORCE_PROMPT = re.compile(
+        r"^(?P<character>.+?):\s*Do you confirm the divorce\?\s*\(y/n/yes/no\)\s*$",
+        re.IGNORECASE,
+    )
+    _DIVORCE_REFUND = re.compile(
+        r"Characters divorced by \$divorce are also removed from the \$restorelist\s*"
+        r"\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\s*if you confirm\)",
+        re.IGNORECASE,
+    )
+    _DIVORCE_DECLINED = re.compile(r"^Divorce declined\.$", re.IGNORECASE)
+    _DIVORCE_COMPLETE = re.compile(
+        r"^(?P<character>.+?)\s+and\s+(?P<account>.+?)\s+are now divorced\."
+        r"(?:\s*\W*\s*\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\))?\s*$",
+        re.IGNORECASE,
+    )
+    _MUDAPIN_MARKER = re.compile(r":(?:pin|logopin)\d+:", re.IGNORECASE)
+    _NO_MUDAPINS = re.compile(
+        r"No mudapins found!.*kakeraloots", re.IGNORECASE
+    )
+    _SERIES_CONTINUATION = re.compile(r"^[a-z][a-z0-9'’_-]*[.!?]?$")
     _HAREM_KEY_ENTRY = re.compile(
         r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
         r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\)"
@@ -98,6 +140,7 @@ class MudaeTextParser:
     _GENDER = re.compile(
         r"\s+(?P<gender>(?::(?:female|male):)+)\s*$", re.IGNORECASE
     )
+    _STARWISH_MARKER = re.compile(r"\s*:sw:\s*", re.IGNORECASE)
     _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
     _WISHLIST_HEADER = re.compile(
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
@@ -129,7 +172,9 @@ class MudaeTextParser:
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+?)"
         r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
     )
-    _KAKERA_BALANCE = re.compile(r"^You have\s+(?P<value>[\d,]+):kakera:!?$", re.IGNORECASE)
+    _KAKERA_BALANCE = re.compile(
+        r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
+    )
     _PERSONAL_RARE = re.compile(
         r"(?:Your\s+)?current\s+\$personalrare:\s*(?P<value>\d+)", re.IGNORECASE
     )
@@ -178,11 +223,18 @@ class MudaeTextParser:
     _LOOT_QUANTITY = re.compile(r"Quantity\s+LVL\s+(?P<value>\d+)", re.IGNORECASE)
     _LOOT_QUALITY = re.compile(r"Quality\s+LVL\s+(?P<value>\d+)", re.IGNORECASE)
     _LOOT_USAGE = re.compile(r"\$kl usage:\s*(?P<value>[\d,]+)", re.IGNORECASE)
-    _LOOT_BALANCE = re.compile(r"^(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
-    _NO_KAKERALOOTS = re.compile(r"No kakeraloots bought", re.IGNORECASE)
-    _LOOT_COST = re.compile(r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE)
+    _LOOT_BALANCE = re.compile(r"^(?P<value>[\d,]+)\s*:\s*kakera\s*:$", re.IGNORECASE)
+    _NO_KAKERALOOTS = re.compile(
+        r"No kakeraloots bought|need to buy kakeraloots before using this command|"
+        r"Prerequisites:\s*Sapphire\s+I\s*\+\s*Ruby\s+I\s*\+\s*Emerald\s+I.*\$infokl",
+        re.IGNORECASE,
+    )
+    _LOOT_COST = re.compile(
+        r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+)\s*:(?:kakera):",
+        re.IGNORECASE,
+    )
     _LOOT_UPGRADE_COST = re.compile(
-        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+):kakera:"
+        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+)\s*:(?:kakera):"
         r".*?increased\s+by\s+(?P<increment>[\d,]+)/level",
         re.IGNORECASE,
     )
@@ -207,12 +259,18 @@ class MudaeTextParser:
     _TIMER_CLAIM_WAITING = re.compile(
         r"you can't claim for another\s*(?P<duration>.+?)\.", re.IGNORECASE
     )
+    _TIMER_CLAIM_INTERVAL_WAITING = re.compile(
+        r"for this server,\s*you can claim once per interval of\s*.+?\.\s*"
+        r"the next interval begins in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
     _TIMER_ROLLS = re.compile(
-        r"You have\s*(?P<rolls>\d+)\s+rolls? left\.\s*Next rolls reset in\s*(?P<duration>.+?)\.",
+        r"You have\s*\*{0,2}(?P<rolls>\d+)\*{0,2}\s+rolls? left\.\s*"
+        r"Next rolls reset in\s*(?P<duration>.+?)\.",
         re.IGNORECASE,
     )
     _TIMER_ROLL_LIMITED = re.compile(
-        r"roulette is limited to\s*(?P<limit>\d+)\s+uses? per hour\.\s*"
+        r"roulette is limited to\s*\*{0,2}(?P<limit>\d+)\*{0,2}\s+uses? per hour\.\s*"
         r"(?P<duration>.+?)\s+left\.",
         re.IGNORECASE,
     )
@@ -220,9 +278,24 @@ class MudaeTextParser:
         r"use this command again to reset your rolls timer for one server",
         re.IGNORECASE,
     )
-    _TIMER_ROLL_STOCK = re.compile(r"You have\s*(?P<value>\d+)\s+rolls? reset in stock", re.IGNORECASE)
+    _TIMER_ROLL_STOCK = re.compile(
+        r"You have\s*\*{0,2}(?P<value>\d+)\*{0,2}\s+rolls? reset in stock",
+        re.IGNORECASE,
+    )
     _TIMER_VOTE = re.compile(r"You may vote again in\s*(?P<duration>.+?)\.", re.IGNORECASE)
     _TIMER_DAILY = re.compile(r"Next \$daily reset in\s*(?P<duration>.+?)\.", re.IGNORECASE)
+    _TIMER_KAKERA_WAITING = re.compile(
+        r"^You can't react to kakera for\s*(?P<duration>.+?)\.$",
+        re.IGNORECASE,
+    )
+    _TIMER_RTU_COOLDOWN = re.compile(
+        r"^The cooldown of \$rt is not over\.\s*Time left:\s*(?P<duration>.+?)\.\s*\(\$rtu\)$",
+        re.IGNORECASE,
+    )
+    _TIMER_RTU_LOCKED = re.compile(
+        r"^You didn't unlock this command yet!.*\(\$kakera\)$",
+        re.IGNORECASE,
+    )
     _TIMER_POWER = re.compile(r"^Power:\s*(?P<value>\d+)%$", re.IGNORECASE)
     _TIMER_POWER_COST = re.compile(
         r"Each kakera button consumes\s*(?P<value>\d+)%\s+of your reaction power", re.IGNORECASE
@@ -255,6 +328,7 @@ class MudaeTextParser:
     @staticmethod
     def _duration_minutes(value: str) -> int:
         """Convert Mudae's `2h 32 min`/`32 min` wording to whole minutes."""
+        value = re.sub(r"\*+", "", value)
         hours = re.search(r"(?P<value>\d+)h", value, re.IGNORECASE)
         minutes = re.search(r"(?P<value>\d+)\s*min", value, re.IGNORECASE)
         if hours is None and minutes is None:
@@ -262,6 +336,11 @@ class MudaeTextParser:
         return (int(hours.group("value")) * 60 if hours else 0) + (
             int(minutes.group("value")) if minutes else 0
         )
+
+    @classmethod
+    def _clean_series(cls, value: str) -> str:
+        """Remove display-only gender and starwish markers from a series."""
+        return cls._STARWISH_MARKER.sub(" ", cls._GENDER.sub("", value)).strip()
 
     def parse_top_page(self, text: str) -> TopPage:
         """Parse one copied `$top` page into ranked character observations."""
@@ -309,8 +388,9 @@ class MudaeTextParser:
         if roulette_line is None:
             raise MudaeParseError("Could not parse the Mudae roulette line.")
 
-        gender_match = self._GENDER.search(lines[roulette_index - 1])
-        series = self._GENDER.sub("", lines[roulette_index - 1]).strip()
+        name, series_line = self._roll_name_and_series(lines, roulette_index)
+        gender_match = self._GENDER.search(series_line)
+        series = self._clean_series(series_line)
         key = self._ROLL_KEY.search(lines[roulette_index])
         generic_key = self._GENERIC_KEY_COUNT.search(lines[roulette_index])
 
@@ -318,7 +398,7 @@ class MudaeTextParser:
         like_rank = self._first_number(lines, self._LIKE_RANK)
 
         return CharacterDetails(
-            name=lines[roulette_index - 2],
+            name=name,
             series=series,
             gender=(
                 ",".join(
@@ -355,9 +435,11 @@ class MudaeTextParser:
             roulette_line = self._ROULETTE.match(lines[roulette_index])
             if roulette_line is None:
                 raise MudaeParseError("Could not parse the Mudae roulette line.")
-            series = self._GENDER.sub("", lines[roulette_index - 1]).strip()
+            name, series_line = self._roll_name_and_series(lines, roulette_index)
+            series = self._clean_series(series_line)
+            self._validate_roll_identity(name, series)
             return RollObservation(
-                name=lines[roulette_index - 2],
+                name=name,
                 series=series,
                 claim_rank=self._first_number(lines, self._CLAIM_RANK),
                 kakera_value=self._number(roulette_line.group("value")),
@@ -385,11 +467,11 @@ class MudaeTextParser:
                 None,
             )
             if key_index == kakera_index - 1 and key_index >= 2:
-                name = lines[key_index - 2]
-                series = lines[key_index - 1]
+                name, series = self._roll_name_and_series(lines, key_index)
             else:
-                name = lines[kakera_index - 2]
-                series = lines[kakera_index - 1]
+                name, series = self._roll_name_and_series(lines, kakera_index)
+            series = self._clean_series(series)
+            self._validate_roll_identity(name, series)
             return RollObservation(
                 name=name,
                 series=series,
@@ -409,20 +491,140 @@ class MudaeTextParser:
             (self._KAKERA.match(line) for line in lines[claims_index + 1 :] if self._KAKERA.match(line)),
             None,
         )
+        name, series = self._roll_name_and_series(lines, claims_index)
+        series = self._clean_series(series)
+        self._validate_roll_identity(name, series)
         return RollObservation(
-            name=lines[claims_index - 2],
-            series=lines[claims_index - 1],
+            name=name,
+            series=series,
             claim_rank=self._number(claims_line.group("rank")),
             kakera_value=self._number(kakera.group("value")) if kakera else None,
             displayed_key_type=key.group("key_type").lower() if key else None,
             displayed_key_count=int(key.group("count")) if key else None,
         )
 
+    def parse_claim_confirmation(self, text: str) -> ClaimConfirmation:
+        """Parse Mudae's short confirmation sent after a character is claimed."""
+        for line in self._lines(text):
+            match = self._CLAIM_CONFIRMATION.match(line)
+            if match is None:
+                continue
+            account_name = re.sub(r"^[^\w]+", "", match.group("account").replace("*", "")).strip()
+            character_name = match.group("character").replace("*", "").strip()
+            if account_name and character_name:
+                return ClaimConfirmation(
+                    account_name=account_name,
+                    character_name=character_name,
+                )
+        raise MudaeParseError("Expected a Mudae claim confirmation.")
+
+    def parse_transaction(self, text: str, kind: str) -> None:
+        """Validate one response in a Mudae gift or trade flow."""
+        normalized = re.sub(r"\*+", "", text).casefold()
+        if kind == "gift_kakera":
+            valid = (
+                re.search(r"syntax:\s*\$givek\b", normalized) is not None
+                or ("do you really want to give" in normalized and ":kakera:" in normalized)
+                or ("just gifted" in normalized and ":kakera:" in normalized)
+            )
+        elif kind == "gift_spheres":
+            valid = (
+                re.search(r"syntax:\s*\$givesp\b", normalized) is not None
+                or ("do you really want to give" in normalized and ":sp:" in normalized)
+                or ("just gifted" in normalized and ":sp:" in normalized)
+            )
+        elif kind == "gift_character":
+            valid = (
+                re.search(r"syntax:\s*\$give\b", normalized) is not None
+                or ("wants to give you" in normalized and "do you confirm" in normalized)
+                or re.search(r"\bgiven to\s+@", normalized) is not None
+            )
+        elif kind == "trade":
+            valid = (
+                re.search(r"syntax:\s*\$trade\b", normalized) is not None
+                or "type the name(s) of the character" in normalized
+                or "do you confirm the exchange" in normalized
+                or "the exchange is over" in normalized
+            )
+        else:
+            raise MudaeParseError(f"Unsupported transaction kind: {kind}")
+        if not valid:
+            raise MudaeParseError(f"Expected a Mudae {kind} transaction response.")
+
+    def parse_divorce_prompt(self, text: str) -> DivorcePrompt:
+        """Parse the first response from Mudae's two-step `$divorce` flow."""
+        lines = self._lines(text)
+        prompt = next(
+            (
+                match
+                for line in lines
+                for match in [self._DIVORCE_PROMPT.match(re.sub(r"\*+", "", line).strip())]
+                if match is not None
+            ),
+            None,
+        )
+        if prompt is None:
+            raise MudaeParseError("Expected a Mudae divorce confirmation prompt.")
+        refund = next(
+            (
+                match
+                for line in lines
+                for match in [self._DIVORCE_REFUND.match(re.sub(r"\*+", "", line).strip())]
+                if match is not None
+            ),
+            None,
+        )
+        return DivorcePrompt(
+            character_name=prompt.group("character").strip(),
+            kakera_refund=self._number(refund.group("value")) if refund else None,
+        )
+
+    def parse_divorce_declined(self, text: str) -> None:
+        """Validate Mudae's response when a pending divorce is declined."""
+        if any(self._DIVORCE_DECLINED.match(line) for line in self._lines(text)):
+            return
+        raise MudaeParseError("Expected Mudae's divorce-declined response.")
+
+    def parse_divorce_confirmation(
+        self, text: str, expected_account: str | None = None
+    ) -> DivorceConfirmation:
+        """Parse Mudae's completion message after a confirmed `$divorce`."""
+        for raw_line in self._lines(text):
+            line = re.sub(r"\*+", "", raw_line).strip()
+            match = self._DIVORCE_COMPLETE.match(line)
+            if match is None:
+                continue
+            account_name = re.sub(r"^[^\w]+|[^\w]+$", "", match.group("account")).strip()
+            character_name = re.sub(
+                r"^[^\w]+|[^\w]+$", "", match.group("character")
+            ).strip()
+            if expected_account is not None and account_name.casefold() != expected_account.casefold():
+                continue
+            if character_name and account_name:
+                return DivorceConfirmation(
+                    account_name=account_name,
+                    character_name=character_name,
+                    kakera_refund=(
+                        self._number(match.group("value"))
+                        if match.group("value")
+                        else None
+                    ),
+                )
+        raise MudaeParseError("Expected a Mudae completed-divorce response.")
+
     def parse_kakera_reaction_receipt(self, text: str) -> KakeraReactionReceipt:
         """Parse the standalone Mudae message shown after a Kakera reaction."""
         lines = self._lines(text)
         receipt = next(
-            (self._KAKERA_REACTION_RECEIPT.match(line) for line in lines if self._KAKERA_REACTION_RECEIPT.match(line)),
+            (
+                match
+                for line in lines
+                for match in (
+                    self._KAKERA_REACTION_BREAKDOWN_RECEIPT.match(line),
+                    self._KAKERA_REACTION_RECEIPT.match(line),
+                )
+                if match is not None
+            ),
             None,
         )
         if receipt is None:
@@ -432,6 +634,46 @@ class MudaeTextParser:
             account_name=receipt.group("account").strip(),
             kakera_earned=self._number(receipt.group("value")),
         )
+
+    def parse_kakera_reaction_blocked(self, text: str) -> KakeraReactionBlocked:
+        """Parse the one-line response shown after an unaffordable Kakera click."""
+        for line in self._lines(text):
+            normalized = re.sub(r"\*+", "", line).strip()
+            match = self._KAKERA_REACTION_BLOCKED.match(normalized)
+            if match is None:
+                continue
+            account_name = match.group("account").strip()
+            if account_name:
+                return KakeraReactionBlocked(
+                    account_name=account_name,
+                    cooldown_minutes=self._duration_minutes(match.group("duration")),
+                )
+        raise MudaeParseError(
+            "Expected a compact Mudae Kakera reaction-blocked response."
+        )
+
+    @classmethod
+    def _roll_name_and_series(cls, lines: list[str], marker_index: int) -> tuple[str, str]:
+        """Recover the name and all wrapped series lines before a roll marker."""
+        content_lines = [
+            line
+            for line in lines[:marker_index]
+            if line.casefold() not in {"mudae", "app"}
+            and not line.lstrip().startswith(("$", "/"))
+            and not line.casefold().startswith("wished by ")
+        ]
+        if len(content_lines) < 2:
+            raise MudaeParseError("Expected character name and series before the Mudae roll marker.")
+        return content_lines[0], " ".join(content_lines[1:])
+
+    @staticmethod
+    def _validate_roll_identity(name: str, series: str) -> None:
+        """Reject a likely title/series split instead of storing a false character."""
+        if len(name.strip()) >= 28 and len(series.strip()) <= 8:
+            raise MudaeParseError(
+                "Ambiguous Mudae roll identity: a long character name and short series "
+                "were returned; use `$im` to verify it before importing."
+            )
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:
         """Parse one copied keyed-harem page, with optional current Kakera values."""
@@ -478,7 +720,10 @@ class MudaeTextParser:
         page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
         entries: list[RankedHaremEntry] = []
         for line in lines:
-            match = self._RANKED_HAREM_ENTRY.match(line)
+            # Mudae may wrap the rank, name, and/or value in Discord markdown
+            # emphasis. The markdown is presentation-only and should not make
+            # otherwise valid $mmr/$mmrk entries fail the structured parser.
+            match = self._RANKED_HAREM_ENTRY.match(re.sub(r"\*+", "", line))
             if match is None:
                 continue
             entries.append(
@@ -645,7 +890,11 @@ class MudaeTextParser:
 
     def parse_disablelist(self, text: str) -> DisableListSnapshot:
         """Parse account-specific disable-list settings from a copied `$dl` reply."""
-        lines = self._lines(text)
+        # Discord embeds may preserve Markdown emphasis around the title or
+        # numeric values even though copied text usually does not.  Keep
+        # underscores intact because they can be part of a real series name,
+        # while removing only Markdown asterisks for this format.
+        lines = [re.sub(r"\*+", "", line) for line in self._lines(text)]
         header = next(
             (
                 self._DISABLELIST_HEADER.search(line)
@@ -719,7 +968,7 @@ class MudaeTextParser:
 
     def parse_kakera_state(self, text: str) -> KakeraStateSnapshot:
         """Parse current Kakera balance and badge levels from a copied `$k` response."""
-        lines = self._lines(text)
+        lines = [re.sub(r"\*", "", line) for line in self._lines(text)]
         balance = next((self._KAKERA_BALANCE.match(line) for line in lines if self._KAKERA_BALANCE.match(line)), None)
         if balance is None:
             raise MudaeParseError("Expected a Mudae $k response with a Kakera balance.")
@@ -744,26 +993,37 @@ class MudaeTextParser:
 
     def parse_personal_rare(self, text: str) -> PersonalRareSnapshot:
         """Parse the account-scoped `$personalrare` value from `$persr` output."""
-        match = self._PERSONAL_RARE.search(text)
+        normalized_text = "\n".join(
+            re.sub(r"[*_]", "", line) for line in self._lines(text)
+        )
+        match = self._PERSONAL_RARE.search(normalized_text)
         if match is None:
             raise MudaeParseError("Expected a Mudae $persr response with a current $personalrare value.")
         return PersonalRareSnapshot(personal_rare_multiplier=int(match.group("value")))
 
     def parse_timer_state(self, text: str) -> TimerStateSnapshot:
         """Parse whichever action categories are currently visible in `$tu`."""
-        lines = self._lines(text)
+        # Discord/Mudae may wrap individual labels or values in Markdown
+        # emphasis. Timer fields are plain state values, so remove that
+        # presentation layer before applying the anchored line patterns.
+        lines = [re.sub(r"\*", "", line) for line in self._lines(text)]
+        normalized_text = "\n".join(lines)
 
         def first(pattern: re.Pattern[str]) -> re.Match[str] | None:
             return next((pattern.search(line) for line in lines if pattern.search(line)), None)
 
         claim_ready = first(self._TIMER_CLAIM_READY)
         claim_waiting = first(self._TIMER_CLAIM_WAITING)
+        claim_interval_waiting = first(self._TIMER_CLAIM_INTERVAL_WAITING)
         rolls = first(self._TIMER_ROLLS)
         limited_rolls = first(self._TIMER_ROLL_LIMITED)
         vote_prompt = first(self._TIMER_ROLL_VOTE_PROMPT)
         roll_stock = first(self._TIMER_ROLL_STOCK)
         vote = first(self._TIMER_VOTE)
         daily = first(self._TIMER_DAILY)
+        kakera_waiting = first(self._TIMER_KAKERA_WAITING)
+        rtu_cooldown = first(self._TIMER_RTU_COOLDOWN)
+        rtu_locked = first(self._TIMER_RTU_LOCKED)
         power = first(self._TIMER_POWER)
         power_cost = first(self._TIMER_POWER_COST)
         soulmate_cost = first(self._TIMER_SOULMATE_COST)
@@ -775,15 +1035,24 @@ class MudaeTextParser:
         recognized_categories = (
             claim_ready,
             claim_waiting,
+            claim_interval_waiting,
             rolls,
             limited_rolls,
             vote_prompt,
             roll_stock,
             vote,
             daily,
+            kakera_waiting,
+            rtu_cooldown,
+            rtu_locked,
             power,
             stock,
+            gold_key_stock,
             ouro,
+            "$dk is ready!" in normalized_text.casefold(),
+            "next $dk in" in normalized_text.casefold(),
+            "$rt is available!" in normalized_text.casefold(),
+            "next $rt" in normalized_text.casefold(),
         )
         if not any(recognized_categories):
             raise MudaeParseError("Expected at least one recognizable Mudae $tu timer category.")
@@ -794,6 +1063,11 @@ class MudaeTextParser:
         elif claim_waiting is not None:
             can_claim_now = False
             claim_reset_minutes = self._duration_minutes(claim_waiting.group("duration"))
+        elif claim_interval_waiting is not None:
+            can_claim_now = False
+            claim_reset_minutes = self._duration_minutes(
+                claim_interval_waiting.group("duration")
+            )
         else:
             can_claim_now = None
             claim_reset_minutes = None
@@ -819,20 +1093,24 @@ class MudaeTextParser:
             daily_reset_minutes=(self._duration_minutes(daily.group("duration")) if daily else None),
             daily_kakera_ready=(
                 True
-                if "$dk is ready!" in text.casefold()
+                if "$dk is ready!" in normalized_text.casefold()
                 else False
-                if "next $dk in" in text.casefold()
+                if "next $dk in" in normalized_text.casefold()
                 else None
             ),
             rt_available=(
                 True
-                if "$rt is available!" in text.casefold()
+                if "$rt is available!" in normalized_text.casefold()
                 else False
-                if "next $rt" in text.casefold()
+                if rtu_cooldown is not None or rtu_locked is not None or "next $rt" in normalized_text.casefold()
                 else None
             ),
             can_react_kakera_now=(
-                True if "can react to kakera right now!" in text.casefold() else None
+                True
+                if "can react to kakera right now!" in normalized_text.casefold()
+                else False
+                if kakera_waiting is not None
+                else None
             ),
             reaction_power_percent=int(power.group("value")) if power else None,
             kakera_button_power_cost_percent=(int(power_cost.group("value")) if power_cost else None),
@@ -859,6 +1137,11 @@ class MudaeTextParser:
             ),
             rolls_reset_status=rolls_reset_status,
             rolls_per_hour_limit=(int(limited_rolls.group("limit")) if limited_rolls else None),
+            rt_reset_minutes=(
+                self._duration_minutes(rtu_cooldown.group("duration"))
+                if rtu_cooldown
+                else None
+            ),
         )
 
     def parse_tower_state(self, text: str) -> TowerStateSnapshot:
@@ -942,7 +1225,7 @@ class MudaeTextParser:
 
     def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
         """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
-        lines = self._lines(text)
+        lines = [re.sub(r"[*_]", "", line) for line in self._lines(text)]
 
         no_loots = next(
             (self._NO_KAKERALOOTS.search(line) for line in lines if self._NO_KAKERALOOTS.search(line)),
@@ -971,35 +1254,43 @@ class MudaeTextParser:
             (self._LOOT_BALANCE.match(line) for line in lines if self._LOOT_BALANCE.match(line)),
             None,
         )
-        if any(
-            match is None
-            for match in (
-                disable,
-                protected_wish,
-                mudapins,
-                rt,
-                permanent_roll,
-                star_branch,
-                quantity,
-                quality,
-                usage,
-                balance,
-            )
-        ):
-            raise MudaeParseError("Expected a complete Mudae $lk Kakeraloot stats response.")
+        # Mudae omits the reward/progression lines when an account has only
+        # recently bought Kakeraloots. Quantity, quality, usage, and balance
+        # are the stable core fields shared by both the full and compact
+        # layouts; the remaining fields are optional observations.
+        if any(match is None for match in (quantity, quality, usage, balance)):
+            raise MudaeParseError("Expected a Mudae $lk Kakeraloot stats response.")
 
         return KakeralootStateSnapshot(
             has_kakeraloots=True,
             rolls_stacked=int(rolls.group("value")) if rolls else None,
-            disable_wa_ha_reduction=int(disable.group("wa_ha")),
-            disable_wg_hg_reduction=int(disable.group("wg_hg")),
-            protected_wish_level=int(protected_wish.group("level")),
-            protected_wish_denominator=self._number(protected_wish.group("denominator")),
-            mudapins=int(mudapins.group("value")),
-            rt_cooldown_reduction_hours=int(rt.group("value")),
-            permanent_roll_bonus=int(permanent_roll.group("value")),
-            star_branches=int(star_branch.group("branches")),
-            starwish_slots_from_branches=int(star_branch.group("slots")),
+            disable_wa_ha_reduction=(
+                int(disable.group("wa_ha")) if disable else None
+            ),
+            disable_wg_hg_reduction=(
+                int(disable.group("wg_hg")) if disable else None
+            ),
+            protected_wish_level=(
+                int(protected_wish.group("level")) if protected_wish else None
+            ),
+            protected_wish_denominator=(
+                self._number(protected_wish.group("denominator"))
+                if protected_wish
+                else None
+            ),
+            mudapins=int(mudapins.group("value")) if mudapins else None,
+            rt_cooldown_reduction_hours=(
+                int(rt.group("value")) if rt else None
+            ),
+            permanent_roll_bonus=(
+                int(permanent_roll.group("value")) if permanent_roll else None
+            ),
+            star_branches=(
+                int(star_branch.group("branches")) if star_branch else None
+            ),
+            starwish_slots_from_branches=(
+                int(star_branch.group("slots")) if star_branch else None
+            ),
             quantity_level=int(quantity.group("value")),
             quality_level=int(quality.group("value")),
             usage_count=self._number(usage.group("value")),
@@ -1008,8 +1299,11 @@ class MudaeTextParser:
 
     def parse_kakeraloot_settings(self, text: str) -> KakeralootSettingsSnapshot:
         """Parse server-configurable and universal Kakeraloot costs from `$infokl`."""
-        loot_cost = self._LOOT_COST.search(text)
-        upgrade_cost = self._LOOT_UPGRADE_COST.search(text)
+        normalized_text = "\n".join(
+            re.sub(r"[*_]", "", line) for line in self._lines(text)
+        )
+        loot_cost = self._LOOT_COST.search(normalized_text)
+        upgrade_cost = self._LOOT_UPGRADE_COST.search(normalized_text)
         if loot_cost is None or upgrade_cost is None:
             raise MudaeParseError("Expected a Mudae $infokl response with Kakeraloot cost details.")
         return KakeralootSettingsSnapshot(
@@ -1017,6 +1311,128 @@ class MudaeTextParser:
             quantity_quality_base_cost=self._number(upgrade_cost.group("base")),
             quantity_quality_level_increment=self._number(upgrade_cost.group("increment")),
         )
+
+    def parse_profile(self, text: str) -> ProfileSnapshot:
+        """Parse account progress totals from a copied `$profile` response."""
+        lines = [re.sub(r"\*", "", line) for line in self._lines(text)]
+
+        collection = next(
+            (re.search(
+                r"Collection size:\s*(?P<size>[\d,]+)\s*"
+                r"\((?P<female>\d+)%\s*:female:\s*"
+                r"(?P<male>\d+)%\s*:male:\s*\)",
+                line,
+                re.IGNORECASE,
+            ) for line in lines if "collection size:" in line.casefold()),
+            None,
+        )
+        pokedex = next(
+            (re.search(
+                r"Pok(?:é|e)dex:\s*(?P<count>[\d,]+)\s+Pok(?:é|e)mon(?P<items>.*)$",
+                line,
+                re.IGNORECASE,
+            ) for line in lines if "dex:" in line.casefold()),
+            None,
+        )
+        if pokedex is None:
+            pokedex = next(
+                (re.search(
+                    r"Pok.*?dex:\s*(?P<count>[\d,]+)\s+Pok.*?mon(?P<items>.*)$",
+                    line,
+                    re.IGNORECASE,
+                ) for line in lines if "dex:" in line.casefold()),
+                None,
+            )
+        mudapins = next(
+            (re.search(
+                r"Mudapins:\s*(?P<collected>[\d,]+)\s*/\s*(?P<total>[\d,]+)",
+                line,
+                re.IGNORECASE,
+            ) for line in lines if line.casefold().startswith("mudapins:")),
+            None,
+        )
+        kakera_balance = next(
+            (re.match(r"^(?P<value>[\d,]+)\s*:kakera:\s*$", line, re.IGNORECASE)
+             for line in lines if re.match(r"^[\d,]+\s*:kakera:", line, re.IGNORECASE)),
+            None,
+        )
+        keys_line = next(
+            (line for line in lines if line.casefold().startswith("keys:")),
+            None,
+        )
+        key_counts = {
+            marker.casefold(): self._number(value)
+            for value, marker in re.findall(
+                r"([\d,]+)\s*:([a-z]+key):", keys_line or "", re.IGNORECASE
+            )
+        }
+        sphere_stock = next(
+            (re.match(r"^(?P<value>[\d,]+)\s*:sp:\s*$", line, re.IGNORECASE)
+             for line in lines if re.match(r"^[\d,]+\s*:sp:\s*$", line, re.IGNORECASE)),
+            None,
+        )
+        if collection is None:
+            raise MudaeParseError("Expected a complete Mudae $profile response with account totals.")
+
+        def marker_counts(line: str, prefix: str) -> dict[str, int]:
+            return {
+                f":{marker}:": self._number(value)
+                for value, marker in re.findall(
+                    rf"([\d,]+)\s*x\s*:({prefix}[A-Za-z0-9_]*)\s*:", line, re.IGNORECASE
+                )
+            }
+
+        reacts_index = next((index for index, line in enumerate(lines) if line.casefold() == "reacts:"), None)
+        reacts = marker_counts(lines[reacts_index + 1], "kakera") if reacts_index is not None and reacts_index + 1 < len(lines) else {}
+        sphere_index = next(
+            (index for index, line in enumerate(lines) if re.match(r"^[\d,]+\s*:sp:\s*$", line, re.IGNORECASE)),
+            None,
+        )
+        spheres = marker_counts(lines[sphere_index + 1], "sp") if sphere_index is not None and sphere_index + 1 < len(lines) else {}
+        badge_line = next(
+            (line for line in reversed(lines) if any(
+                marker in line.casefold()
+                for marker in (":bronzeiv:", ":silveriv:", ":diamondiv:", ":diamondi:")
+            )),
+            "",
+        )
+        displayed_badges = tuple(f":{marker}:" for marker in re.findall(r":([A-Za-z0-9_]+):", badge_line))
+
+        return ProfileSnapshot(
+            profile_name=lines[0],
+            collection_size=self._number(collection.group("size")),
+            female_percent=int(collection.group("female")),
+            male_percent=int(collection.group("male")),
+            pokedex_count=self._number(pokedex.group("count")) if pokedex else None,
+            pokedex_pokemon=(
+                tuple(re.findall(r":([A-Za-z0-9_]+):", pokedex.group("items")))
+                if pokedex
+                else ()
+            ),
+            kakera_reacts=reacts,
+            mudapins_collected=(
+                self._number(mudapins.group("collected")) if mudapins else None
+            ),
+            mudapins_total=(self._number(mudapins.group("total")) if mudapins else None),
+            kakera_balance=(
+                self._number(kakera_balance.group("value")) if kakera_balance else None
+            ),
+            bronze_keys=key_counts.get("bronzekey", 0),
+            silver_keys=key_counts.get("silverkey", 0),
+            gold_keys=key_counts.get("goldkey", 0),
+            sphere_stock=(self._number(sphere_stock.group("value")) if sphere_stock else None),
+            spheres=spheres,
+            displayed_badges=displayed_badges,
+        )
+
+    def parse_mudapins(self, text: str) -> MudapinSnapshot:
+        """Parse a `$mp` inventory, including Mudae's empty response."""
+        if self._NO_MUDAPINS.search(text):
+            return MudapinSnapshot(pin_markers=())
+        markers = tuple(match.group(0) for match in self._MUDAPIN_MARKER.finditer(text))
+        if not markers:
+            raise MudaeParseError("Expected a Mudae `$mp` Mudapin inventory response.")
+        return MudapinSnapshot(pin_markers=markers)
 
     def parse_server_settings(self, text: str) -> ServerSettingsSnapshot:
         """Parse core server rules and retain all visible `$settings` options."""

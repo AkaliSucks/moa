@@ -32,6 +32,13 @@ class AutomaticImportService:
         kind = detected_kind or self._router.detect(raw_message).kind
         if kind == "unknown":
             raise ValueError("This message is not a supported Mudae import format.")
+        if kind in {"help", "tutorial"}:
+            label = "tutorial progress" if kind == "tutorial" else "help"
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=0,
+                message=f"Observed Mudae {label}; no catalog data imported.",
+            )
         if kind == "top":
             result = self._catalog.import_top_page(
                 self._parser.parse_top_page(raw_message),
@@ -46,6 +53,22 @@ class AutomaticImportService:
             )
 
         server = self._require(server_name, "server", kind)
+        transaction_commands = {
+            "gift_kakera": "givek",
+            "gift_spheres": "givesp",
+            "gift_character": "give",
+            "trade": "trade",
+        }
+        if kind in transaction_commands:
+            self._parser.parse_transaction(raw_message, kind)
+            self._catalog.import_command_observation(
+                transaction_commands[kind], raw_message, source
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=0,
+                message=f"Observed ${transaction_commands[kind]} transaction step; no catalog data imported.",
+            )
         if kind == "antidisable":
             account = self._require(account_name, "account", kind)
             page = self._parser.parse_antidisable_page(raw_message)
@@ -108,6 +131,71 @@ class AutomaticImportService:
                 imported_count=1,
                 message=f"Imported +{receipt.kakera_earned:,} Kakera for {result.account_name}.",
             )
+        if kind == "reaction_blocked":
+            blocked = self._parser.parse_kakera_reaction_blocked(raw_message)
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=0,
+                message=(
+                    f"Observed Kakera reaction cooldown for {blocked.account_name}: "
+                    f"{blocked.cooldown_minutes} min; no $ku snapshot imported."
+                ),
+            )
+        if kind == "claim":
+            account = self._require(account_name, "account", kind)
+            claim = self._parser.parse_claim_confirmation(raw_message)
+            if claim.account_name.casefold() != account.casefold():
+                raise ValueError(
+                    f"Claim confirmation is for {claim.account_name!r}, not configured account {account!r}."
+                )
+            result = self._catalog.import_claim(
+                claim, server, account, raw_message, source
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported claim: {claim.character_name} for {claim.account_name}.",
+            )
+        if kind == "divorce_prompt":
+            prompt = self._parser.parse_divorce_prompt(raw_message)
+            refund = (
+                f" (+{prompt.kakera_refund:,} Kakera refund)"
+                if prompt.kakera_refund is not None
+                else ""
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=0,
+                message=(
+                    f"Observed divorce confirmation for {prompt.character_name}{refund}; "
+                    "waiting for y/yes."
+                ),
+            )
+        if kind == "divorce_declined":
+            self._parser.parse_divorce_declined(raw_message)
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=0,
+                message="Observed declined divorce; no catalog data imported.",
+            )
+        if kind == "divorce_complete":
+            account = self._require(account_name, "account", kind)
+            divorce = self._parser.parse_divorce_confirmation(
+                raw_message, expected_account=account
+            )
+            result = self._catalog.import_divorce(
+                divorce, server, account, raw_message, source
+            )
+            refund = (
+                f" (+{divorce.kakera_refund:,} Kakera)"
+                if divorce.kakera_refund is not None
+                else ""
+            )
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported divorce: {divorce.character_name} for {account}{refund}.",
+            )
         if kind == "roll":
             account = self._require(account_name, "account", kind)
             roll = self._parser.parse_roll(raw_message)
@@ -120,18 +208,23 @@ class AutomaticImportService:
             return AutomaticImportResult(
                 kind=kind,
                 imported_count=1,
-                message=f"Imported roll observation{key_note}.",
+                message=f"Imported roll observation: {roll.name} / {roll.series}{key_note}.",
             )
         if kind == "im":
             account = account_name.strip() if account_name else None
+            details = self._parser.parse_character_details(raw_message)
             result = self._catalog.import_character_details(
-                self._parser.parse_character_details(raw_message),
+                details,
                 server,
                 raw_message,
                 source,
                 account,
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported one character profile.")
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported one character profile: {details.name} / {details.series}.",
+            )
         if kind == "settings":
             settings = self._parser.parse_server_settings(raw_message)
             self._catalog.import_server_settings(settings, server, raw_message, source)
@@ -141,6 +234,29 @@ class AutomaticImportService:
                 self._parser.parse_kakeraloot_settings(raw_message), server, raw_message, source
             )
             return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakeraloot configuration.")
+        if kind == "profile":
+            account = self._require(account_name, "account", kind)
+            profile = self._parser.parse_profile(raw_message)
+            self._catalog.import_profile(profile, server, account, raw_message, source)
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=1,
+                message=f"Imported profile snapshot for {profile.profile_name}.",
+            )
+        if kind == "mudapins":
+            account = self._require(account_name, "account", kind)
+            snapshot = self._parser.parse_mudapins(raw_message)
+            self._catalog.import_mudapins(snapshot, server, account, raw_message, source)
+            count = len(snapshot.pin_markers)
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=count,
+                message=(
+                    "Imported no Mudapins."
+                    if count == 0
+                    else f"Imported {count} Mudapin markers."
+                ),
+            )
 
         account = self._require(account_name, "account", kind)
         if kind == "bonus":
