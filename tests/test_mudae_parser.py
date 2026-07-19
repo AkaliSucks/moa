@@ -216,6 +216,24 @@ def test_parse_character_details_accepts_discord_custom_emojis_and_same_line_key
     assert character.key_count == 1
 
 
+def test_parse_character_details_rejoins_wrapped_series() -> None:
+    # Sanitized real Mudae payload with a wrapped $im series identity.
+    character = MudaeTextParser().parse_character_details(
+        "Mudae\n"
+        "Hestia\n"
+        "Dungeon ni Deai wo Motomeru no\n"
+        "wa Machigatteiru Darou ka :female:\n"
+        "Game & Animanga · 624 Kakera · Key (6)\n"
+        "Claim Rank: #150\n"
+        "Like Rank: #215"
+    )
+
+    assert character.name == "Hestia"
+    assert character.series == "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka"
+    assert character.roulette == "game & animanga"
+    assert character.key_count == 6
+
+
 def test_parse_im_layout_with_game_and_animanga_gender_and_no_key() -> None:
     character = MudaeTextParser().parse_character_details(
         "Hatsune Miku\n"
@@ -950,6 +968,58 @@ def test_parse_kakeraloot_state_accepts_live_custom_emoji_format() -> None:
     assert state.quality_level == 6
     assert state.usage_count == 256
     assert state.kakera_balance == 23965
+
+
+def test_parse_kakeraloot_state_accepts_animated_custom_emoji() -> None:
+    # Sanitized real Mudae payload using Discord's animated custom-emoji form.
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "sample-account - Kakeraloots\n"
+        "<a:disablemore:100001> $disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+        "<a:wishprotect:100002> Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+        "<a:mudapin:100003> Mudapins: 22 ($mp)\n"
+        "<a:rtcd:100004> $rt: -2h cooldown\n"
+        "<a:addroll:100005> +1 permanent roll\n"
+        "<a:sw:100006> 1 star branch (+0 $sw)\n\n"
+        "Quantity LVL 23\n"
+        "Quality LVL 6\n"
+        "$kl usage: 256 (<a:kakeraC:100007>+1)\n"
+        "23,965 <a:kakera:100008>"
+    )
+
+    assert state.quantity_level == 23
+    assert state.quality_level == 6
+    assert state.usage_count == 256
+    assert state.kakera_balance == 23965
+
+
+@pytest.mark.parametrize("missing_field", ["quantity", "quality", "usage", "kakera_balance"])
+def test_parse_kakeraloot_state_rejects_missing_required_core_field(missing_field: str) -> None:
+    # Each malformed case is derived from this sanitized real Mudae $lk payload.
+    core_lines = {
+        "quantity": "Quantity LVL 23",
+        "quality": "Quality LVL 6",
+        "usage": "$kl usage: 256 (:kakeraC:+1)",
+        "kakera_balance": "23,965:kakera:",
+    }
+    payload_lines = [
+        "sample-account - Kakeraloots",
+        "Rolls stacked: 1 ($us)",
+        "$disable limits: -102 $wa/$ha, -68 $wg/$hg",
+        "Protected wish: LVL 42 (spawn probability: 1/4,642)",
+        "Mudapins: 22 ($mp)",
+        "$rt: -2h cooldown",
+        "+1 permanent roll",
+        "1 star branch (+0 $sw)",
+    ]
+    payload_lines.extend(
+        line for field, line in core_lines.items() if field != missing_field
+    )
+
+    with pytest.raises(
+        MudaeParseError,
+        match=r"Expected a complete Mudae \$lk Kakeraloot stats response\.",
+    ):
+        MudaeTextParser().parse_kakeraloot_state("\n".join(payload_lines))
 
 
 def test_parse_sphere_result_reads_color_gains_total_and_stock() -> None:
