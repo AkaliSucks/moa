@@ -6,6 +6,8 @@ import pytest
 from moa.database.sqlite import connect
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.discord_message_repository import (
+    DiscordMessageProcessingConflictError,
+    DiscordMessageProcessingNotFoundError,
     DiscordMessageReceiveConflictError,
     DiscordMessageRepository,
 )
@@ -312,3 +314,458 @@ def test_restart_preserves_replay_identity_and_creates_no_attempt(tmp_path) -> N
     )
     assert second.delivery_count == 2
     assert counts(database_path)[3] == 0
+
+
+def test_begin_processing_attempt_creates_attempt_one_and_marks_event_processing(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    started_at = datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc)
+    lease_expires_at = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+
+    result = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=started_at,
+        lease_expires_at=lease_expires_at,
+    )
+
+    assert result.source_event_id == received.source_event_id
+    assert result.attempt_number == 1
+    assert result.attempt_status == "processing"
+    assert result.source_event_status == "processing"
+    assert result.retryable is False
+    assert result.started_at == started_at
+    assert result.finished_at is None
+    assert result.lease_expires_at == lease_expires_at
+    with connect(database_path) as connection:
+        event = connection.execute("SELECT * FROM discord_source_events").fetchone()
+        attempt = connection.execute("SELECT * FROM discord_processing_attempts").fetchone()
+    assert event["status"] == "processing"
+    assert attempt["attempt_number"] == 1
+    assert attempt["retryable"] == 0
+    assert attempt["finished_at"] is None
+    assert attempt["parser_version"] == "parser-1"
+    assert attempt["router_version"] == "router-1"
+
+
+def test_successful_completion_updates_both_rows_and_links_valid_import_event(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    started_at = datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc)
+    finished_at = datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=started_at,
+    )
+    with connect(database_path) as connection:
+        import_event_id = int(
+            connection.execute(
+                """
+                INSERT INTO import_events (kind, source, observed_at, raw_message)
+                VALUES ('test', 'test', ?, 'test')
+                """,
+                (finished_at.isoformat(),),
+            ).lastrowid
+        )
+
+    result = repository.mark_processing_success(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        finished_at=finished_at,
+        legacy_import_event_id=import_event_id,
+    )
+
+    assert result.attempt_status == "succeeded"
+    assert result.source_event_status == "succeeded"
+    assert result.finished_at == finished_at
+    assert result.legacy_import_event_id == import_event_id
+    with connect(database_path) as connection:
+        event = connection.execute("SELECT * FROM discord_source_events").fetchone()
+        row = connection.execute("SELECT * FROM discord_processing_attempts").fetchone()
+    assert event["status"] == "succeeded"
+    assert event["legacy_import_event_id"] == import_event_id
+    assert row["status"] == "succeeded"
+    assert row["finished_at"] == finished_at.isoformat()
+    assert row["retryable"] == 0
+
+
+def test_failed_completion_stores_details_and_marks_event_failed(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    finished_at = datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc)
+
+    result = repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="failed",
+        retryable=True,
+        failure_code="parser_error",
+        failure_detail="malformed payload",
+        finished_at=finished_at,
+    )
+
+    assert result.attempt_status == "failed"
+    assert result.source_event_status == "failed"
+    assert result.retryable is True
+    assert result.failure_code == "parser_error"
+    assert result.failure_detail == "malformed payload"
+    with connect(database_path) as connection:
+        event_status = connection.execute("SELECT status FROM discord_source_events").fetchone()[0]
+        row = connection.execute("SELECT * FROM discord_processing_attempts").fetchone()
+    assert event_status == "failed"
+    assert row["status"] == "failed"
+    assert row["retryable"] == 1
+    assert row["finished_at"] == finished_at.isoformat()
+
+
+def test_unresolved_attribution_marks_both_rows(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+
+    result = repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="unresolved_attribution",
+        retryable=False,
+        failure_code="ambiguous_account",
+        failure_detail=None,
+        finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert result.attempt_status == "unresolved_attribution"
+    assert result.source_event_status == "unresolved_attribution"
+    assert result.retryable is False
+    with connect(database_path) as connection:
+        statuses = connection.execute(
+            "SELECT status FROM discord_source_events UNION ALL "
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchall()
+    assert [row[0] for row in statuses] == ["unresolved_attribution", "unresolved_attribution"]
+
+
+def test_retryable_failure_allows_attempt_two_but_nonretryable_failure_does_not(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    first = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=first.attempt_id,
+        status="failed",
+        retryable=True,
+        failure_code="temporary",
+        failure_detail=None,
+        finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+    second = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-2",
+        router_version="router-2",
+        started_at=datetime(2026, 7, 18, 2, 2, tzinfo=timezone.utc),
+    )
+    assert second.attempt_number == 2
+    repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=second.attempt_id,
+        status="failed",
+        retryable=False,
+        failure_code="permanent",
+        failure_detail=None,
+        finished_at=datetime(2026, 7, 18, 2, 3, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(DiscordMessageProcessingConflictError):
+        repository.begin_processing_attempt(
+            source_event_id=received.source_event_id,
+            parser_version="parser-3",
+            router_version="router-3",
+            started_at=datetime(2026, 7, 18, 2, 4, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 2
+
+
+def test_active_processing_and_terminal_success_reject_begin_without_duplicate_attempts(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    first = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(DiscordMessageProcessingConflictError):
+        repository.begin_processing_attempt(
+            source_event_id=received.source_event_id,
+            parser_version="parser-2",
+            router_version="router-2",
+            started_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+        )
+    assert counts(database_path)[3] == 1
+    repository.mark_processing_success(
+        source_event_id=received.source_event_id,
+        attempt_id=first.attempt_id,
+        finished_at=datetime(2026, 7, 18, 2, 2, tzinfo=timezone.utc),
+    )
+    with pytest.raises(DiscordMessageProcessingConflictError):
+        repository.begin_processing_attempt(
+            source_event_id=received.source_event_id,
+            parser_version="parser-3",
+            router_version="router-3",
+            started_at=datetime(2026, 7, 18, 2, 3, tzinfo=timezone.utc),
+        )
+    assert counts(database_path)[3] == 1
+
+
+def test_attempt_ownership_and_double_completion_are_rejected(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first = receive(repository)
+    second_message = aggregate(message_id="message-2")
+    second = receive(
+        repository,
+        message=second_message,
+        message_revision=revision(second_message),
+        event_key="event-2",
+    )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=first.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    finished_at = datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(DiscordMessageProcessingConflictError):
+        repository.mark_processing_success(
+            source_event_id=second.source_event_id,
+            attempt_id=attempt.attempt_id,
+            finished_at=finished_at,
+        )
+    repository.mark_processing_success(
+        source_event_id=first.source_event_id,
+        attempt_id=attempt.attempt_id,
+        finished_at=finished_at,
+    )
+    with pytest.raises(DiscordMessageProcessingConflictError):
+        repository.mark_processing_success(
+            source_event_id=first.source_event_id,
+            attempt_id=attempt.attempt_id,
+            finished_at=datetime(2026, 7, 18, 2, 2, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT status FROM discord_source_events ORDER BY id"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["succeeded", "received"]
+
+
+@pytest.mark.parametrize("field", ["parser_version", "router_version"])
+def test_blank_processing_versions_are_rejected(tmp_path, field: str) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    values = {
+        "source_event_id": received.source_event_id,
+        "parser_version": "parser-1",
+        "router_version": "router-1",
+        "started_at": datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    }
+    values[field] = "  "
+
+    with pytest.raises(ValueError, match="must not be blank"):
+        repository.begin_processing_attempt(**values)
+    assert counts(database_path)[3] == 0
+
+
+def test_processing_validation_rejects_naive_times_invalid_failure_status_and_early_finish(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    with pytest.raises(ValueError, match="timezone-aware"):
+        repository.begin_processing_attempt(
+            source_event_id=received.source_event_id,
+            parser_version="parser-1",
+            router_version="router-1",
+            started_at=datetime(2026, 7, 18, 2, 0),
+        )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    with pytest.raises(ValueError, match="failed.*unresolved"):
+        repository.mark_processing_failure(
+            source_event_id=received.source_event_id,
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            retryable=False,
+            failure_code=None,
+            failure_detail=None,
+            finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+        )
+    with pytest.raises(ValueError, match="earlier"):
+        repository.mark_processing_success(
+            source_event_id=received.source_event_id,
+            attempt_id=attempt.attempt_id,
+            finished_at=datetime(2026, 7, 18, 1, 59, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        event = connection.execute("SELECT status FROM discord_source_events").fetchone()[0]
+        status = connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0]
+    assert event == "processing"
+    assert status == "processing"
+
+
+def test_nonexistent_legacy_import_event_does_not_complete_attempt(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(DiscordMessageProcessingNotFoundError):
+        repository.mark_processing_success(
+            source_event_id=received.source_event_id,
+            attempt_id=attempt.attempt_id,
+            finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+            legacy_import_event_id=999,
+        )
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT status FROM discord_source_events").fetchone()[0] == "processing"
+        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "processing"
+
+
+def test_begin_mid_transaction_failure_rolls_back_attempt_and_event_status(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_processing_event_update
+            BEFORE UPDATE OF status ON discord_source_events
+            WHEN NEW.status = 'processing'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced begin failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced begin failure"):
+        repository.begin_processing_attempt(
+            source_event_id=received.source_event_id,
+            parser_version="parser-1",
+            router_version="router-1",
+            started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+        )
+    assert counts(database_path)[3] == 0
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT status FROM discord_source_events").fetchone()[0] == "received"
+
+
+@pytest.mark.parametrize("completion", ["success", "failure"])
+def test_completion_mid_transaction_failure_rolls_back_both_rows(tmp_path, completion: str) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_completion_event_update
+            BEFORE UPDATE OF status ON discord_source_events
+            WHEN NEW.status IN ('succeeded', 'failed')
+            BEGIN
+                SELECT RAISE(ABORT, 'forced completion failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced completion failure"):
+        if completion == "success":
+            repository.mark_processing_success(
+                source_event_id=received.source_event_id,
+                attempt_id=attempt.attempt_id,
+                finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+            )
+        else:
+            repository.mark_processing_failure(
+                source_event_id=received.source_event_id,
+                attempt_id=attempt.attempt_id,
+                status="failed",
+                retryable=True,
+                failure_code="temporary",
+                failure_detail="failure",
+                finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+            )
+    with connect(database_path) as connection:
+        event = connection.execute("SELECT status FROM discord_source_events").fetchone()[0]
+        row = connection.execute("SELECT status, finished_at FROM discord_processing_attempts").fetchone()
+    assert event == "processing"
+    assert row["status"] == "processing"
+    assert row["finished_at"] is None
+
+
+def test_processing_lifecycle_survives_repository_reconstruction(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    received = receive(first_repository)
+    attempt = first_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+
+    restarted_repository = DiscordMessageRepository(database_path)
+    result = restarted_repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="failed",
+        retryable=True,
+        failure_code="after_restart",
+        failure_detail="durable",
+        finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert result.attempt_number == 1
+    assert result.attempt_status == "failed"
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
