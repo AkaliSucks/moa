@@ -1,6 +1,7 @@
 import asyncio
+import logging
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -1248,7 +1249,12 @@ def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
     assert events[0]["event_kind"] == "message_revision"
     assert events[0]["delivery_count"] == 1
     assert revisions[0]["source_observed_at"] is None
-    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["attempt_number"] == 1
+    assert attempts[0]["status"] == "succeeded"
+    assert attempts[0]["parser_version"] == "mudae-parser-v1"
+    assert attempts[0]["router_version"] == "mudae-router-v1"
 
 
 def test_listener_receives_edit_as_new_revision_under_same_aggregate(tmp_path) -> None:
@@ -1275,6 +1281,9 @@ def test_listener_receives_edit_as_new_revision_under_same_aggregate(tmp_path) -
         "message_revision",
         "message_revision",
     ]
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 1]
+    assert [attempt["status"] for attempt in attempts] == ["succeeded", "succeeded"]
 
 
 def test_listener_duplicate_delivery_updates_receipt_but_stays_process_local_suppressed(
@@ -1297,6 +1306,9 @@ def test_listener_duplicate_delivery_updates_receipt_but_stays_process_local_sup
     assert events[0]["delivery_count"] == 2
     assert len(_receipt_rows(database_path, "discord_message_revisions")) == 1
     assert len(_import_event_rows(database_path, "roll")) == 1
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "succeeded"
 
 
 def test_listener_receives_duplicate_before_seen_payload_suppression(tmp_path) -> None:
@@ -1357,7 +1369,7 @@ def test_listener_restart_replay_is_not_treated_as_projection_idempotent(tmp_pat
     asyncio.run(restarted_listener.handle_bot_response(message))
 
     importer.import_message.assert_called_once()
-    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "received"
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
 
 
 def test_listener_ignored_bot_message_does_not_create_durable_rows(tmp_path) -> None:
@@ -1519,11 +1531,254 @@ def test_listener_create_and_edit_callbacks_use_message_revision_event_kind(tmp_
     ]
 
 
-def test_listener_receipt_does_not_create_processing_attempts(tmp_path) -> None:
+def test_listener_receipt_creates_processing_attempt_after_deduplication(tmp_path) -> None:
     listener, _repository, database_path = _durable_listener(tmp_path)
 
     asyncio.run(listener.handle_bot_response(_durable_roll_message()))
 
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "succeeded"
+
+
+def test_listener_zero_projection_observation_still_succeeds(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="observed without projections")
+    listener, _repository, database_path = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    importer.import_message.assert_called_once()
+    assert _import_event_rows(database_path, "roll") == []
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+
+
+def test_listener_downstream_exception_records_retryable_failure(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.side_effect = ValueError("importer exploded")
+    listener, _repository, database_path = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "failed"
+    assert attempt["retryable"] == 1
+    assert attempt["failure_code"] == "downstream_processing_error"
+    assert attempt["failure_detail"] == "importer exploded"
+    assert event["status"] == "failed"
+
+
+def test_listener_retryable_failure_replay_creates_attempt_two(tmp_path) -> None:
+    first_importer = Mock()
+    first_importer.import_message.side_effect = RuntimeError("temporary importer failure")
+    first_listener, _repository, database_path = _durable_listener(
+        tmp_path, importer=first_importer
+    )
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    second_importer = Mock()
+    second_importer.import_message.return_value = SimpleNamespace(message="replayed")
+    second_listener = DiscordListenerService(
+        config_service=ConfigService(tmp_path / "config.json"),
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=second_importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    second_listener._mudae_user_id = 999
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+    second_importer.import_message.assert_called_once()
+
+
+def test_listener_same_process_duplicate_creates_no_new_attempt(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    events = _receipt_rows(database_path, "discord_source_events")
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "succeeded"
+    assert events[0]["delivery_count"] == 2
+
+
+def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="replayed")
+    restarted_listener = DiscordListenerService(
+        config_service=ConfigService(tmp_path / "config.json"),
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    restarted_listener._mudae_user_id = 999
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    importer.import_message.assert_called_once()
+
+
+def test_listener_nonretryable_replay_replays_without_new_attempt(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.side_effect = RuntimeError("first failure")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    message = _durable_roll_message()
+    asyncio.run(listener.handle_bot_response(message))
+
+    started_at = datetime.now(timezone.utc)
+    active = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=started_at,
+    )
+    repository.mark_processing_failure(
+        source_event_id=1,
+        attempt_id=active.attempt_id,
+        status="failed",
+        retryable=False,
+        failure_code="terminal_test_failure",
+        failure_detail="terminal test failure",
+        finished_at=started_at + timedelta(microseconds=1),
+    )
+
+    replay_importer = Mock()
+    replay_importer.import_message.return_value = SimpleNamespace(message="replayed")
+    replay_listener = DiscordListenerService(
+        config_service=ConfigService(tmp_path / "config.json"),
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=replay_importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    replay_listener._mudae_user_id = 999
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert len(attempts) == 2
+    assert attempts[-1]["status"] == "failed"
+    assert attempts[-1]["retryable"] == 0
+    assert event["status"] == "failed"
+    replay_importer.import_message.assert_called_once()
+
+
+def test_listener_active_processing_replay_does_not_complete_or_start_attempt(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.side_effect = RuntimeError("first failure")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    message = _durable_roll_message()
+    asyncio.run(listener.handle_bot_response(message))
+
+    active = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    replay_importer = Mock()
+    replay_importer.import_message.return_value = SimpleNamespace(message="replayed")
+    replay_listener = DiscordListenerService(
+        config_service=ConfigService(tmp_path / "config.json"),
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=replay_importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    replay_listener._mudae_user_id = 999
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert len(attempts) == 2
+    assert attempts[-1]["id"] == active.attempt_id
+    assert attempts[-1]["status"] == "processing"
+    assert event["status"] == "processing"
+    replay_importer.import_message.assert_called_once()
+
+
+def test_listener_begin_persistence_failure_prevents_downstream_work(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="should not run")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    repository.begin_processing_attempt = Mock(side_effect=RuntimeError("begin unavailable"))
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "received"
+
+
+def test_listener_success_completion_failure_is_not_reported_as_success(tmp_path, caplog) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.mark_processing_success = Mock(side_effect=RuntimeError("success persistence failed"))
+    caplog.set_level(logging.ERROR, logger="moa.discord")
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "processing"
+    assert event["status"] == "processing"
+    assert "lifecycle state was not reported as successful" in caplog.text
+
+
+def test_listener_failure_completion_failure_preserves_original_processing_error(
+    tmp_path, caplog
+) -> None:
+    importer = Mock()
+    importer.import_message.side_effect = ValueError("original processing error")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    repository.mark_processing_failure = Mock(side_effect=RuntimeError("failure persistence failed"))
+    caplog.set_level(logging.WARNING, logger="moa.discord")
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "processing"
+    assert event["status"] == "processing"
+    assert "original processing error" in caplog.text
+    assert "failure persistence failed" in caplog.text
+
+
+def test_listener_early_attribution_return_creates_no_attempt(tmp_path) -> None:
+    listener, _catalog = _listener_with_two_configured_users(tmp_path)
+    listener._mudae_user_id = 999
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _receipt_rows(tmp_path / "catalog.db", "discord_source_events")
+    assert _receipt_rows(tmp_path / "catalog.db", "discord_processing_attempts") == []
+
+
+def test_listener_early_classification_return_creates_no_attempt(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message(content="This is not a Mudae response")
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _receipt_rows(database_path, "discord_source_events")
     assert _receipt_rows(database_path, "discord_processing_attempts") == []
 
 
@@ -1561,6 +1816,7 @@ def test_listener_characterizes_reaction_acknowledgement_identity_and_attributio
     assert state is not None
     assert state.personal_rare_multiplier == 2
     assert catalog.personal_rare("Test Server", "user_b") is None
+    assert _receipt_rows(tmp_path / "catalog.db", "discord_processing_attempts") == []
 
 
 def test_listener_replay_after_restart_creates_a_second_projection(
