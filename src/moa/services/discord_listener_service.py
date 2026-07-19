@@ -85,6 +85,7 @@ class DiscordListenerService:
         self._status_text = self._normalize_status_text(status_text)
         self._logger = logger or logging.getLogger("moa.discord")
         self._contexts: dict[int, DiscordCommandContext] = {}
+        self._pending_contexts: dict[tuple[str, int, str], DiscordCommandContext] = {}
         self._command_contexts: dict[int, DiscordCommandContext] = {}
         self._scan_ids: dict[tuple[str, str, str], int] = {}
         self._scan_contexts: dict[tuple[int, int, str], DiscordCommandContext] = {}
@@ -180,7 +181,6 @@ class DiscordListenerService:
             return
         expected_kind = self._expected_kind_for_command(command)
         if expected_kind is None:
-            self._contexts.pop(message.channel.id, None)
             self._logger.info(
                 "Ignoring unsupported Discord command %s from account %s on server %s",
                 command,
@@ -205,7 +205,7 @@ class DiscordListenerService:
                 else False
             ),
         )
-        self._contexts[message.channel.id] = context
+        self._remember_context(message.channel.id, context)
         self._command_contexts[message.id] = context
         if len(self._command_contexts) > 2000:
             self._command_contexts = dict(list(self._command_contexts.items())[-1000:])
@@ -244,13 +244,14 @@ class DiscordListenerService:
                 identity.server,
             )
             return
-        self._contexts[int(channel_id)] = DiscordCommandContext(
+        context = DiscordCommandContext(
             server_id=str(guild_id),
             user_id=str(user.id),
             identity=identity,
             captured_at=time.monotonic(),
             expected_kind=expected_kind,
         )
+        self._remember_context(int(channel_id), context)
         self._logger.info(
             "Tracking Discord interaction /%s for %s / %s",
             command,
@@ -450,9 +451,7 @@ class DiscordListenerService:
         if context is None:
             context = self._context_from_reaction_receipt(message, raw_message)
         if context is None:
-            existing = self._contexts.get(message.channel.id)
-            if existing is not None and time.monotonic() - existing.captured_at <= self._CONTEXT_TTL_SECONDS:
-                context = existing
+            context = self._context_from_pending_workflow(message, raw_message)
         if context is None:
             context = self._context_from_active_roll(message, raw_message)
         if context is None:
@@ -597,13 +596,12 @@ class DiscordListenerService:
             message.id,
             result.message,
         )
-        if kind == "divorce_declined" and self._contexts.get(message.channel.id) is context:
-            self._contexts.pop(message.channel.id, None)
-        if kind == "divorce_complete" and self._contexts.get(message.channel.id) is context:
-            self._contexts.pop(message.channel.id, None)
+        if kind == "divorce_declined" or kind == "divorce_complete":
+            self._consume_context(message.channel.id, context)
         if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
-            if self._contexts.get(message.channel.id) is context:
-                self._contexts.pop(message.channel.id, None)
+            self._consume_context(message.channel.id, context)
+        elif context.expected_kind not in {"divorce", "divorce_confirmation", *self._SCAN_KINDS}:
+            self._consume_context(message.channel.id, context)
         self._complete_scan_if_last_page(
             kind,
             raw_message,
@@ -640,6 +638,87 @@ class DiscordListenerService:
             self._scan_contexts.pop(key, None)
             return None
         return context
+
+    def _remember_context(self, channel_id: int, context: DiscordCommandContext) -> None:
+        """Track a workflow by its initiating user without replacing another user's view."""
+        key = (context.server_id, int(channel_id), context.user_id)
+        self._pending_contexts[key] = context
+        existing = self._contexts.get(int(channel_id))
+        if (
+            existing is None
+            or existing.user_id == context.user_id
+            or time.monotonic() - existing.captured_at > self._CONTEXT_TTL_SECONDS
+        ):
+            self._contexts[int(channel_id)] = context
+
+    def _pending_context_for_user(
+        self,
+        channel_id: int,
+        server_id: str,
+        user_id: str,
+    ) -> DiscordCommandContext | None:
+        """Return the live workflow owned by one Discord user in one channel."""
+        key = (server_id, int(channel_id), user_id)
+        context = self._pending_contexts.get(key)
+        if context is None:
+            return None
+        if time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
+            self._pending_contexts.pop(key, None)
+            if self._contexts.get(int(channel_id)) is context:
+                self._contexts.pop(int(channel_id), None)
+            return None
+        return context
+
+    def _context_from_pending_workflow(
+        self,
+        message: discord.Message,
+        raw_message: str,
+    ) -> DiscordCommandContext | None:
+        """Select one compatible pending workflow, preserving ambiguity as unresolved."""
+        now = time.monotonic()
+        candidates: list[DiscordCommandContext] = []
+        for key, context in list(self._pending_contexts.items()):
+            if key[:2] != (str(message.guild.id), int(message.channel.id)):
+                continue
+            if now - context.captured_at > self._CONTEXT_TTL_SECONDS:
+                self._pending_contexts.pop(key, None)
+                if self._contexts.get(message.channel.id) is context:
+                    self._contexts.pop(message.channel.id, None)
+                continue
+            candidates.append(context)
+        if not candidates:
+            return None
+        compatible = [
+            context
+            for context in candidates
+            if self._resolve_message_kind(context.expected_kind, raw_message) is not None
+        ]
+        if len(compatible) == 1:
+            return compatible[0]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
+    def _consume_context(self, channel_id: int, context: DiscordCommandContext) -> None:
+        """Retire one completed workflow and promote another owner if present."""
+        key = (context.server_id, int(channel_id), context.user_id)
+        if self._pending_contexts.get(key) is context:
+            self._pending_contexts.pop(key, None)
+        if self._contexts.get(int(channel_id)) is not context:
+            return
+        replacement = max(
+            (
+                candidate
+                for pending_key, candidate in self._pending_contexts.items()
+                if pending_key[:2] == (context.server_id, int(channel_id))
+            ),
+            key=lambda candidate: candidate.captured_at,
+            default=None,
+        )
+        if replacement is None:
+            self._contexts.pop(int(channel_id), None)
+        else:
+            self._contexts[int(channel_id)] = replacement
 
     def _warn_once_for_unattributed_roll(self, message: discord.Message) -> None:
         """Avoid flooding the console when untagged roll responses arrive in a busy channel."""
@@ -738,7 +817,7 @@ class DiscordListenerService:
         identity = self._identity_for_ids(str(message.guild.id), str(user.id))
         if identity is None:
             return None
-        existing = self._contexts.get(message.channel.id)
+        existing = self._pending_context_for_user(message.channel.id, str(message.guild.id), str(user.id))
         if command_name is None:
             detected_kind = self._router.detect(raw_message).kind if raw_message else "unknown"
             # Some follow-up Mudae messages carry interaction metadata without
@@ -762,7 +841,7 @@ class DiscordListenerService:
                 captured_at=time.monotonic(),
                 expected_kind=expected_kind,
             )
-            self._contexts[message.channel.id] = context
+            self._remember_context(message.channel.id, context)
             self._logger.info(
                 "Attributed Mudae response %s to %s / %s via interaction metadata; "
                 "command name was unavailable",
@@ -793,7 +872,7 @@ class DiscordListenerService:
             captured_at=time.monotonic(),
             expected_kind=expected_kind,
         )
-        self._contexts[message.channel.id] = context
+        self._remember_context(message.channel.id, context)
         self._logger.info(
             "Tracking Discord interaction /%s for %s / %s",
             command_name or "unknown",
@@ -1160,7 +1239,11 @@ class DiscordListenerService:
         answer = content.casefold().strip()
         if answer not in {"y", "yes", "n", "no"}:
             return False
-        existing = self._contexts.get(message.channel.id)
+        existing = self._pending_context_for_user(
+            message.channel.id,
+            str(message.guild.id),
+            str(message.author.id),
+        )
         if (
             existing is None
             or existing.expected_kind not in {"divorce", "divorce_confirmation"}
@@ -1169,22 +1252,22 @@ class DiscordListenerService:
         ):
             return False
         if answer in {"n", "no"}:
-            self._contexts[message.channel.id] = replace(
+            self._remember_context(message.channel.id, replace(
                 existing,
                 captured_at=time.monotonic(),
                 expected_kind="divorce_confirmation",
-            )
+            ))
             self._logger.info(
                 "Tracking declined divorce confirmation for %s in %s",
                 identity.account,
                 identity.server,
             )
             return True
-        self._contexts[message.channel.id] = replace(
+        self._remember_context(message.channel.id, replace(
             existing,
             captured_at=time.monotonic(),
             expected_kind="divorce_confirmation",
-        )
+        ))
         self._logger.info(
             "Tracking divorce confirmation %s for %s / %s",
             answer,
@@ -1200,7 +1283,11 @@ class DiscordListenerService:
         content: str,
     ) -> bool:
         """Keep a gift/trade flow linked across plain-text follow-up messages."""
-        existing = self._contexts.get(message.channel.id)
+        existing = self._pending_context_for_user(
+            message.channel.id,
+            str(message.guild.id),
+            str(message.author.id),
+        )
         transaction_kinds = {"gift_kakera", "gift_spheres", "gift_character", "trade"}
         if (
             existing is None
@@ -1212,7 +1299,10 @@ class DiscordListenerService:
             return False
         if not content.strip():
             return False
-        self._contexts[message.channel.id] = replace(existing, captured_at=time.monotonic())
+        self._remember_context(
+            message.channel.id,
+            replace(existing, captured_at=time.monotonic()),
+        )
         self._logger.info(
             "Tracking %s follow-up from account %s on server %s",
             existing.expected_kind,
