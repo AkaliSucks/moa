@@ -123,6 +123,164 @@ def test_listener_ignores_unsupported_commands_without_creating_context(tmp_path
     assert 789 not in listener._contexts
 
 
+def _listener_with_two_configured_users(tmp_path):
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    config.add_account(
+        "Test Server",
+        "user_b",
+        role="alt",
+        discord_server_id="123",
+        discord_user_id="789",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    return DiscordListenerService(config_service=config, catalog_service=catalog), catalog
+
+
+def test_listener_tracks_interleaved_prefix_commands_from_two_users(tmp_path) -> None:
+    listener, _catalog = _listener_with_two_configured_users(tmp_path)
+    command_a = SimpleNamespace(
+        id=100,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="$wa",
+    )
+    command_b = SimpleNamespace(
+        id=101,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$k",
+    )
+
+    asyncio.run(listener.handle_message(command_a))
+    asyncio.run(listener.handle_message(command_b))
+
+    assert listener._command_contexts[100].identity.account == "user_a"
+    assert listener._command_contexts[101].identity.account == "user_b"
+    assert listener._contexts[900].identity.account == "user_a"
+
+
+def test_listener_does_not_replace_user_a_pending_workflow_with_user_b_command(tmp_path) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    command_a = SimpleNamespace(
+        id=100,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="$wa",
+    )
+    command_b = SimpleNamespace(
+        id=101,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$k",
+    )
+    response = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        content=(
+            "Berry (YD)\nYurei Deco\n28:kakera:\n"
+            "Berry (YD) / Yurei Deco - 28 ka"
+        ),
+        embeds=(),
+    )
+
+    asyncio.run(listener.handle_message(command_a))
+    asyncio.run(listener.handle_message(command_b))
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert len(catalog.recent_rolls("Test Server", "user_a", 1)) == 1
+    assert catalog.recent_rolls("Test Server", "user_b", 1) == ()
+
+
+def test_listener_does_not_clear_user_a_pending_workflow_for_user_b_unsupported_command(
+    tmp_path,
+) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    command_a = SimpleNamespace(
+        id=100,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="$wa",
+    )
+    command_b = SimpleNamespace(
+        id=101,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$unsupported",
+    )
+    response = SimpleNamespace(
+        id=200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        content=(
+            "Berry (YD)\nYurei Deco\n28:kakera:\n"
+            "Berry (YD) / Yurei Deco - 28 ka"
+        ),
+        embeds=(),
+    )
+
+    asyncio.run(listener.handle_message(command_a))
+    asyncio.run(listener.handle_message(command_b))
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert len(catalog.recent_rolls("Test Server", "user_a", 1)) == 1
+    assert catalog.recent_rolls("Test Server", "user_b", 1) == ()
+
+
+def test_listener_keeps_paginated_response_with_initiating_user_after_user_b_command(
+    tmp_path,
+) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+
+    def user_message(message_id: int, user_id: int, content: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            guild=SimpleNamespace(id=123),
+            channel=SimpleNamespace(id=900),
+            author=SimpleNamespace(bot=False, id=user_id),
+            content=content,
+        )
+
+    def mudae_message(message_id: int, content: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            guild=SimpleNamespace(id=123),
+            channel=SimpleNamespace(id=900),
+            author=SimpleNamespace(bot=True, id=999),
+            content=content,
+            embeds=(),
+        )
+
+    page_one = "user_a's harem\nAlbedo · :goldkey: (7) 1,453 ka\nPage 1 / 2"
+    page_two = "user_a's harem\nMiku Nakano · :silverkey: (6) 874 ka\nPage 2 / 2"
+
+    asyncio.run(listener.handle_message(user_message(100, 456, "$mmy")))
+    asyncio.run(listener.handle_bot_response(mudae_message(200, page_one)))
+    scan_id = next(iter(listener._scan_ids.values()))
+
+    asyncio.run(listener.handle_message(user_message(101, 789, "$wa")))
+    asyncio.run(listener.handle_bot_response(mudae_message(200, page_two)))
+
+    progress = catalog.harem_scan_progress(scan_id)
+    assert progress is not None
+    assert progress.imported_pages == (1, 2)
+    assert progress.completed_at is not None
+
+
 def test_listener_tracks_configured_slash_interaction_before_mudae_response(tmp_path) -> None:
     config = ConfigService(tmp_path / "config.json")
     config.add_account(
