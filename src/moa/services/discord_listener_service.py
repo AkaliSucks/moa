@@ -16,7 +16,12 @@ from moa.core.config import ConfigAccount, ConfigService
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.models.discord_message_mapping import build_message_receive_envelope
-from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.discord_message_repository import (
+    DiscordMessageProcessingConflictError,
+    DiscordMessageProcessingError,
+    DiscordMessageRepository,
+    ReceivedMessageEvent,
+)
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 
@@ -41,6 +46,8 @@ class DiscordListenerService:
     _UNATTRIBUTED_ROLL_WARNING_TTL_SECONDS = 300.0
     _DEFAULT_STATUS_TEXT = "Testing commands"
     _MAX_STATUS_LENGTH = 128
+    _PARSER_VERSION = "mudae-parser-v1"
+    _ROUTER_VERSION = "mudae-router-v1"
     _SCAN_KINDS = {
         "harem": "keys",
         "ranked_harem": "owned",
@@ -450,7 +457,8 @@ class DiscordListenerService:
         raw_message = self.extract_message_text(message)
         if not raw_message:
             return
-        if not self._receive_message(message, raw_message):
+        received_event = self._receive_message(message, raw_message)
+        if self._discord_message_repository is not None and received_event is None:
             return
         self._message_cache[message.id] = message
         if len(self._message_cache) > 2000:
@@ -571,6 +579,40 @@ class DiscordListenerService:
         if len(self._seen_payloads) > 2000:
             self._seen_payloads = set(list(self._seen_payloads)[-1000:])
 
+        processing_attempt = None
+        if received_event is not None:
+            try:
+                processing_attempt = self._discord_message_repository.begin_processing_attempt(
+                    source_event_id=received_event.source_event_id,
+                    parser_version=self._PARSER_VERSION,
+                    router_version=self._ROUTER_VERSION,
+                    started_at=datetime.now(timezone.utc),
+                )
+            except DiscordMessageProcessingConflictError as error:
+                # Succeeded, terminal-failure, and active-processing replays retain
+                # their durable lifecycle state while preserving existing replay behavior.
+                self._logger.info(
+                    "Did not begin a Discord processing attempt for source event %s: %s",
+                    received_event.source_event_id,
+                    error,
+                )
+            except DiscordMessageProcessingError as error:
+                self._logger.warning(
+                    "Could not begin Discord processing for source event %s; "
+                    "downstream processing was not started: %s",
+                    received_event.source_event_id,
+                    error,
+                )
+                return
+            except Exception as error:
+                self._logger.warning(
+                    "Could not begin Discord processing for source event %s; "
+                    "downstream processing was not started: %s",
+                    received_event.source_event_id,
+                    error,
+                )
+                return
+
         self._logger.info(
             "Detected Mudae %s message %s for %s / %s",
             kind,
@@ -579,21 +621,21 @@ class DiscordListenerService:
             import_identity.account,
         )
 
-        scan_id = self._scan_id_for_page(
-            kind,
-            raw_message,
-            import_identity,
-        )
-        if kind in self._SCAN_KINDS:
-            self._scan_contexts[(int(message.guild.id), int(message.channel.id), kind)] = replace(
-                context,
-                expected_kind=kind,
-                captured_at=time.monotonic(),
-            )
-        source = (
-            f"discord:guild={message.guild.id}:channel={message.channel.id}:message={message.id}"
-        )
         try:
+            scan_id = self._scan_id_for_page(
+                kind,
+                raw_message,
+                import_identity,
+            )
+            if kind in self._SCAN_KINDS:
+                self._scan_contexts[(int(message.guild.id), int(message.channel.id), kind)] = replace(
+                    context,
+                    expected_kind=kind,
+                    captured_at=time.monotonic(),
+                )
+            source = (
+                f"discord:guild={message.guild.id}:channel={message.channel.id}:message={message.id}"
+            )
             result = self._importer.import_message(
                 raw_message,
                 source,
@@ -602,32 +644,49 @@ class DiscordListenerService:
                 harem_scan_id=scan_id,
                 detected_kind=kind,
             )
+            self._logger.info(
+                "Imported Discord Mudae message %s: %s",
+                message.id,
+                result.message,
+            )
+            if kind == "divorce_declined" or kind == "divorce_complete":
+                self._consume_context(message.channel.id, context)
+            if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
+                self._consume_context(message.channel.id, context)
+            elif context.expected_kind not in {"divorce", "divorce_confirmation", *self._SCAN_KINDS}:
+                self._consume_context(message.channel.id, context)
+            self._complete_scan_if_last_page(
+                kind,
+                raw_message,
+                import_identity,
+                scan_id,
+            )
         except Exception as error:  # Keep one malformed Discord payload from stopping the listener.
-            self._logger.warning("Could not import Mudae message %s: %s", message.id, error)
+            self._record_processing_failure(received_event, processing_attempt, error, message.id)
             return
-        self._logger.info(
-            "Imported Discord Mudae message %s: %s",
-            message.id,
-            result.message,
-        )
-        if kind == "divorce_declined" or kind == "divorce_complete":
-            self._consume_context(message.channel.id, context)
-        if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
-            self._consume_context(message.channel.id, context)
-        elif context.expected_kind not in {"divorce", "divorce_confirmation", *self._SCAN_KINDS}:
-            self._consume_context(message.channel.id, context)
-        self._complete_scan_if_last_page(
-            kind,
-            raw_message,
-            import_identity,
-            scan_id,
-        )
 
-    def _receive_message(self, message: discord.Message, raw_message: str) -> bool:
+        if processing_attempt is not None:
+            try:
+                self._discord_message_repository.mark_processing_success(
+                    source_event_id=processing_attempt.source_event_id,
+                    attempt_id=processing_attempt.attempt_id,
+                    finished_at=datetime.now(timezone.utc),
+                )
+            except Exception as error:
+                self._logger.error(
+                    "Could not mark Discord processing attempt %s successful after downstream "
+                    "work completed; lifecycle state was not reported as successful: %s",
+                    processing_attempt.attempt_id,
+                    error,
+                )
+
+    def _receive_message(
+        self, message: discord.Message, raw_message: str
+    ) -> ReceivedMessageEvent | None:
         """Persist an accepted message revision before downstream processing."""
         repository = self._discord_message_repository
         if repository is None:
-            return True
+            return None
         try:
             envelope = build_message_receive_envelope(
                 guild_id=str(message.guild.id),
@@ -639,7 +698,7 @@ class DiscordListenerService:
                 payload_json=None,
                 payload_capture_version=None,
             )
-            repository.receive_message(
+            return repository.receive_message(
                 aggregate_key=envelope.aggregate_key,
                 revision_key=envelope.revision_key,
                 event_key=envelope.event_key,
@@ -659,8 +718,43 @@ class DiscordListenerService:
                 getattr(message, "id", None),
                 error,
             )
-            return False
-        return True
+            return None
+
+    def _record_processing_failure(
+        self,
+        received_event: ReceivedMessageEvent | None,
+        processing_attempt: Any,
+        error: Exception,
+        message_id: int,
+    ) -> None:
+        """Record a retryable downstream failure without masking the original error."""
+        if processing_attempt is None or received_event is None:
+            self._logger.warning("Could not import Mudae message %s: %s", message_id, error)
+            return
+        try:
+            self._discord_message_repository.mark_processing_failure(
+                source_event_id=processing_attempt.source_event_id,
+                attempt_id=processing_attempt.attempt_id,
+                status="failed",
+                retryable=True,
+                failure_code="downstream_processing_error",
+                failure_detail=str(error),
+                finished_at=datetime.now(timezone.utc),
+            )
+        except Exception as completion_error:
+            self._logger.error(
+                "Could not record retryable failure for Discord processing attempt %s; "
+                "original processing error preserved: %s; lifecycle error: %s",
+                processing_attempt.attempt_id,
+                error,
+                completion_error,
+            )
+            return
+        self._logger.warning(
+            "Could not import Mudae message %s; recorded retryable processing failure: %s",
+            message_id,
+            error,
+        )
 
     @staticmethod
     def _source_revision_at(message: discord.Message) -> datetime | None:
