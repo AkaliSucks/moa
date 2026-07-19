@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Protocol
 
 from moa.database.sqlite import connect
+from moa.database.migrations import (
+    CATALOG_MIGRATIONS,
+    run_migrations,
+    validate_catalog_schema,
+)
 from moa.models.catalog import (
     CatalogCharacter,
     CatalogRankSnapshot,
@@ -3365,6 +3370,36 @@ class CatalogRepository:
         return False
 
     def _initialize(self) -> None:
+        with self._connection() as connection:
+            has_catalog_tables = connection.execute(
+                """
+                SELECT 1
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                  AND name != 'schema_migrations'
+                LIMIT 1
+                """
+            ).fetchone() is not None
+            has_migration_metadata = connection.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'schema_migrations'
+                """
+            ).fetchone() is not None
+            if has_catalog_tables and not has_migration_metadata:
+                validate_catalog_schema(connection)
+                run_migrations(connection, CATALOG_MIGRATIONS)
+                return
+            if has_migration_metadata:
+                run_migrations(connection, CATALOG_MIGRATIONS)
+
+        self._create_schema()
+
+        with self._connection() as connection:
+            run_migrations(connection, CATALOG_MIGRATIONS)
+
+    def _create_schema(self) -> None:
         with self._connection() as connection:
             connection.executescript(
                 """
