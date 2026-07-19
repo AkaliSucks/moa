@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -140,6 +141,14 @@ def _listener_with_two_configured_users(tmp_path):
     )
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     return DiscordListenerService(config_service=config, catalog_service=catalog), catalog
+
+
+def _import_event_rows(database_path, kind: str):
+    with sqlite3.connect(database_path) as connection:
+        return connection.execute(
+            "SELECT source, raw_message FROM import_events WHERE kind = ? ORDER BY id",
+            (kind,),
+        ).fetchall()
 
 
 def test_listener_tracks_interleaved_prefix_commands_from_two_users(tmp_path) -> None:
@@ -1096,6 +1105,244 @@ def test_listener_ignores_uncached_raw_edit_without_rest_fetch(tmp_path) -> None
     payload = SimpleNamespace(channel_id=789, message_id=988)
 
     asyncio.run(listener.handle_raw_message_edit(payload))
+
+
+def test_listener_characterizes_edit_as_completion_of_incomplete_message(
+    tmp_path,
+) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    listener._mudae_user_id = 999
+    original = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(name="wa", user=SimpleNamespace(id=456)),
+        # Sanitized real Discord/Mudae output: an incomplete first delivery.
+        content="Berry (YD)\nYurei Deco",
+        embeds=(),
+    )
+    edited = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(name="wa", user=SimpleNamespace(id=456)),
+        # Sanitized real Discord/Mudae output: an edited version of that same roll.
+        content=(
+            "Miku Nakano\nThe Quintessential Quintuplets\n44:kakera:\n"
+            "Miku Nakano / The Quintessential Quintuplets - 44 ka"
+        ),
+        embeds=(),
+    )
+
+    asyncio.run(listener.handle_bot_response(original))
+    asyncio.run(listener.handle_message_edit(original, edited))
+
+    rows = _import_event_rows(tmp_path / "catalog.db", "roll")
+    rolls = catalog.recent_rolls("Test Server", "user_a", 10)
+    assert len(rows) == 1
+    assert rows[0] == (
+        "discord:guild=123:channel=900:message=1200",
+        edited.content,
+    )
+    assert [roll.character.name for roll in rolls] == ["Miku Nakano"]
+    assert catalog.recent_rolls("Test Server", "user_b", 10) == ()
+
+
+def test_listener_characterizes_duplicate_message_delivery_as_process_local_only(
+    tmp_path,
+) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    listener._mudae_user_id = 999
+
+    def mudae_roll(message_id: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=message_id,
+            guild=SimpleNamespace(id=123),
+            channel=SimpleNamespace(id=900),
+            author=SimpleNamespace(bot=True, id=999),
+            interaction_metadata=SimpleNamespace(name="wa", user=SimpleNamespace(id=456)),
+            # Sanitized real Discord/Mudae output: identical text for retry comparisons.
+            content=(
+                "Berry (YD)\nYurei Deco\n28:kakera:\n"
+                "Berry (YD) / Yurei Deco - 28 ka"
+            ),
+            embeds=(),
+        )
+
+    redelivery = mudae_roll(1201)
+    separate_message = mudae_roll(1202)
+    asyncio.run(listener.handle_bot_response(redelivery))
+    asyncio.run(listener.handle_bot_response(redelivery))
+    asyncio.run(listener.handle_bot_response(separate_message))
+
+    rows = _import_event_rows(tmp_path / "catalog.db", "roll")
+    assert len(rows) == 2
+    assert [row[0] for row in rows] == [
+        "discord:guild=123:channel=900:message=1201",
+        "discord:guild=123:channel=900:message=1202",
+    ]
+    assert len(catalog.recent_rolls("Test Server", "user_a", 10)) == 2
+    assert catalog.recent_rolls("Test Server", "user_b", 10) == ()
+
+
+def test_listener_characterizes_reaction_acknowledgement_identity_and_attribution(
+    tmp_path,
+) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    listener._mudae_user_id = 999
+    command = SimpleNamespace(
+        id=1203,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="$persr 2",
+    )
+    acknowledgement = SimpleNamespace(
+        guild_id=123,
+        user_id=999,
+        channel_id=900,
+        message_id=1203,
+        # Sanitized real Discord/Mudae reaction payload: Mudae's success reaction.
+        emoji=SimpleNamespace(name="white_check_mark"),
+    )
+
+    asyncio.run(listener.handle_message(command))
+    asyncio.run(listener.handle_raw_reaction_add(acknowledgement))
+    asyncio.run(listener.handle_raw_reaction_add(acknowledgement))
+
+    rows = _import_event_rows(tmp_path / "catalog.db", "personal_rare")
+    state = catalog.personal_rare("Test Server", "user_a")
+    assert len(rows) == 1
+    assert rows[0][0] == (
+        "discord:guild=123:channel=900:message=1203:reaction=white_check_mark"
+    )
+    assert state is not None
+    assert state.personal_rare_multiplier == 2
+    assert catalog.personal_rare("Test Server", "user_b") is None
+
+
+def test_listener_replay_after_restart_creates_a_second_projection(
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    database_path = tmp_path / "catalog.db"
+    config = ConfigService(config_path)
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    first_catalog = CatalogService(CatalogRepository(database_path))
+    first_listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=first_catalog,
+    )
+    first_listener._mudae_user_id = 999
+    event = SimpleNamespace(
+        id=1204,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(name="wa", user=SimpleNamespace(id=456)),
+        # Sanitized real Discord/Mudae output: the event replayed after reconstruction.
+        content=(
+            "Berry (YD)\nYurei Deco\n28:kakera:\n"
+            "Berry (YD) / Yurei Deco - 28 ka"
+        ),
+        embeds=(),
+    )
+
+    asyncio.run(first_listener.handle_bot_response(event))
+    asyncio.run(first_listener.handle_bot_response(event))
+    assert len(_import_event_rows(database_path, "roll")) == 1
+
+    restarted_catalog = CatalogService(CatalogRepository(database_path))
+    restarted_listener = DiscordListenerService(
+        config_service=ConfigService(config_path),
+        catalog_service=restarted_catalog,
+    )
+    restarted_listener._mudae_user_id = 999
+    asyncio.run(restarted_listener.handle_bot_response(event))
+
+    rows = _import_event_rows(database_path, "roll")
+    assert len(rows) == 2
+    assert [row[0] for row in rows] == [
+        "discord:guild=123:channel=900:message=1204",
+        "discord:guild=123:channel=900:message=1204",
+    ]
+    assert len(restarted_catalog.recent_rolls("Test Server", "user_a", 10)) == 2
+
+
+def test_listener_pending_workflow_is_lost_after_restart(
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "config.json"
+    database_path = tmp_path / "catalog.db"
+    config = ConfigService(config_path)
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    first_listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+    )
+    command = SimpleNamespace(
+        id=1205,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="$divorce Professor Layton",
+    )
+    asyncio.run(first_listener.handle_message(command))
+    assert first_listener._pending_contexts
+
+    restarted_listener = DiscordListenerService(
+        config_service=ConfigService(config_path),
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+    )
+    prompt = SimpleNamespace(
+        id=1206,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        # Sanitized real Discord/Mudae output: the pending confirmation prompt.
+        content=(
+            "Professor Layton: Do you confirm the divorce? (y/n/yes/no)\n"
+            "Characters divorced by $divorce are also removed from the $restorelist "
+            "(+54:kakera:if you confirm)"
+        ),
+        embeds=(),
+    )
+    answer = SimpleNamespace(
+        id=1207,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=456),
+        content="yes",
+    )
+    complete = SimpleNamespace(
+        id=1208,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        # Sanitized real Discord/Mudae output: completion after the lost workflow.
+        content="Professor Layton and user_a are now divorced. (+54:kakera:)",
+        embeds=(),
+    )
+
+    asyncio.run(restarted_listener.handle_bot_response(prompt))
+    asyncio.run(restarted_listener.handle_message(answer))
+    asyncio.run(restarted_listener.handle_bot_response(complete))
+
+    assert restarted_listener._pending_contexts == {}
+    assert _import_event_rows(database_path, "divorce") == []
+    assert _import_event_rows(database_path, "divorce_complete") == []
 
 
 def test_listener_recovers_context_from_mudae_interaction_response(tmp_path) -> None:
