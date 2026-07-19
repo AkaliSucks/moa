@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 
 from moa.database.migrations import (
+    CATALOG_MIGRATIONS,
     Migration,
     MigrationError,
     run_migrations,
@@ -17,12 +18,148 @@ def _migration_rows(database_path):
         ).fetchall()
 
 
-def test_fresh_catalog_database_records_baseline_once(tmp_path) -> None:
+def _open_database(database_path):
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA foreign_keys = ON")
+    return connection
+
+
+def _make_baseline_database(database_path):
+    """Create a version-1 database to exercise the version-2 upgrade path."""
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        connection.execute("DROP TABLE discord_processing_attempts")
+        connection.execute("DROP TABLE discord_source_events")
+        connection.execute("DROP TABLE discord_message_revisions")
+        connection.execute("DROP TABLE discord_message_aggregates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 2")
+
+
+def _insert_aggregate(
+    connection,
+    *,
+    guild_id="guild-1",
+    channel_id="channel-1",
+    message_id="message-1",
+):
+    return connection.execute(
+        """
+        INSERT INTO discord_message_aggregates (
+            platform, guild_id, channel_id, message_id,
+            first_received_at, last_received_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "discord",
+            guild_id,
+            channel_id,
+            message_id,
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+        ),
+    ).lastrowid
+
+
+def _insert_revision(
+    connection,
+    aggregate_id,
+    *,
+    source_revision_marker="revision-1",
+    normalized_payload_hash="hash-1",
+    revision_state="candidate",
+):
+    return connection.execute(
+        """
+        INSERT INTO discord_message_revisions (
+            aggregate_id, source_revision_marker, normalized_payload_hash,
+            revision_state, first_received_at, last_received_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            aggregate_id,
+            source_revision_marker,
+            normalized_payload_hash,
+            revision_state,
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+        ),
+    ).lastrowid
+
+
+def _insert_source_event(
+    connection,
+    revision_id,
+    *,
+    event_key="event-1",
+    status="received",
+    delivery_count=1,
+    legacy_import_event_id=None,
+):
+    return connection.execute(
+        """
+        INSERT INTO discord_source_events (
+            event_key, revision_id, event_kind, status, raw_text,
+            source_observed_at, received_at, last_seen_at, delivery_count,
+            legacy_import_event_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event_key,
+            revision_id,
+            "message_create",
+            status,
+            "raw message",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+            delivery_count,
+            legacy_import_event_id,
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+        ),
+    ).lastrowid
+
+
+def _insert_attempt(
+    connection,
+    source_event_id,
+    *,
+    attempt_number=1,
+    status="processing",
+    retryable=1,
+    parser_version="parser-1",
+    router_version="router-1",
+):
+    return connection.execute(
+        """
+        INSERT INTO discord_processing_attempts (
+            source_event_id, attempt_number, status, retryable,
+            parser_version, router_version, started_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            attempt_number,
+            status,
+            retryable,
+            parser_version,
+            router_version,
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-18T00:00:00+00:00",
+        ),
+    ).lastrowid
+
+
+def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
 
     CatalogRepository(database_path)
 
-    with sqlite3.connect(database_path) as connection:
+    with _open_database(database_path) as connection:
         tables = {
             row[0]
             for row in connection.execute(
@@ -31,13 +168,327 @@ def test_fresh_catalog_database_records_baseline_once(tmp_path) -> None:
         }
     assert "characters" in tables
     assert "schema_migrations" in tables
-    assert _migration_rows(database_path) == [(1, "catalog-schema-baseline")]
+    assert {
+        "discord_message_aggregates",
+        "discord_message_revisions",
+        "discord_source_events",
+        "discord_processing_attempts",
+    } <= tables
+    assert _migration_rows(database_path) == [
+        (1, "catalog-schema-baseline"),
+        (2, "durable-discord-message-ingestion"),
+    ]
+    with _open_database(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+    assert {
+        "uq_discord_revision_versioned",
+        "uq_discord_revision_unversioned",
+        "uq_discord_active_revision",
+        "uq_discord_processing_attempt",
+    } <= indexes
+
+    expected_columns = {
+        "discord_message_aggregates": {
+            "id",
+            "platform",
+            "guild_id",
+            "channel_id",
+            "message_id",
+            "first_received_at",
+            "last_received_at",
+            "created_at",
+            "updated_at",
+        },
+        "discord_message_revisions": {
+            "id",
+            "aggregate_id",
+            "source_revision_marker",
+            "normalized_payload_hash",
+            "revision_state",
+            "selection_basis",
+            "source_observed_at",
+            "first_received_at",
+            "last_received_at",
+            "created_at",
+            "updated_at",
+        },
+        "discord_source_events": {
+            "id",
+            "event_key",
+            "revision_id",
+            "event_kind",
+            "status",
+            "raw_text",
+            "payload_json",
+            "payload_capture_version",
+            "source_observed_at",
+            "received_at",
+            "last_seen_at",
+            "delivery_count",
+            "legacy_import_event_id",
+            "created_at",
+            "updated_at",
+        },
+        "discord_processing_attempts": {
+            "id",
+            "source_event_id",
+            "attempt_number",
+            "status",
+            "retryable",
+            "parser_version",
+            "router_version",
+            "started_at",
+            "finished_at",
+            "lease_expires_at",
+            "failure_code",
+            "failure_detail",
+            "created_at",
+        },
+    }
+    with _open_database(database_path) as connection:
+        for table, columns in expected_columns.items():
+            actual = {
+                row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            assert actual == columns
+
+
+def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "INSERT INTO characters "
+            "(name, series, normalized_name, normalized_series, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("Asuna", "Sword Art Online", "asuna", "sword art online", "now", "now"),
+        )
+        assert _migration_rows(database_path) == [(1, "catalog-schema-baseline")]
+
+    CatalogRepository(database_path)
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        assert connection.execute(
+            "SELECT name, series FROM characters"
+        ).fetchall() == [("Asuna", "Sword Art Online")]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 2"
+        ).fetchone()[0] == 1
+    assert _migration_rows(database_path) == [
+        (1, "catalog-schema-baseline"),
+        (2, "durable-discord-message-ingestion"),
+    ]
+
+
+def test_aggregate_identity_is_unique_without_using_payload_hash(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        _insert_aggregate(connection)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_aggregate(connection)
+        _insert_aggregate(connection, channel_id="channel-2")
+        _insert_aggregate(connection, guild_id="guild-2")
+        _insert_aggregate(connection, message_id="message-2")
+
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_message_aggregates"
+        ).fetchone()[0] == 4
+
+
+def test_revision_partial_uniqueness_and_active_state_constraints(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        aggregate_id = _insert_aggregate(connection)
+        _insert_revision(connection, aggregate_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_revision(connection, aggregate_id)
+
+        _insert_revision(connection, aggregate_id, source_revision_marker="revision-2")
+        _insert_revision(
+            connection,
+            aggregate_id,
+            source_revision_marker=None,
+            normalized_payload_hash="hash-1",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_revision(
+                connection,
+                aggregate_id,
+                source_revision_marker=None,
+                normalized_payload_hash="hash-1",
+            )
+
+        _insert_revision(
+            connection,
+            aggregate_id,
+            source_revision_marker="revision-3",
+            normalized_payload_hash="hash-3",
+            revision_state="active",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_revision(
+                connection,
+                aggregate_id,
+                source_revision_marker="revision-4",
+                normalized_payload_hash="hash-4",
+                revision_state="active",
+            )
+        for state in ("candidate", "superseded", "stale"):
+            _insert_revision(
+                connection,
+                aggregate_id,
+                source_revision_marker=f"{state}-revision",
+                normalized_payload_hash=f"{state}-hash",
+                revision_state=state,
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_revision(
+                connection,
+                aggregate_id,
+                source_revision_marker="invalid",
+                normalized_payload_hash="invalid",
+                revision_state="invalid",
+            )
+
+
+def test_source_event_constraints_and_legacy_import_event_foreign_key(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+            "VALUES (?, ?, ?, ?)",
+            ("roll", "test", "now", "legacy"),
+        )
+        legacy_event_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        _insert_source_event(connection, revision_id, legacy_import_event_id=legacy_event_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, revision_id, event_key="event-2")
+
+        second_revision_id = _insert_revision(
+            connection,
+            aggregate_id,
+            source_revision_marker="revision-2",
+            normalized_payload_hash="hash-2",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, second_revision_id, event_key="event-1")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, second_revision_id, event_key="event-3", status="invalid")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, second_revision_id, event_key="event-4", delivery_count=0)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, second_revision_id, event_key=" ")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO discord_source_events (
+                    event_key, revision_id, event_kind, status, raw_text,
+                    received_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("event-5", second_revision_id, " ", "received", "", "now", "now"),
+            )
+
+
+def test_processing_attempt_constraints_and_processing_lease_uniqueness(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        first_aggregate_id = _insert_aggregate(connection)
+        first_revision_id = _insert_revision(connection, first_aggregate_id)
+        first_event_id = _insert_source_event(connection, first_revision_id)
+        second_aggregate_id = _insert_aggregate(connection, guild_id="guild-2")
+        second_revision_id = _insert_revision(
+            connection,
+            second_aggregate_id,
+            source_revision_marker="revision-2",
+            normalized_payload_hash="hash-2",
+        )
+        second_event_id = _insert_source_event(
+            connection, second_revision_id, event_key="event-2"
+        )
+
+        _insert_attempt(connection, first_event_id, status="succeeded", retryable=0)
+        _insert_attempt(connection, first_event_id, attempt_number=2, status="failed")
+        _insert_attempt(connection, first_event_id, attempt_number=3, status="processing")
+        _insert_attempt(connection, second_event_id, status="processing")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=2, status="failed")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=4, status="processing")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=5, status="invalid")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=5, retryable=2)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=0)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=5, parser_version=" ")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, first_event_id, attempt_number=5, router_version=" ")
+
+
+def test_ingestion_foreign_keys_require_parent_rows(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_revision(connection, 999)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, 999)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_attempt(connection, 999)
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_source_event(connection, revision_id, legacy_import_event_id=999)
+
+
+def test_failed_discord_ingestion_migration_rolls_back_schema_and_metadata(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    def fail_after_schema(connection):
+        CATALOG_MIGRATIONS[1].apply(connection)
+        raise RuntimeError("migration 2 failed")
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(RuntimeError, match="migration 2 failed"):
+            run_migrations(
+                connection,
+                (CATALOG_MIGRATIONS[0], Migration(2, "failing-ingestion", fail_after_schema)),
+            )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,)]
+        assert connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE name IN (
+                'discord_message_aggregates', 'discord_message_revisions',
+                'discord_source_events', 'discord_processing_attempts',
+                'uq_discord_revision_versioned', 'uq_discord_revision_unversioned',
+                'uq_discord_active_revision', 'uq_discord_processing_attempt'
+            )
+            """
+        ).fetchall() == []
 
 
 def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     CatalogRepository(database_path)
-    with sqlite3.connect(database_path) as connection:
+    with _open_database(database_path) as connection:
         connection.execute(
             "INSERT INTO characters "
             "(name, series, normalized_name, normalized_series, created_at, updated_at) "
@@ -47,15 +498,18 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
 
     CatalogRepository(database_path)
 
-    with sqlite3.connect(database_path) as connection:
+    with _open_database(database_path) as connection:
         assert connection.execute("SELECT name FROM characters").fetchone()[0] == "Miku"
-    assert _migration_rows(database_path) == [(1, "catalog-schema-baseline")]
+    assert _migration_rows(database_path) == [
+        (1, "catalog-schema-baseline"),
+        (2, "durable-discord-message-ingestion"),
+    ]
 
 
 def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
-    CatalogRepository(database_path)
-    with sqlite3.connect(database_path) as connection:
+    _make_baseline_database(database_path)
+    with _open_database(database_path) as connection:
         connection.execute(
             "INSERT INTO characters "
             "(name, series, normalized_name, normalized_series, created_at, updated_at) "
@@ -66,9 +520,12 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
 
     CatalogRepository(database_path)
 
-    with sqlite3.connect(database_path) as connection:
+    with _open_database(database_path) as connection:
         assert connection.execute("SELECT name FROM characters").fetchone()[0] == "Mai"
-    assert _migration_rows(database_path) == [(1, "catalog-schema-baseline")]
+    assert _migration_rows(database_path) == [
+        (1, "catalog-schema-baseline"),
+        (2, "durable-discord-message-ingestion"),
+    ]
 
 
 def test_unknown_partial_schema_fails_without_baselining_or_repairing(tmp_path) -> None:
@@ -153,11 +610,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (2, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (3, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(2,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(3,)]
