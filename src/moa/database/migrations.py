@@ -227,10 +227,131 @@ def run_migrations(
             raise
 
 
+def _apply_durable_discord_message_ingestion(
+    connection: sqlite3.Connection,
+) -> None:
+    """Create the durable, storage-only Discord message ingestion schema."""
+    statements = (
+        """
+        CREATE TABLE discord_message_aggregates (
+            id INTEGER PRIMARY KEY,
+            platform TEXT NOT NULL CHECK (platform = 'discord'),
+            guild_id TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            first_received_at TEXT NOT NULL,
+            last_received_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(platform, guild_id, channel_id, message_id)
+        )
+        """,
+
+        """
+        CREATE TABLE discord_message_revisions (
+            id INTEGER PRIMARY KEY,
+            aggregate_id INTEGER NOT NULL
+                REFERENCES discord_message_aggregates(id),
+            source_revision_marker TEXT NULL,
+            normalized_payload_hash TEXT NOT NULL,
+            revision_state TEXT NOT NULL CHECK (
+                revision_state IN ('candidate', 'active', 'superseded', 'stale')
+            ),
+            selection_basis TEXT NULL,
+            source_observed_at TEXT NULL,
+            first_received_at TEXT NOT NULL,
+            last_received_at TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+
+        """
+        CREATE UNIQUE INDEX uq_discord_revision_versioned
+        ON discord_message_revisions(
+            aggregate_id,
+            source_revision_marker,
+            normalized_payload_hash
+        )
+        WHERE source_revision_marker IS NOT NULL
+        """,
+
+        """
+        CREATE UNIQUE INDEX uq_discord_revision_unversioned
+        ON discord_message_revisions(aggregate_id, normalized_payload_hash)
+        WHERE source_revision_marker IS NULL
+        """,
+
+        """
+        CREATE UNIQUE INDEX uq_discord_active_revision
+        ON discord_message_revisions(aggregate_id)
+        WHERE revision_state = 'active'
+        """,
+
+        """
+        CREATE TABLE discord_source_events (
+            id INTEGER PRIMARY KEY,
+            event_key TEXT NOT NULL CHECK (length(trim(event_key)) > 0) UNIQUE,
+            revision_id INTEGER NOT NULL UNIQUE
+                REFERENCES discord_message_revisions(id),
+            event_kind TEXT NOT NULL CHECK (length(trim(event_kind)) > 0),
+            status TEXT NOT NULL CHECK (
+                status IN ('received', 'processing', 'succeeded', 'failed', 'unresolved_attribution')
+            ),
+            raw_text TEXT NOT NULL,
+            payload_json TEXT NULL,
+            payload_capture_version TEXT NULL,
+            source_observed_at TEXT NULL,
+            received_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            delivery_count INTEGER NOT NULL DEFAULT 1 CHECK (delivery_count >= 1),
+            legacy_import_event_id INTEGER NULL REFERENCES import_events(id),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+
+        """
+        CREATE TABLE discord_processing_attempts (
+            id INTEGER PRIMARY KEY,
+            source_event_id INTEGER NOT NULL
+                REFERENCES discord_source_events(id),
+            attempt_number INTEGER NOT NULL CHECK (attempt_number >= 1),
+            status TEXT NOT NULL CHECK (
+                status IN ('processing', 'succeeded', 'failed', 'unresolved_attribution')
+            ),
+            retryable INTEGER NOT NULL CHECK (retryable IN (0, 1)),
+            parser_version TEXT NOT NULL CHECK (length(trim(parser_version)) > 0),
+            router_version TEXT NOT NULL CHECK (length(trim(router_version)) > 0),
+            started_at TEXT NOT NULL,
+            finished_at TEXT NULL,
+            lease_expires_at TEXT NULL,
+            failure_code TEXT NULL,
+            failure_detail TEXT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(source_event_id, attempt_number)
+        )
+        """,
+
+        """
+        CREATE UNIQUE INDEX uq_discord_processing_attempt
+        ON discord_processing_attempts(source_event_id)
+        WHERE status = 'processing'
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
         name="catalog-schema-baseline",
         apply=validate_catalog_schema,
+    ),
+    Migration(
+        version=2,
+        name="durable-discord-message-ingestion",
+        apply=_apply_durable_discord_message_ingestion,
     ),
 )
