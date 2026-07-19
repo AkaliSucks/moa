@@ -7,6 +7,7 @@ import re
 import time
 import warnings
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Any
 
 import discord
@@ -14,6 +15,8 @@ import discord
 from moa.core.config import ConfigAccount, ConfigService
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.models.discord_message_mapping import build_message_receive_envelope
+from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 
@@ -72,6 +75,7 @@ class DiscordListenerService:
         config_service: ConfigService | None = None,
         catalog_service: CatalogService | None = None,
         importer: AutomaticImportService | None = None,
+        discord_message_repository: DiscordMessageRepository | None = None,
         profile_name: str | None = None,
         status_text: str = _DEFAULT_STATUS_TEXT,
         logger: logging.Logger | None = None,
@@ -79,6 +83,14 @@ class DiscordListenerService:
         self._config = config_service or ConfigService()
         self._catalog = catalog_service or CatalogService()
         self._importer = importer or AutomaticImportService(self._catalog)
+        self._discord_message_repository = discord_message_repository
+        if self._discord_message_repository is None and catalog_service is not None:
+            catalog_repository = getattr(catalog_service, "_repository", None)
+            database_path = getattr(catalog_repository, "_database_path", None)
+            if database_path is not None:
+                # Preserve the existing direct-construction test and embedding path while
+                # production composition passes this dependency explicitly.
+                self._discord_message_repository = DiscordMessageRepository(database_path)
         self._parser = MudaeTextParser()
         self._router = MudaeMessageRouter(self._parser)
         self._profile_name = profile_name
@@ -433,14 +445,16 @@ class DiscordListenerService:
         """Import one bot-authored Mudae response when a configured context exists."""
         if message.guild is None or not message.author.bot:
             return
-        self._message_cache[message.id] = message
-        if len(self._message_cache) > 2000:
-            self._message_cache = dict(list(self._message_cache.items())[-1000:])
         if self._mudae_user_id is not None and message.author.id != self._mudae_user_id:
             return
         raw_message = self.extract_message_text(message)
         if not raw_message:
             return
+        if not self._receive_message(message, raw_message):
+            return
+        self._message_cache[message.id] = message
+        if len(self._message_cache) > 2000:
+            self._message_cache = dict(list(self._message_cache.items())[-1000:])
         # A paginated harem message is edited in place. Its later edits can
         # arrive after another command (for example `$tu`) has replaced the
         # channel's latest-command context, so keep active scan context
@@ -608,6 +622,53 @@ class DiscordListenerService:
             import_identity,
             scan_id,
         )
+
+    def _receive_message(self, message: discord.Message, raw_message: str) -> bool:
+        """Persist an accepted message revision before downstream processing."""
+        repository = self._discord_message_repository
+        if repository is None:
+            return True
+        try:
+            envelope = build_message_receive_envelope(
+                guild_id=str(message.guild.id),
+                channel_id=str(message.channel.id),
+                message_id=str(message.id),
+                raw_text=raw_message,
+                source_revision_at=self._source_revision_at(message),
+                received_at=datetime.now(timezone.utc),
+                payload_json=None,
+                payload_capture_version=None,
+            )
+            repository.receive_message(
+                aggregate_key=envelope.aggregate_key,
+                revision_key=envelope.revision_key,
+                event_key=envelope.event_key,
+                event_kind=envelope.event_kind,
+                raw_text=envelope.raw_text,
+                payload_json=envelope.payload_json,
+                payload_capture_version=envelope.payload_capture_version,
+                source_observed_at=envelope.source_observed_at,
+                received_at=envelope.received_at,
+            )
+        except Exception as error:  # Keep callback stability while refusing downstream work.
+            self._logger.warning(
+                "Could not durably receive Discord message "
+                "guild=%s channel=%s message=%s: %s",
+                getattr(getattr(message, "guild", None), "id", None),
+                getattr(getattr(message, "channel", None), "id", None),
+                getattr(message, "id", None),
+                error,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _source_revision_at(message: discord.Message) -> datetime | None:
+        """Use only Discord's aware edit timestamp as a revision marker."""
+        edited_at = getattr(message, "edited_at", None)
+        if not isinstance(edited_at, datetime) or edited_at.utcoffset() is None:
+            return None
+        return edited_at
 
     def _context_from_active_scan(
         self,

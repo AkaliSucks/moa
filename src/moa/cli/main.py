@@ -11,6 +11,7 @@ from moa.core.config import ConfigService
 from moa.database.sqlite import DEFAULT_DATABASE_PATH
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
@@ -174,7 +175,11 @@ def discord_listen(
     )
     logging.getLogger("moa.discord").setLevel(logging.INFO)
     try:
-        DiscordListenerService(profile_name=profile, status_text=status).run(token, parsed_mudae_user_id)
+        DiscordListenerService(
+            profile_name=profile,
+            status_text=status,
+            discord_message_repository=DiscordMessageRepository(DEFAULT_DATABASE_PATH),
+        ).run(token, parsed_mudae_user_id)
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
