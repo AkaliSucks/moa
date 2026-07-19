@@ -143,3 +143,16 @@ At completion, report:
 - Results of validation
 - Any unverified behavior
 - Any processes started and confirmation that they were stopped
+
+## Discord ingestion safety
+
+- Every listener or parser change must include a sanitized real-payload fixture.
+- Tests must cover multiple configured users sharing one Discord channel.
+- Never attribute a response using channel-wide mutable context alone.
+- Ambiguous account attribution must be preserved as unresolved, never guessed.
+- Every persisted Discord event must have a durable source identity.
+- Raw-event persistence and projection updates must be transactional.
+- Duplicate/replayed Discord events must be idempotent across process restarts.
+- Listener and repository tests must use temporary databases.
+- Never run migrations, repairs, or integration tests against the live database.
+- Do not split large modules until characterization tests protect their behavior.
