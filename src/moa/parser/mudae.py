@@ -14,9 +14,6 @@ from moa.models.character import (
     AntidisablePage,
     KakeraReactionBlocked,
     KakeraReactionReceipt,
-    BadgeLevel,
-    KakeraStateSnapshot,
-    KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
     MudapinSnapshot,
     ProfileSnapshot,
@@ -25,14 +22,17 @@ from moa.models.character import (
     ServerSettingsSnapshot,
     SphereGain,
     SphereResultSnapshot,
-    TowerStateSnapshot,
     TimerStateSnapshot,
+    RankedHaremEntry,
+    RankedHaremPage,
+    BadgeLevel,
+    KakeraStateSnapshot,
+    KakeralootStateSnapshot,
+    TowerStateSnapshot,
     DisableListEntry,
     DisableListSnapshot,
     HaremKeyEntry,
     HaremKeyPage,
-    RankedHaremEntry,
-    RankedHaremPage,
     PlayerBonusMetric,
     PlayerBonusSnapshot,
     RankedCharacter,
@@ -85,53 +85,211 @@ class MudaeTextParser:
         r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
         re.IGNORECASE,
     )
+
     _KAKERA_REACTION_BREAKDOWN_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:)\s+breaks down into.+?=>\s*"
         r"(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
         r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
         re.IGNORECASE,
     )
+
     _KAKERA_REACTION_BLOCKED = re.compile(
         r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
         re.IGNORECASE,
     )
+
     _CLAIM_CONFIRMATION = re.compile(
         r"^(?P<account>.+?)\s+and\s+(?P<character>.+?)\s+are now married!",
         re.IGNORECASE,
     )
+
     _DIVORCE_PROMPT = re.compile(
         r"^(?P<character>.+?):\s*Do you confirm the divorce\?\s*\(y/n/yes/no\)\s*$",
         re.IGNORECASE,
     )
+
     _DIVORCE_REFUND = re.compile(
         r"Characters divorced by \$divorce are also removed from the \$restorelist\s*"
         r"\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\s*if you confirm\)",
         re.IGNORECASE,
     )
+
     _DIVORCE_DECLINED = re.compile(r"^Divorce declined\.$", re.IGNORECASE)
+
     _DIVORCE_COMPLETE = re.compile(
         r"^(?P<character>.+?)\s+and\s+(?P<account>.+?)\s+are now divorced\."
         r"(?:\s*\W*\s*\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\))?\s*$",
         re.IGNORECASE,
     )
+
     _MUDAPIN_MARKER = re.compile(r":(?:pin|logopin)\d+:", re.IGNORECASE)
+
     _NO_MUDAPINS = re.compile(
         r"No mudapins found!.*kakeraloots", re.IGNORECASE
     )
-    _SERIES_CONTINUATION = re.compile(r"^[a-z][a-z0-9'’_-]*[.!?]?$")
-    _HAREM_KEY_ENTRY = re.compile(
-        r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
-        r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\)"
-        r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
-        re.IGNORECASE,
-    )
+
     _RANKED_HAREM_ENTRY = re.compile(
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
         r"(?:\s*[\u00b7\u2022]\s*\((?P<roulette_types>\$?[a-z]+(?:\s*,\s*\$?[a-z]+)*)\))?"
         r"(?:\s*(?:[-\u00b7\u2022]\s*)?:(?P<key_type>[a-z]+)key:\s*"
         r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\))?"
         r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
+        re.IGNORECASE,
+    )
+
+    _ANTIDISABLE_HEADER = re.compile(
+        r"Antidisablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)",
+        re.IGNORECASE,
+    )
+
+    _ANTIDISABLED_COUNT = re.compile(
+        r"^(?P<count>[\d,]+)\s+antidisabled\s+characters$", re.IGNORECASE
+    )
+
+    _PERSONAL_RARE = re.compile(
+        r"(?:Your\s+)?current\s+\$personalrare:\s*(?P<value>\d+)", re.IGNORECASE
+    )
+
+    _SPHERE_CLICKS = re.compile(
+        r"You can click\s+(?P<clicks>\d+)\s+times.*?\((?P<minutes>\d+)\s+minutes?\)",
+        re.IGNORECASE,
+    )
+
+    _SPHERE_GOAL = re.compile(
+        r"Find\s+(?P<target>\d+)\s+purple spheres?\s+\(out of\s+(?P<total>\d+)\)",
+        re.IGNORECASE,
+    )
+
+    _SPHERE_GAIN = re.compile(
+        r"^:(?P<marker>sp[a-z0-9_]*):\s*(?P<free>\(Free\)\s*)?"
+        r"\+(?P<amount>[\d,]+)(?:\s+\(Stock:\s*(?P<stock>[\d,]+)\))?$",
+        re.IGNORECASE,
+    )
+
+    _LOOT_COST = re.compile(
+        r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+)\s*:(?:kakera):",
+        re.IGNORECASE,
+    )
+
+    _LOOT_UPGRADE_COST = re.compile(
+        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+)\s*:(?:kakera):"
+        r".*?increased\s+by\s+(?P<increment>[\d,]+)/level",
+        re.IGNORECASE,
+    )
+
+    _SERVER_PREMIUM = re.compile(r"Server\s+(?P<status>not\s+premium|premium)", re.IGNORECASE)
+
+    _SETTING_LINE = re.compile(
+        r"^\s*[^\w\s]*\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
+    )
+
+    _SETTING_CLAIM_RESET = re.compile(r"Claim reset:\s*every\s*(?P<value>\d+)\s*min", re.IGNORECASE)
+
+    _SETTING_RESET_MINUTE = re.compile(r"Exact minute of the reset:\s*(?P<value>\S+)", re.IGNORECASE)
+
+    _SETTING_RESET_SHIFT = re.compile(r"Reset shifted:\s*by\s*(?P<value>[+-]?\d+)\s*min", re.IGNORECASE)
+
+    _SETTING_ROLLS = re.compile(r"Rolls per hour:\s*(?P<value>\d+)", re.IGNORECASE)
+
+    _SETTING_TIMER = re.compile(r"Time before the claim reaction expires:\s*(?P<value>\d+)\s*sec", re.IGNORECASE)
+
+    _SETTING_RARE = re.compile(r"Spawn rarity multiplier.*?:\s*(?P<value>\d+)", re.IGNORECASE)
+
+    _SETTING_KAKERA_BONUS = re.compile(r"% kakera bonus:\s*\+?(?P<value>\d+)", re.IGNORECASE)
+
+    _SETTING_SPHERE_BONUS = re.compile(r"% sphere bonus:\s*\+?(?P<value>\d+)", re.IGNORECASE)
+
+    _SETTING_GAMEMODE = re.compile(r"Game mode:\s*(?P<value>\d+)", re.IGNORECASE)
+
+    _SETTING_CHANNEL_INSTANCE = re.compile(r"This channel instance:\s*(?P<value>\d+)", re.IGNORECASE)
+
+    _TIMER_CLAIM_READY = re.compile(
+        r"you can claim right now!\s*The next claim reset is in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+
+    _TIMER_CLAIM_WAITING = re.compile(
+        r"you can't claim for another\s*(?P<duration>.+?)\.", re.IGNORECASE
+    )
+
+    _TIMER_CLAIM_INTERVAL_WAITING = re.compile(
+        r"for this server,\s*you can claim once per interval of\s*.+?\.\s*"
+        r"the next interval begins in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+
+    _TIMER_ROLLS = re.compile(
+        r"You have\s*\*{0,2}(?P<rolls>\d+)\*{0,2}\s+rolls? left\.\s*"
+        r"Next rolls reset in\s*(?P<duration>.+?)\.",
+        re.IGNORECASE,
+    )
+
+    _TIMER_ROLL_LIMITED = re.compile(
+        r"roulette is limited to\s*\*{0,2}(?P<limit>\d+)\*{0,2}\s+uses? per hour\.\s*"
+        r"(?P<duration>.+?)\s+left\.",
+        re.IGNORECASE,
+    )
+
+    _TIMER_ROLL_VOTE_PROMPT = re.compile(
+        r"use this command again to reset your rolls timer for one server",
+        re.IGNORECASE,
+    )
+
+    _TIMER_ROLL_STOCK = re.compile(
+        r"You have\s*\*{0,2}(?P<value>\d+)\*{0,2}\s+rolls? reset in stock",
+        re.IGNORECASE,
+    )
+
+    _TIMER_VOTE = re.compile(r"You may vote again in\s*(?P<duration>.+?)\.", re.IGNORECASE)
+
+    _TIMER_DAILY = re.compile(r"Next \$daily reset in\s*(?P<duration>.+?)\.", re.IGNORECASE)
+
+    _TIMER_KAKERA_WAITING = re.compile(
+        r"^You can't react to kakera for\s*(?P<duration>.+?)\.$",
+        re.IGNORECASE,
+    )
+
+    _TIMER_RTU_COOLDOWN = re.compile(
+        r"^The cooldown of \$rt is not over\.\s*Time left:\s*(?P<duration>.+?)\.\s*\(\$rtu\)$",
+        re.IGNORECASE,
+    )
+
+    _TIMER_RTU_LOCKED = re.compile(
+        r"^You didn't unlock this command yet!.*\(\$kakera\)$",
+        re.IGNORECASE,
+    )
+
+    _TIMER_POWER = re.compile(r"^Power:\s*(?P<value>\d+)%$", re.IGNORECASE)
+
+    _TIMER_POWER_COST = re.compile(
+        r"Each kakera button consumes\s*(?P<value>\d+)%\s+of your reaction power", re.IGNORECASE
+    )
+
+    _TIMER_SOULMATE_COST = re.compile(r"half the power \((?P<value>\d+)%\)", re.IGNORECASE)
+
+    _TIMER_STOCK = re.compile(r"^Stock:\s*(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
+
+    _TIMER_GOLD_KEY_STOCK = re.compile(
+        r"\(Keys LVL 6\+\)\s*(?P<value>[\d,]+):kakera:to collect before the next reset "
+        r"\((?P<duration>.+?)\)",
+        re.IGNORECASE,
+    )
+
+    _TIMER_BKU_PROBABILITY = re.compile(r"next \$sw:\s*(?P<value>\d+)%", re.IGNORECASE)
+
+    _TIMER_OURO = re.compile(
+        r"(?P<oh>\d+)\s+\$oh left for today,\s*(?P<oc>\d+)\s+\$oc,\s*"
+        r"(?P<oq>\d+)\s+\$oq(?:\s*\(\+(?P<stored>\d+) stored\))?\s*and\s*"
+        r"(?P<ot>\d+)\s+\$ot\.",
+        re.IGNORECASE,
+    )
+
+    _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
+
+    _HAREM_KEY_ENTRY = re.compile(
+        r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
+        r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
         re.IGNORECASE,
     )
     _TOTAL_HAREM_VALUE = re.compile(
@@ -146,13 +304,6 @@ class MudaeTextParser:
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
         r"(?P<starwish_count>\d+)\s*/\s*(?P<starwish_capacity>\d+)\s*\$sw",
         re.IGNORECASE,
-    )
-    _ANTIDISABLE_HEADER = re.compile(
-        r"Antidisablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)",
-        re.IGNORECASE,
-    )
-    _ANTIDISABLED_COUNT = re.compile(
-        r"^(?P<count>[\d,]+)\s+antidisabled\s+characters$", re.IGNORECASE
     )
     _DISABLELIST_HEADER = re.compile(
         r"Disablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)", re.IGNORECASE
@@ -175,9 +326,6 @@ class MudaeTextParser:
     _KAKERA_BALANCE = re.compile(
         r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
     )
-    _PERSONAL_RARE = re.compile(
-        r"(?:Your\s+)?current\s+\$personalrare:\s*(?P<value>\d+)", re.IGNORECASE
-    )
     _BADGE_LEVEL = re.compile(
         r"(?P<name>Bronze|Silver|Gold|Sapphire|Ruby|Emerald|Diamond)\s+"
         r"(?P<level>I|II|III|IV)\s*[·\u00b7]\s*(?P<status>.+)$",
@@ -191,19 +339,6 @@ class MudaeTextParser:
         r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
     )
     _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
-    _SPHERE_CLICKS = re.compile(
-        r"You can click\s+(?P<clicks>\d+)\s+times.*?\((?P<minutes>\d+)\s+minutes?\)",
-        re.IGNORECASE,
-    )
-    _SPHERE_GOAL = re.compile(
-        r"Find\s+(?P<target>\d+)\s+purple spheres?\s+\(out of\s+(?P<total>\d+)\)",
-        re.IGNORECASE,
-    )
-    _SPHERE_GAIN = re.compile(
-        r"^:(?P<marker>sp[a-z0-9_]*):\s*(?P<free>\(Free\)\s*)?"
-        r"\+(?P<amount>[\d,]+)(?:\s+\(Stock:\s*(?P<stock>[\d,]+)\))?$",
-        re.IGNORECASE,
-    )
     _LOOT_ROLLS = re.compile(r"Rolls stacked:\s*(?P<value>\d+)", re.IGNORECASE)
     _LOOT_DISABLE = re.compile(
         r"\$disable limits:\s*-(?P<wa_ha>\d+)\s+\$wa/\$ha,\s*-(?P<wg_hg>\d+)\s+\$wg/\$hg",
@@ -229,92 +364,6 @@ class MudaeTextParser:
         r"Prerequisites:\s*Sapphire\s+I\s*\+\s*Ruby\s+I\s*\+\s*Emerald\s+I.*\$infokl",
         re.IGNORECASE,
     )
-    _LOOT_COST = re.compile(
-        r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+)\s*:(?:kakera):",
-        re.IGNORECASE,
-    )
-    _LOOT_UPGRADE_COST = re.compile(
-        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+)\s*:(?:kakera):"
-        r".*?increased\s+by\s+(?P<increment>[\d,]+)/level",
-        re.IGNORECASE,
-    )
-    _SERVER_PREMIUM = re.compile(r"Server\s+(?P<status>not\s+premium|premium)", re.IGNORECASE)
-    _SETTING_LINE = re.compile(
-        r"^\s*[^\w\s]*\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
-    )
-    _SETTING_CLAIM_RESET = re.compile(r"Claim reset:\s*every\s*(?P<value>\d+)\s*min", re.IGNORECASE)
-    _SETTING_RESET_MINUTE = re.compile(r"Exact minute of the reset:\s*(?P<value>\S+)", re.IGNORECASE)
-    _SETTING_RESET_SHIFT = re.compile(r"Reset shifted:\s*by\s*(?P<value>[+-]?\d+)\s*min", re.IGNORECASE)
-    _SETTING_ROLLS = re.compile(r"Rolls per hour:\s*(?P<value>\d+)", re.IGNORECASE)
-    _SETTING_TIMER = re.compile(r"Time before the claim reaction expires:\s*(?P<value>\d+)\s*sec", re.IGNORECASE)
-    _SETTING_RARE = re.compile(r"Spawn rarity multiplier.*?:\s*(?P<value>\d+)", re.IGNORECASE)
-    _SETTING_KAKERA_BONUS = re.compile(r"% kakera bonus:\s*\+?(?P<value>\d+)", re.IGNORECASE)
-    _SETTING_SPHERE_BONUS = re.compile(r"% sphere bonus:\s*\+?(?P<value>\d+)", re.IGNORECASE)
-    _SETTING_GAMEMODE = re.compile(r"Game mode:\s*(?P<value>\d+)", re.IGNORECASE)
-    _SETTING_CHANNEL_INSTANCE = re.compile(r"This channel instance:\s*(?P<value>\d+)", re.IGNORECASE)
-    _TIMER_CLAIM_READY = re.compile(
-        r"you can claim right now!\s*The next claim reset is in\s*(?P<duration>.+?)\.",
-        re.IGNORECASE,
-    )
-    _TIMER_CLAIM_WAITING = re.compile(
-        r"you can't claim for another\s*(?P<duration>.+?)\.", re.IGNORECASE
-    )
-    _TIMER_CLAIM_INTERVAL_WAITING = re.compile(
-        r"for this server,\s*you can claim once per interval of\s*.+?\.\s*"
-        r"the next interval begins in\s*(?P<duration>.+?)\.",
-        re.IGNORECASE,
-    )
-    _TIMER_ROLLS = re.compile(
-        r"You have\s*\*{0,2}(?P<rolls>\d+)\*{0,2}\s+rolls? left\.\s*"
-        r"Next rolls reset in\s*(?P<duration>.+?)\.",
-        re.IGNORECASE,
-    )
-    _TIMER_ROLL_LIMITED = re.compile(
-        r"roulette is limited to\s*\*{0,2}(?P<limit>\d+)\*{0,2}\s+uses? per hour\.\s*"
-        r"(?P<duration>.+?)\s+left\.",
-        re.IGNORECASE,
-    )
-    _TIMER_ROLL_VOTE_PROMPT = re.compile(
-        r"use this command again to reset your rolls timer for one server",
-        re.IGNORECASE,
-    )
-    _TIMER_ROLL_STOCK = re.compile(
-        r"You have\s*\*{0,2}(?P<value>\d+)\*{0,2}\s+rolls? reset in stock",
-        re.IGNORECASE,
-    )
-    _TIMER_VOTE = re.compile(r"You may vote again in\s*(?P<duration>.+?)\.", re.IGNORECASE)
-    _TIMER_DAILY = re.compile(r"Next \$daily reset in\s*(?P<duration>.+?)\.", re.IGNORECASE)
-    _TIMER_KAKERA_WAITING = re.compile(
-        r"^You can't react to kakera for\s*(?P<duration>.+?)\.$",
-        re.IGNORECASE,
-    )
-    _TIMER_RTU_COOLDOWN = re.compile(
-        r"^The cooldown of \$rt is not over\.\s*Time left:\s*(?P<duration>.+?)\.\s*\(\$rtu\)$",
-        re.IGNORECASE,
-    )
-    _TIMER_RTU_LOCKED = re.compile(
-        r"^You didn't unlock this command yet!.*\(\$kakera\)$",
-        re.IGNORECASE,
-    )
-    _TIMER_POWER = re.compile(r"^Power:\s*(?P<value>\d+)%$", re.IGNORECASE)
-    _TIMER_POWER_COST = re.compile(
-        r"Each kakera button consumes\s*(?P<value>\d+)%\s+of your reaction power", re.IGNORECASE
-    )
-    _TIMER_SOULMATE_COST = re.compile(r"half the power \((?P<value>\d+)%\)", re.IGNORECASE)
-    _TIMER_STOCK = re.compile(r"^Stock:\s*(?P<value>[\d,]+):kakera:$", re.IGNORECASE)
-    _TIMER_GOLD_KEY_STOCK = re.compile(
-        r"\(Keys LVL 6\+\)\s*(?P<value>[\d,]+):kakera:to collect before the next reset "
-        r"\((?P<duration>.+?)\)",
-        re.IGNORECASE,
-    )
-    _TIMER_BKU_PROBABILITY = re.compile(r"next \$sw:\s*(?P<value>\d+)%", re.IGNORECASE)
-    _TIMER_OURO = re.compile(
-        r"(?P<oh>\d+)\s+\$oh left for today,\s*(?P<oc>\d+)\s+\$oc,\s*"
-        r"(?P<oq>\d+)\s+\$oq(?:\s*\(\+(?P<stored>\d+) stored\))?\s*and\s*"
-        r"(?P<ot>\d+)\s+\$ot\.",
-        re.IGNORECASE,
-    )
-    _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
     @staticmethod
     def _lines(text: str) -> list[str]:
@@ -324,23 +373,6 @@ class MudaeTextParser:
     @staticmethod
     def _number(value: str) -> int:
         return int(value.replace(",", ""))
-
-    @staticmethod
-    def _duration_minutes(value: str) -> int:
-        """Convert Mudae's `2h 32 min`/`32 min` wording to whole minutes."""
-        value = re.sub(r"\*+", "", value)
-        hours = re.search(r"(?P<value>\d+)h", value, re.IGNORECASE)
-        minutes = re.search(r"(?P<value>\d+)\s*min", value, re.IGNORECASE)
-        if hours is None and minutes is None:
-            raise MudaeParseError(f"Unsupported Mudae timer duration: {value!r}")
-        return (int(hours.group("value")) * 60 if hours else 0) + (
-            int(minutes.group("value")) if minutes else 0
-        )
-
-    @classmethod
-    def _clean_series(cls, value: str) -> str:
-        """Remove display-only gender and starwish markers from a series."""
-        return cls._STARWISH_MARKER.sub(" ", cls._GENDER.sub("", value)).strip()
 
     def parse_top_page(self, text: str) -> TopPage:
         """Parse one copied `$top` page into ranked character observations."""
@@ -373,6 +405,23 @@ class MudaeTextParser:
             page_count=int(page.group("pages")) if page else None,
             characters=tuple(characters),
         )
+
+    @staticmethod
+    def _duration_minutes(value: str) -> int:
+        """Convert Mudae's `2h 32 min`/`32 min` wording to whole minutes."""
+        value = re.sub(r"\*+", "", value)
+        hours = re.search(r"(?P<value>\d+)h", value, re.IGNORECASE)
+        minutes = re.search(r"(?P<value>\d+)\s*min", value, re.IGNORECASE)
+        if hours is None and minutes is None:
+            raise MudaeParseError(f"Unsupported Mudae timer duration: {value!r}")
+        return (int(hours.group("value")) * 60 if hours else 0) + (
+            int(minutes.group("value")) if minutes else 0
+        )
+
+    @classmethod
+    def _clean_series(cls, value: str) -> str:
+        """Remove display-only gender and starwish markers from a series."""
+        return cls._STARWISH_MARKER.sub(" ", cls._GENDER.sub("", value)).strip()
 
     def parse_character_details(self, text: str) -> CharacterDetails:
         """Parse the key fields from a copied `$im <character>` response."""
@@ -421,6 +470,29 @@ class MudaeTextParser:
             ),
         )
 
+    @classmethod
+    def _roll_name_and_series(cls, lines: list[str], marker_index: int) -> tuple[str, str]:
+        """Recover the name and all wrapped series lines before a roll marker."""
+        content_lines = [
+            line
+            for line in lines[:marker_index]
+            if line.casefold() not in {"mudae", "app"}
+            and not line.lstrip().startswith(("$", "/"))
+            and not line.casefold().startswith("wished by ")
+        ]
+        if len(content_lines) < 2:
+            raise MudaeParseError("Expected character name and series before the Mudae roll marker.")
+        return content_lines[0], " ".join(content_lines[1:])
+
+    @staticmethod
+    def _validate_roll_identity(name: str, series: str) -> None:
+        """Reject a likely title/series split instead of storing a false character."""
+        if len(name.strip()) >= 28 and len(series.strip()) <= 8:
+            raise MudaeParseError(
+                "Ambiguous Mudae roll identity: a long character name and short series "
+                "were returned; use `$im` to verify it before importing."
+            )
+
     def parse_roll(self, text: str) -> RollObservation:
         """Parse the key fields from a copied standard Mudae roll card."""
         lines = self._lines(text)
@@ -446,6 +518,7 @@ class MudaeTextParser:
                 displayed_key_type=key.group("key_type").lower() if key else None,
                 displayed_key_count=int(key.group("count")) if key else None,
             )
+
         claims_index = next(
             (index for index, line in enumerate(lines) if self._ROLL_CLAIMS.match(line)),
             None,
@@ -651,29 +724,6 @@ class MudaeTextParser:
         raise MudaeParseError(
             "Expected a compact Mudae Kakera reaction-blocked response."
         )
-
-    @classmethod
-    def _roll_name_and_series(cls, lines: list[str], marker_index: int) -> tuple[str, str]:
-        """Recover the name and all wrapped series lines before a roll marker."""
-        content_lines = [
-            line
-            for line in lines[:marker_index]
-            if line.casefold() not in {"mudae", "app"}
-            and not line.lstrip().startswith(("$", "/"))
-            and not line.casefold().startswith("wished by ")
-        ]
-        if len(content_lines) < 2:
-            raise MudaeParseError("Expected character name and series before the Mudae roll marker.")
-        return content_lines[0], " ".join(content_lines[1:])
-
-    @staticmethod
-    def _validate_roll_identity(name: str, series: str) -> None:
-        """Reject a likely title/series split instead of storing a false character."""
-        if len(name.strip()) >= 28 and len(series.strip()) <= 8:
-            raise MudaeParseError(
-                "Ambiguous Mudae roll identity: a long character name and short series "
-                "were returned; use `$im` to verify it before importing."
-            )
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:
         """Parse one copied keyed-harem page, with optional current Kakera values."""
@@ -890,11 +940,7 @@ class MudaeTextParser:
 
     def parse_disablelist(self, text: str) -> DisableListSnapshot:
         """Parse account-specific disable-list settings from a copied `$dl` reply."""
-        # Discord embeds may preserve Markdown emphasis around the title or
-        # numeric values even though copied text usually does not.  Keep
-        # underscores intact because they can be part of a real series name,
-        # while removing only Markdown asterisks for this format.
-        lines = [re.sub(r"\*+", "", line) for line in self._lines(text)]
+        lines = self._lines(text)
         header = next(
             (
                 self._DISABLELIST_HEADER.search(line)
@@ -1161,17 +1207,78 @@ class MudaeTextParser:
             perk = self._TOWER_PERK.match(line)
             if perk is not None and "☑" in line:
                 built_perks.append(int(perk.group("id")))
-        for line in lines:
-            if any(ord(char) in {0x2611, 0x2705} for char in line):
-                perk = self._TOWER_PERK.match(line)
-                if perk is not None and int(perk.group("id")) not in built_perks:
-                    built_perks.append(int(perk.group("id")))
         return TowerStateSnapshot(
             current_level=int(level.group("level")),
             completed_towers=(int(level.group("towers")) if level.group("towers") else None),
             next_level_cost=self._number(next_cost.group("value")),
             kakera_balance=self._number(balance.group("value")),
             built_perk_ids=tuple(built_perks),
+        )
+
+    def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
+        """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
+        lines = self._lines(text)
+
+        no_loots = next(
+            (self._NO_KAKERALOOTS.search(line) for line in lines if self._NO_KAKERALOOTS.search(line)),
+            None,
+        )
+        if no_loots is not None:
+            return KakeralootStateSnapshot(
+                has_kakeraloots=False,
+                status_note="No Kakeraloots bought; Mudae did not report loot statistics.",
+            )
+
+        def first_match(pattern: re.Pattern[str]) -> re.Match[str] | None:
+            return next((pattern.search(line) for line in lines if pattern.search(line)), None)
+
+        rolls = first_match(self._LOOT_ROLLS)
+        disable = first_match(self._LOOT_DISABLE)
+        protected_wish = first_match(self._LOOT_PROTECTED_WISH)
+        mudapins = first_match(self._LOOT_MUDAPINS)
+        rt = first_match(self._LOOT_RT)
+        permanent_roll = first_match(self._LOOT_PERMANENT_ROLL)
+        star_branch = first_match(self._LOOT_STAR_BRANCH)
+        quantity = first_match(self._LOOT_QUANTITY)
+        quality = first_match(self._LOOT_QUALITY)
+        usage = first_match(self._LOOT_USAGE)
+        balance = next(
+            (self._LOOT_BALANCE.match(line) for line in lines if self._LOOT_BALANCE.match(line)),
+            None,
+        )
+        if any(
+            match is None
+            for match in (
+                quantity,
+                quality,
+                usage,
+                balance,
+            )
+        ):
+            raise MudaeParseError("Expected a complete Mudae $lk Kakeraloot stats response.")
+
+        return KakeralootStateSnapshot(
+            has_kakeraloots=True,
+            rolls_stacked=int(rolls.group("value")) if rolls else None,
+            disable_wa_ha_reduction=(int(disable.group("wa_ha")) if disable else None),
+            disable_wg_hg_reduction=(int(disable.group("wg_hg")) if disable else None),
+            protected_wish_level=(int(protected_wish.group("level")) if protected_wish else None),
+            protected_wish_denominator=(
+                self._number(protected_wish.group("denominator"))
+                if protected_wish
+                else None
+            ),
+            mudapins=int(mudapins.group("value")) if mudapins else None,
+            rt_cooldown_reduction_hours=(int(rt.group("value")) if rt else None),
+            permanent_roll_bonus=(int(permanent_roll.group("value")) if permanent_roll else None),
+            star_branches=(int(star_branch.group("branches")) if star_branch else None),
+            starwish_slots_from_branches=(
+                int(star_branch.group("slots")) if star_branch else None
+            ),
+            quantity_level=int(quantity.group("value")),
+            quality_level=int(quality.group("value")),
+            usage_count=self._number(usage.group("value")),
+            kakera_balance=self._number(balance.group("value")),
         )
 
     def parse_sphere_result(self, text: str) -> SphereResultSnapshot:
@@ -1221,80 +1328,6 @@ class MudaeTextParser:
                 else sum(gain.amount for gain in gains)
             ),
             stock=stock,
-        )
-
-    def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
-        """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
-        lines = [re.sub(r"[*_]", "", line) for line in self._lines(text)]
-
-        no_loots = next(
-            (self._NO_KAKERALOOTS.search(line) for line in lines if self._NO_KAKERALOOTS.search(line)),
-            None,
-        )
-        if no_loots is not None:
-            return KakeralootStateSnapshot(
-                has_kakeraloots=False,
-                status_note="No Kakeraloots bought; Mudae did not report loot statistics.",
-            )
-
-        def first_match(pattern: re.Pattern[str]) -> re.Match[str] | None:
-            return next((pattern.search(line) for line in lines if pattern.search(line)), None)
-
-        rolls = first_match(self._LOOT_ROLLS)
-        disable = first_match(self._LOOT_DISABLE)
-        protected_wish = first_match(self._LOOT_PROTECTED_WISH)
-        mudapins = first_match(self._LOOT_MUDAPINS)
-        rt = first_match(self._LOOT_RT)
-        permanent_roll = first_match(self._LOOT_PERMANENT_ROLL)
-        star_branch = first_match(self._LOOT_STAR_BRANCH)
-        quantity = first_match(self._LOOT_QUANTITY)
-        quality = first_match(self._LOOT_QUALITY)
-        usage = first_match(self._LOOT_USAGE)
-        balance = next(
-            (self._LOOT_BALANCE.match(line) for line in lines if self._LOOT_BALANCE.match(line)),
-            None,
-        )
-        # Mudae omits the reward/progression lines when an account has only
-        # recently bought Kakeraloots. Quantity, quality, usage, and balance
-        # are the stable core fields shared by both the full and compact
-        # layouts; the remaining fields are optional observations.
-        if any(match is None for match in (quantity, quality, usage, balance)):
-            raise MudaeParseError("Expected a Mudae $lk Kakeraloot stats response.")
-
-        return KakeralootStateSnapshot(
-            has_kakeraloots=True,
-            rolls_stacked=int(rolls.group("value")) if rolls else None,
-            disable_wa_ha_reduction=(
-                int(disable.group("wa_ha")) if disable else None
-            ),
-            disable_wg_hg_reduction=(
-                int(disable.group("wg_hg")) if disable else None
-            ),
-            protected_wish_level=(
-                int(protected_wish.group("level")) if protected_wish else None
-            ),
-            protected_wish_denominator=(
-                self._number(protected_wish.group("denominator"))
-                if protected_wish
-                else None
-            ),
-            mudapins=int(mudapins.group("value")) if mudapins else None,
-            rt_cooldown_reduction_hours=(
-                int(rt.group("value")) if rt else None
-            ),
-            permanent_roll_bonus=(
-                int(permanent_roll.group("value")) if permanent_roll else None
-            ),
-            star_branches=(
-                int(star_branch.group("branches")) if star_branch else None
-            ),
-            starwish_slots_from_branches=(
-                int(star_branch.group("slots")) if star_branch else None
-            ),
-            quantity_level=int(quantity.group("value")),
-            quality_level=int(quality.group("value")),
-            usage_count=self._number(usage.group("value")),
-            kakera_balance=self._number(balance.group("value")),
         )
 
     def parse_kakeraloot_settings(self, text: str) -> KakeralootSettingsSnapshot:
