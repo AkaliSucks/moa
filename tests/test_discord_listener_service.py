@@ -1,10 +1,14 @@
 import asyncio
 import sqlite3
+from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from moa.database.sqlite import connect
 from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.core.config import ConfigService
 from moa.services.catalog_service import CatalogService
 from moa.services.discord_listener_service import DiscordListenerService
@@ -1185,6 +1189,342 @@ def test_listener_characterizes_duplicate_message_delivery_as_process_local_only
     ]
     assert len(catalog.recent_rolls("Test Server", "user_a", 10)) == 2
     assert catalog.recent_rolls("Test Server", "user_b", 10) == ()
+
+
+def _durable_listener(tmp_path, *, importer=None):
+    database_path = tmp_path / "catalog.db"
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(database_path))
+    repository = DiscordMessageRepository(database_path)
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=repository,
+    )
+    listener._mudae_user_id = 999
+    return listener, repository, database_path
+
+
+def _durable_roll_message(
+    message_id: int = 1209,
+    *,
+    content: str = "Berry (YD)\nYurei Deco\n28:kakera:\nBerry (YD) / Yurei Deco - 28 ka",
+    edited_at: datetime | None = None,
+    author_id: int = 999,
+):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=author_id),
+        interaction_metadata=SimpleNamespace(name="wa", user=SimpleNamespace(id=456)),
+        content=content,
+        embeds=(),
+        edited_at=edited_at,
+    )
+
+
+def _receipt_rows(database_path, table: str):
+    with connect(database_path) as connection:
+        return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+
+
+def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    aggregates = _receipt_rows(database_path, "discord_message_aggregates")
+    revisions = _receipt_rows(database_path, "discord_message_revisions")
+    events = _receipt_rows(database_path, "discord_source_events")
+    assert len(aggregates) == len(revisions) == len(events) == 1
+    assert events[0]["event_kind"] == "message_revision"
+    assert events[0]["delivery_count"] == 1
+    assert revisions[0]["source_observed_at"] is None
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_receives_edit_as_new_revision_under_same_aggregate(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    original = _durable_roll_message()
+    edited_at = datetime(2026, 7, 19, 20, 0, tzinfo=timezone.utc)
+    edited = _durable_roll_message(
+        content="Miku Nakano\nThe Quintessential Quintuplets\n44:kakera:\nMiku Nakano / The Quintessential Quintuplets - 44 ka",
+        edited_at=edited_at,
+    )
+
+    asyncio.run(listener.handle_bot_response(original))
+    asyncio.run(listener.handle_message_edit(original, edited))
+
+    aggregates = _receipt_rows(database_path, "discord_message_aggregates")
+    revisions = _receipt_rows(database_path, "discord_message_revisions")
+    events = _receipt_rows(database_path, "discord_source_events")
+    assert len(aggregates) == 1
+    assert len(revisions) == len(events) == 2
+    assert revisions[0]["aggregate_id"] == revisions[1]["aggregate_id"]
+    assert revisions[0]["id"] != revisions[1]["id"]
+    assert revisions[1]["source_observed_at"] == edited_at.isoformat()
+    assert [event["event_kind"] for event in events] == [
+        "message_revision",
+        "message_revision",
+    ]
+
+
+def test_listener_duplicate_delivery_updates_receipt_but_stays_process_local_suppressed(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    first_aggregate_id = _receipt_rows(database_path, "discord_message_aggregates")[0]["id"]
+    first_revision_id = _receipt_rows(database_path, "discord_message_revisions")[0]["id"]
+    first_event_id = _receipt_rows(database_path, "discord_source_events")[0]["id"]
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _receipt_rows(database_path, "discord_message_aggregates")[0]["id"] == first_aggregate_id
+    assert _receipt_rows(database_path, "discord_message_revisions")[0]["id"] == first_revision_id
+    events = _receipt_rows(database_path, "discord_source_events")
+    assert len(events) == 1
+    assert events[0]["id"] == first_event_id
+    assert events[0]["delivery_count"] == 2
+    assert len(_receipt_rows(database_path, "discord_message_revisions")) == 1
+    assert len(_import_event_rows(database_path, "roll")) == 1
+
+
+def test_listener_receives_duplicate_before_seen_payload_suppression(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    seen_sizes: list[int] = []
+    original_receive = repository.receive_message
+
+    def receive_message(**kwargs):
+        seen_sizes.append(len(listener._seen_payloads))
+        return original_receive(**kwargs)
+
+    repository.receive_message = receive_message
+    message = _durable_roll_message()
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert seen_sizes == [0, 1]
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+
+
+def test_listener_reconstruction_reuses_durable_identity_and_replays_projection(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_event = _receipt_rows(database_path, "discord_source_events")[0]
+
+    config = ConfigService(tmp_path / "config.json")
+    catalog = CatalogService(CatalogRepository(database_path))
+    restarted_listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    restarted_listener._mudae_user_id = 999
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert event["id"] == first_event["id"]
+    assert event["delivery_count"] == 2
+    assert len(_import_event_rows(database_path, "roll")) == 2
+
+
+def test_listener_restart_replay_is_not_treated_as_projection_idempotent(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="imported")
+    config = ConfigService(tmp_path / "config.json")
+    restarted_listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    restarted_listener._mudae_user_id = 999
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "received"
+
+
+def test_listener_ignored_bot_message_does_not_create_durable_rows(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message(author_id=998)))
+
+    assert _receipt_rows(database_path, "discord_message_aggregates") == []
+    assert _receipt_rows(database_path, "discord_message_revisions") == []
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+
+def test_listener_receipt_failure_prevents_downstream_calls_and_seen_state(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="imported")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+
+    def fail_receive(**_kwargs):
+        raise RuntimeError("receive unavailable")
+
+    repository.receive_message = fail_receive
+    helper_names = (
+        "_context_from_active_scan",
+        "_context_from_interaction",
+        "_context_from_reaction_receipt",
+        "_context_from_pending_workflow",
+        "_context_from_active_roll",
+        "_resolve_message_kind",
+    )
+    helper_spies = {name: Mock(wraps=getattr(listener, name)) for name in helper_names}
+    for name, spy in helper_spies.items():
+        setattr(listener, name, spy)
+    router_detect = Mock(wraps=listener._router.detect)
+    listener._router.detect = router_detect
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    for spy in helper_spies.values():
+        spy.assert_not_called()
+    router_detect.assert_not_called()
+    importer.import_message.assert_not_called()
+    assert listener._seen_payloads == set()
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+    repository.receive_message = DiscordMessageRepository(database_path).receive_message
+    listener._resolve_message_kind = DiscordListenerService._resolve_message_kind.__get__(listener)
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+    importer.import_message.assert_called_once()
+
+
+def test_listener_receipt_failure_precedes_active_scan_router_detection(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+
+    repository.receive_message = Mock(side_effect=RuntimeError("receive unavailable"))
+    listener._scan_contexts[(123, 900, "harem")] = object()
+    listener._router.detect = Mock(side_effect=AssertionError("router ran before receipt"))
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    listener._router.detect.assert_not_called()
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+
+def test_listener_receipt_failure_precedes_pending_workflow_resolution(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+
+    repository.receive_message = Mock(side_effect=RuntimeError("receive unavailable"))
+    listener._pending_contexts[("123", 900, "456")] = object()
+    listener._resolve_message_kind = Mock(
+        side_effect=AssertionError("pending workflow resolved before receipt")
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    listener._resolve_message_kind.assert_not_called()
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+
+def test_listener_receipt_failure_precedes_attribution_context_helpers(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+
+    repository.receive_message = Mock(side_effect=RuntimeError("receive unavailable"))
+    listener._context_from_interaction = Mock(
+        side_effect=AssertionError("attribution context resolved before receipt")
+    )
+    listener._config.identity_for_discord_server_account = Mock(
+        side_effect=AssertionError("account attribution ran before receipt")
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    listener._context_from_interaction.assert_not_called()
+    listener._config.identity_for_discord_server_account.assert_not_called()
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+
+def test_listener_successful_receipt_precedes_context_and_router_helpers(tmp_path) -> None:
+    importer = Mock()
+    importer.import_message.return_value = SimpleNamespace(message="imported")
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    order: list[str] = []
+    original_receive = repository.receive_message
+
+    def receive_message(**kwargs):
+        order.append("receive")
+        return original_receive(**kwargs)
+
+    repository.receive_message = receive_message
+    router_detect = listener._router.detect
+    listener._router.detect = Mock(
+        side_effect=lambda *args, **kwargs: (
+            order.append("router"),
+            router_detect(*args, **kwargs),
+        )[1]
+    )
+    for name in (
+        "_context_from_active_scan",
+        "_context_from_interaction",
+        "_context_from_reaction_receipt",
+        "_context_from_pending_workflow",
+        "_context_from_active_roll",
+        "_resolve_message_kind",
+    ):
+        original_helper = getattr(listener, name)
+        setattr(
+            listener,
+            name,
+            Mock(
+                side_effect=lambda *args, _name=name, _helper=original_helper, **kwargs: (
+                    order.append(_name),
+                    _helper(*args, **kwargs),
+                )[1]
+            ),
+        )
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    assert order[0] == "receive"
+    assert order.index("receive") < order.index("_context_from_interaction")
+    assert order.index("receive") < order.index("router")
+    assert _receipt_rows(database_path, "discord_source_events")[0]["event_kind"] == (
+        "message_revision"
+    )
+    importer.import_message.assert_called_once()
+
+
+def test_listener_create_and_edit_callbacks_use_message_revision_event_kind(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    original = _durable_roll_message()
+    edited = _durable_roll_message(
+        edited_at=datetime(2026, 7, 19, 20, 1, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(listener.handle_bot_response(original))
+    asyncio.run(listener.handle_message_edit(original, edited))
+
+    assert [row["event_kind"] for row in _receipt_rows(database_path, "discord_source_events")] == [
+        "message_revision",
+        "message_revision",
+    ]
+
+
+def test_listener_receipt_does_not_create_processing_attempts(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
 
 
 def test_listener_characterizes_reaction_acknowledgement_identity_and_attribution(
