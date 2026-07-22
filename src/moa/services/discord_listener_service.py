@@ -24,6 +24,7 @@ from moa.repositories.discord_message_repository import (
 )
 from moa.services.automatic_import_service import (
     AutomaticImportService,
+    DurableClaimImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
 )
@@ -80,7 +81,7 @@ class DiscordListenerService:
         "hg",
         "husbandog",
     }
-    _DURABLE_IMPORT_KINDS = {"profile", "roll"}
+    _DURABLE_IMPORT_KINDS = {"claim", "profile", "roll"}
 
     def __init__(
         self,
@@ -95,6 +96,7 @@ class DiscordListenerService:
         self._config = config_service or ConfigService()
         self._catalog = catalog_service or CatalogService()
         self._importer = importer or AutomaticImportService(self._catalog)
+        self._durable_claim_imports_enabled = discord_message_repository is not None
         self._discord_message_repository = discord_message_repository
         if self._discord_message_repository is None and catalog_service is not None:
             catalog_repository = getattr(catalog_service, "_repository", None)
@@ -117,6 +119,13 @@ class DiscordListenerService:
         self._message_cache: dict[int, discord.Message] = {}
         self._unattributed_roll_warning_at: dict[tuple[int, int], float] = {}
         self._mudae_user_id: int | None = None
+
+    def _is_durable_import_kind(self, kind: str) -> bool:
+        """Identify importer kinds using the explicitly composed durable seams."""
+        return kind in self._DURABLE_IMPORT_KINDS and (
+            kind == "claim" and self._durable_claim_imports_enabled
+            or kind != "claim"
+        )
 
     def run(self, token: str, mudae_user_id: int | None = None) -> None:
         """Run the blocking Discord gateway client until interrupted."""
@@ -587,7 +596,7 @@ class DiscordListenerService:
         processing_attempt = None
         if (
             received_event is not None
-            and kind in self._DURABLE_IMPORT_KINDS
+            and self._is_durable_import_kind(kind)
             and received_event.status == "processing"
         ):
             self._logger.info(
@@ -597,7 +606,7 @@ class DiscordListenerService:
             )
             return
         if received_event is not None and not (
-            kind in self._DURABLE_IMPORT_KINDS and received_event.status == "succeeded"
+            self._is_durable_import_kind(kind) and received_event.status == "succeeded"
         ):
             try:
                 processing_attempt = self._discord_message_repository.begin_processing_attempt(
@@ -614,7 +623,7 @@ class DiscordListenerService:
                     received_event.source_event_id,
                     error,
                 )
-                if kind in self._DURABLE_IMPORT_KINDS:
+                if self._is_durable_import_kind(kind):
                     self._logger.info(
                         "Did not import %s source event %s because its durable lifecycle "
                         "is not retryable",
@@ -667,7 +676,7 @@ class DiscordListenerService:
                 "harem_scan_id": scan_id,
                 "detected_kind": kind,
             }
-            if kind in self._DURABLE_IMPORT_KINDS and received_event is not None:
+            if self._is_durable_import_kind(kind) and received_event is not None:
                 finished_at = datetime.now(timezone.utc)
                 context_kwargs = {
                     "source_event_id": received_event.source_event_id,
@@ -680,8 +689,12 @@ class DiscordListenerService:
                     import_kwargs["durable_roll_context"] = DurableRollImportContext(
                         **context_kwargs
                     )
-                else:
+                elif kind == "profile":
                     import_kwargs["durable_profile_context"] = DurableProfileImportContext(
+                        **context_kwargs
+                    )
+                else:
+                    import_kwargs["durable_claim_context"] = DurableClaimImportContext(
                         **context_kwargs
                     )
             result = self._importer.import_message(
@@ -695,7 +708,7 @@ class DiscordListenerService:
                 getattr(result, "durable_success_recorded", False)
             )
             if (
-                kind in self._DURABLE_IMPORT_KINDS
+                self._is_durable_import_kind(kind)
                 and received_event is not None
                 and received_event.status == "succeeded"
                 and not getattr(result, "replay_skipped", False)
@@ -733,7 +746,7 @@ class DiscordListenerService:
             )
         except Exception as cleanup_error:
             if durable_success_recorded:
-                durable_label = "roll" if kind == "roll" else "profile"
+                durable_label = kind if self._is_durable_import_kind(kind) else "import"
                 self._logger.error(
                     "Best-effort cleanup failed after durable %s success for message %s; "
                     "the succeeded source event and attempt remain unchanged: %s",
