@@ -9,6 +9,7 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
+from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 
 
@@ -187,15 +188,21 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     discord_repository = captured["discord_message_repository"]
     importer = captured["importer"]
     coordinator = importer._roll_projection_coordinator
+    profile_coordinator = importer._profile_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
     assert isinstance(importer, AutomaticImportService)
     assert isinstance(coordinator, RollProjectionCoordinator)
+    assert isinstance(profile_coordinator, ProfileProjectionCoordinator)
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
     assert coordinator._discord is discord_repository
+    assert coordinator._database_path == database_path
+    assert profile_coordinator._catalog is catalog_service._repository
+    assert profile_coordinator._discord is discord_repository
+    assert profile_coordinator._database_path == database_path
     assert captured["catalog_service"] is importer._catalog
     assert captured["token"] == "test-token"
     assert captured["mudae_user_id"] == 999

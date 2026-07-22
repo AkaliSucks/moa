@@ -14,6 +14,7 @@ from moa.core.config import ConfigService
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.discord_listener_service import DiscordListenerService
+from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 
 
@@ -1231,6 +1232,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            profile_projection_coordinator=ProfileProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1276,6 +1281,21 @@ def _durable_roll_message(
     )
 
 
+def _durable_profile_message(message_id: int = 1211, *, content: str | None = None):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(
+            name="profile", user=SimpleNamespace(id=456)
+        ),
+        content=content or "user_a\nCollection size: 0 (0%:female: 0% :male:)",
+        embeds=(),
+        edited_at=None,
+    )
+
+
 def _receipt_rows(database_path, table: str):
     with connect(database_path) as connection:
         return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
@@ -1312,6 +1332,191 @@ def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
     assert len(_receipt_rows(database_path, "roll_observations")) == 1
     assert len(_receipt_rows(database_path, "server_character_observations")) == 1
     assert len(_receipt_rows(database_path, "discord_projection_links")) == 2
+
+
+def test_listener_first_durable_profile_coordinates_and_owns_success(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
+
+    asyncio.run(listener.handle_bot_response(_durable_profile_message()))
+
+    context = importer.import_message.call_args.kwargs["durable_profile_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.finished_at.tzinfo is not None
+    assert context.finished_at.utcoffset() is not None
+    repository.mark_processing_success.assert_not_called()
+    assert len(_receipt_rows(database_path, "import_events")) == 1
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+    assert _receipt_rows(database_path, "discord_processing_attempts")[0]["status"] == "succeeded"
+
+
+def test_listener_succeeded_profile_restart_replays_without_new_projection(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_profile_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    results = []
+    actual_importer = restarted_listener._importer
+
+    def import_replay(*args, **kwargs):
+        result = actual_importer.import_message(*args, **kwargs)
+        results.append(result)
+        return result
+
+    importer = Mock()
+    importer.import_message.side_effect = import_replay
+    restarted_listener._importer = importer
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_profile_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    assert results[0].replay_skipped is True
+    assert results[0].durable_success_recorded is True
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_receipt_rows(database_path, "import_events")) == 1
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_retryable_profile_coordinator_failure_retries_once(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = first_listener._importer._profile_projection_coordinator
+    coordinator.coordinate_profile = Mock(side_effect=RuntimeError("temporary profile failure"))
+    message = _durable_profile_message()
+
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    failed_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert failed_attempt["status"] == "failed"
+    assert failed_attempt["retryable"] == 1
+    assert len(_receipt_rows(database_path, "import_events")) == 0
+    assert len(_receipt_rows(database_path, "profile_observations")) == 0
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 0
+
+    second_listener, _second_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
+    assert len(_receipt_rows(database_path, "import_events")) == 1
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_active_profile_does_not_start_or_import_again(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_profile_message()
+    listener._receive_message(message, message.content)
+    active = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+    importer.import_message.assert_not_called()
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_listener_terminal_profile_does_not_import_or_fallback(tmp_path, terminal_status) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_profile_message()
+    listener._receive_message(message, message.content)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    finished_at = datetime.now(timezone.utc)
+    repository.mark_processing_failure(
+        source_event_id=1,
+        attempt_id=attempt.attempt_id,
+        status=terminal_status,
+        retryable=False,
+        failure_code="terminal_test_failure",
+        failure_detail="terminal test failure",
+        finished_at=finished_at,
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == terminal_status
+    importer.import_message.assert_not_called()
+
+
+def test_listener_profile_cleanup_failure_preserves_durable_success(tmp_path, caplog) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.mark_processing_failure = Mock(wraps=repository.mark_processing_failure)
+    listener._consume_context = Mock(side_effect=RuntimeError("cleanup unavailable"))
+    caplog.set_level(logging.ERROR, logger="moa.discord")
+
+    asyncio.run(listener.handle_bot_response(_durable_profile_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    repository.mark_processing_failure.assert_not_called()
+    assert "Best-effort cleanup failed after durable profile success" in caplog.text
+
+
+def test_listener_non_durable_profile_keeps_direct_path_without_context(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_profile_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_profile_context" not in kwargs
+    assert "durable_roll_context" not in kwargs
+    assert len(_receipt_rows(tmp_path / "catalog.db", "profile_observations")) == 1
+
+
+def test_listener_same_process_profile_duplicate_is_suppressed_before_import(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_profile_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert importer.import_message.call_count == 1
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
 
 
 def test_listener_receives_edit_as_new_revision_under_same_aggregate(tmp_path) -> None:
