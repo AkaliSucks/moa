@@ -1,9 +1,22 @@
 """Route one recognized Mudae message into the correct existing importer."""
 
+from dataclasses import dataclass
+from datetime import datetime
+
 from moa.models.catalog import AutomaticImportResult
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.mudae import MudaeTextParser
 from moa.services.catalog_service import CatalogService
+from moa.services.roll_projection_coordinator import RollProjectionCoordinator
+
+
+@dataclass(frozen=True, slots=True)
+class DurableRollImportContext:
+    """Durable lifecycle identifiers and completion time for one roll import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    finished_at: datetime
 
 
 class AutomaticImportService:
@@ -14,10 +27,12 @@ class AutomaticImportService:
         catalog_service: CatalogService | None = None,
         parser: MudaeTextParser | None = None,
         router: MudaeMessageRouter | None = None,
+        roll_projection_coordinator: RollProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
         self._router = router or MudaeMessageRouter(self._parser)
+        self._roll_projection_coordinator = roll_projection_coordinator
 
     def import_message(
         self,
@@ -27,6 +42,9 @@ class AutomaticImportService:
         account_name: str | None = None,
         harem_scan_id: int | None = None,
         detected_kind: str | None = None,
+        *,
+        observed_at: datetime | None = None,
+        durable_roll_context: DurableRollImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -199,16 +217,43 @@ class AutomaticImportService:
         if kind == "roll":
             account = self._require(account_name, "account", kind)
             roll = self._parser.parse_roll(raw_message)
-            result = self._catalog.import_roll(
-                roll, server, account, raw_message, source
-            )
+            if durable_roll_context is None:
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+                self._catalog.import_roll(roll, server, account, raw_message, source)
+            else:
+                coordinator = self._roll_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A RollProjectionCoordinator is required for a durable roll import."
+                    )
+                coordinated = coordinator.coordinate_roll(
+                    source_event_id=durable_roll_context.source_event_id,
+                    attempt_id=durable_roll_context.attempt_id,
+                    roll=roll,
+                    server=server,
+                    account=account,
+                    raw=raw_message,
+                    source=source,
+                    observed_at=observed_at or durable_roll_context.finished_at,
+                    finished_at=durable_roll_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
             key_note = ""
             if roll.displayed_key_type is not None and roll.displayed_key_count is not None:
                 key_note = f" with :{roll.displayed_key_type}key: ({roll.displayed_key_count})"
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=1,
+                imported_count=imported_count,
                 message=f"Imported roll observation: {roll.name} / {roll.series}{key_note}.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
         if kind == "im":
             account = account_name.strip() if account_name else None

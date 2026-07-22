@@ -1,11 +1,63 @@
 import sqlite3
+from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
 
+from moa.models.character import RollObservation
+from moa.models.catalog import AutomaticImportResult
+from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
-from moa.services.automatic_import_service import AutomaticImportService
+from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.automatic_import_service import (
+    AutomaticImportService,
+    DurableRollImportContext,
+)
 from moa.services.catalog_service import CatalogService
+from moa.services.roll_projection_coordinator import (
+    RollProjectionCoordinator,
+    RollProjectionResult,
+)
+
+
+ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
+OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
+
+
+def _durable_roll_importer(tmp_path):
+    database_path = tmp_path / "durable-roll.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = RollProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "payload-hash", "revision-1"
+        ),
+        event_key="event",
+        event_kind="message_create",
+        raw_text=ROLL_MESSAGE,
+        payload_json='{"content":"roll"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        roll_projection_coordinator=coordinator,
+    )
+    return service, received.source_event_id, attempt.attempt_id
 
 
 def test_automatic_import_routes_top_pages_without_server_context(tmp_path) -> None:
@@ -84,6 +136,215 @@ def test_automatic_import_persists_rankless_rolls_for_future_history(tmp_path) -
     assert result.imported_count == 1
     assert rolls[0].character.name == "Hips"
     assert rolls[0].claim_rank is None
+
+
+def test_automatic_import_durable_roll_delegates_once_with_all_context(tmp_path) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips",
+        series="Dekoboko Majo no Oyako Jijou",
+        claim_rank=None,
+        kakera_value=30,
+    )
+    router = Mock()
+    coordinator = Mock()
+    coordinator.coordinate_roll.return_value = RollProjectionResult(
+        imported_count=1,
+        import_event_id=42,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_targets=(),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=router,
+        roll_projection_coordinator=coordinator,
+    )
+    context = DurableRollImportContext(
+        source_event_id=17,
+        attempt_id=19,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        ROLL_MESSAGE,
+        "discord:message",
+        " Lake ",
+        " ernieuuu ",
+        detected_kind="roll",
+        observed_at=OBSERVED_AT,
+        durable_roll_context=context,
+    )
+
+    parser.parse_roll.assert_called_once_with(ROLL_MESSAGE)
+    coordinator.coordinate_roll.assert_called_once_with(
+        source_event_id=17,
+        attempt_id=19,
+        roll=parser.parse_roll.return_value,
+        server="Lake",
+        account="ernieuuu",
+        raw=ROLL_MESSAGE,
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_roll.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id == 42
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_roll_maps_completed_replay(tmp_path) -> None:
+    service, source_event_id, attempt_id = _durable_roll_importer(tmp_path)
+    first = service.import_message(
+        ROLL_MESSAGE,
+        "discord",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+        observed_at=OBSERVED_AT,
+        durable_roll_context=DurableRollImportContext(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    replay = service.import_message(
+        ROLL_MESSAGE,
+        "discord",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+        observed_at=OBSERVED_AT,
+        durable_roll_context=DurableRollImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+
+
+def test_automatic_import_durable_roll_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    coordinator = Mock()
+    coordinator.coordinate_roll.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        roll_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            ROLL_MESSAGE,
+            "discord",
+            "Lake",
+            "ernieuuu",
+            detected_kind="roll",
+            durable_roll_context=DurableRollImportContext(
+                source_event_id=17,
+                attempt_id=19,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_roll.assert_not_called()
+
+
+def test_automatic_import_durable_context_requires_coordinator_before_catalog_write(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    service = AutomaticImportService(catalog)
+
+    with pytest.raises(RuntimeError, match="RollProjectionCoordinator"):
+        service.import_message(
+            ROLL_MESSAGE,
+            "discord",
+            "Lake",
+            "ernieuuu",
+            detected_kind="roll",
+            durable_roll_context=DurableRollImportContext(
+                source_event_id=17,
+                attempt_id=19,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    assert catalog.character_count() == 0
+    with sqlite3.connect(tmp_path / "catalog.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+
+
+def test_automatic_import_non_durable_roll_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    result = service.import_message(
+        ROLL_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+    )
+
+    catalog.import_roll.assert_called_once_with(
+        parser.parse_roll.return_value,
+        "Lake",
+        "ernieuuu",
+        ROLL_MESSAGE,
+        "clipboard",
+    )
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_non_roll_routes_never_call_roll_coordinator(tmp_path) -> None:
+    coordinator = Mock()
+    service = AutomaticImportService(
+        CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        roll_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "Looking for a specific command? Try $search", "clipboard"
+    )
+
+    assert result.kind == "help"
+    coordinator.coordinate_roll.assert_not_called()
+
+
+def test_automatic_import_result_remains_compatible_for_existing_callers() -> None:
+    result = AutomaticImportResult(kind="help", imported_count=0, message="message")
+
+    assert result.model_dump() == {
+        "kind": "help",
+        "imported_count": 0,
+        "message": "message",
+        "import_event_id": None,
+        "replay_skipped": False,
+        "durable_success_recorded": False,
+    }
 
 
 def test_automatic_import_persists_account_scoped_claim_evidence(tmp_path) -> None:
