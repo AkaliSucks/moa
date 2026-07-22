@@ -445,6 +445,14 @@ class _ClaimImportConnectionResult:
     character_id: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ServerSettingsImportConnectionResult:
+    """Rows created by one server-settings import on a caller-owned connection."""
+
+    import_event_id: int
+    server_settings_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -3086,12 +3094,38 @@ class CatalogRepository:
         """Store a complete server-scoped `$settings` snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("server_settings", source, observed_at.isoformat(), raw_message),
+            imported = self._import_server_settings_with_connection(
+                connection,
+                settings=settings,
+                server=server_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
+        return ServerSettingsImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_server_settings_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        settings: ServerSettingsSnapshot,
+        server: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _ServerSettingsImportConnectionResult:
+        """Store one server-settings snapshot without owning the transaction."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("server_settings", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        server_settings_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO server_settings_observations (
@@ -3120,11 +3154,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return ServerSettingsImportResult(
+            ).lastrowid
+        )
+        return _ServerSettingsImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            observed_at=observed_at,
+            server_settings_observation_id=server_settings_observation_id,
         )
 
     def server_settings(self, server_name: str) -> ServerSettingsObservation | None:

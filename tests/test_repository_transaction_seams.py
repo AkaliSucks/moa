@@ -4,7 +4,13 @@ from datetime import datetime, timezone
 import pytest
 
 from moa.database.sqlite import connect
-from moa.models.character import ClaimConfirmation, ProfileSnapshot, RollObservation
+from moa.models.character import (
+    ClaimConfirmation,
+    ProfileSnapshot,
+    RollObservation,
+    ServerSettingMetric,
+    ServerSettingsSnapshot,
+)
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -36,6 +42,25 @@ PROFILE = ProfileSnapshot(
     sphere_stock=None,
     spheres={":spP:": 2},
     displayed_badges=(":silvmudae:", ":DiamondI:"),
+)
+SETTINGS = ServerSettingsSnapshot(
+    server_premium=False,
+    prefix="$",
+    language="English",
+    claim_reset_minutes=60,
+    reset_minute="00",
+    reset_shift_minutes=0,
+    rolls_per_hour=10,
+    claim_reaction_expiry_seconds=30,
+    claimed_character_rarity_multiplier=2,
+    kakera_bonus_percent=15,
+    sphere_bonus_percent=5,
+    game_mode=1,
+    channel_instance=2,
+    metrics=(
+        ServerSettingMetric(label="Prefix", value="$"),
+        ServerSettingMetric(label="Lang", value="English"),
+    ),
 )
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -81,6 +106,21 @@ def _counts(connection: sqlite3.Connection) -> dict[str, int]:
         "rank_snapshots",
         "server_character_observations",
         "discord_projection_links",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _settings_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "server_settings_observations",
+        "discord_projection_links",
+        "discord_source_event_server_attributions",
+        "discord_processing_attempts",
     )
     return {
         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -344,6 +384,186 @@ def test_public_profile_wrapper_keeps_result_and_writes_expected_rows(tmp_path) 
         assert row["pokedex_json"] == '["gulpin", "piloswine"]'
         assert row["kakera_reacts_json"] == '{":kakeraY:": 497}'
         assert row["displayed_badges_json"] == '[":silvmudae:", ":DiamondI:"]'
+
+
+def test_public_server_settings_wrapper_preserves_result_rows_and_metrics(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_server_settings(SETTINGS, " Server ", "settings payload", "discord")
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    with connect(database_path) as connection:
+        assert _settings_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "server_settings_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("server_settings", "discord", "settings payload")
+        observation = connection.execute(
+            """
+            SELECT id, server_premium, prefix, language, claim_reset_minutes, reset_minute,
+                   reset_shift_minutes, rolls_per_hour, claim_reaction_expiry_seconds,
+                   claimed_character_rarity_multiplier, kakera_bonus_percent, sphere_bonus_percent,
+                   game_mode, channel_instance, metrics_json, import_event_id
+            FROM server_settings_observations
+            """
+        ).fetchone()
+        assert observation["id"] > 0
+        assert tuple(observation)[1:14] == (
+            0,
+            "$",
+            "English",
+            60,
+            "00",
+            0,
+            10,
+            30,
+            2,
+            15,
+            5,
+            1,
+            2,
+        )
+        assert observation["metrics_json"] == '[{"label": "Prefix", "value": "$"}, {"label": "Lang", "value": "English"}]'
+        assert observation["import_event_id"] == result.import_event_id
+
+
+def test_server_settings_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_server_settings_with_connection(
+            connection,
+            settings=SETTINGS,
+            server="Server",
+            raw="settings payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_settings_observations").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT import_event_id FROM server_settings_observations WHERE id = ?",
+            (imported.server_settings_observation_id,),
+        ).fetchone()[0] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM server_settings_observations").fetchone()[0] == 0
+
+
+def test_server_settings_helper_commit_persists_rows_and_result_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_server_settings_with_connection(
+            connection,
+            settings=SETTINGS,
+            server="Server",
+            raw="settings payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == imported.import_event_id
+        assert connection.execute(
+            "SELECT id FROM server_settings_observations WHERE id = ?",
+            (imported.server_settings_observation_id,),
+        ).fetchone()[0] == imported.server_settings_observation_id
+        assert _settings_counts(connection)["server_settings_observations"] == 1
+
+
+def test_server_settings_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_server_settings_with_connection(
+                connection,
+                settings=SETTINGS,
+                server="Server",
+                raw="settings payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        assert _settings_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "server_settings_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_server_settings_helper_reuses_server_and_rollback_preserves_it(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_server_settings(SETTINGS, "Server", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        before_counts = _settings_counts(connection)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_server_settings_with_connection(
+                connection,
+                settings=SETTINGS,
+                server=" SERVER ",
+                raw="second payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _settings_counts(connection) == before_counts
+
+
+def test_server_settings_helper_does_not_write_projection_or_attribution_state(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        before = _settings_counts(connection)
+        catalog._import_server_settings_with_connection(
+            connection,
+            settings=SETTINGS,
+            server="Server",
+            raw="settings payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        after = _settings_counts(connection)
+
+    assert after["import_events"] == before["import_events"] + 1
+    assert after["server_contexts"] == before["server_contexts"] + 1
+    assert after["server_settings_observations"] == before["server_settings_observations"] + 1
+    assert after["discord_projection_links"] == before["discord_projection_links"]
+    assert after["discord_source_event_server_attributions"] == before["discord_source_event_server_attributions"]
+    assert after["discord_processing_attempts"] == before["discord_processing_attempts"]
 
 
 def test_profile_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
