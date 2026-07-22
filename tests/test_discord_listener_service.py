@@ -11,8 +11,10 @@ from moa.database.sqlite import connect
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.core.config import ConfigService
+from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.discord_listener_service import DiscordListenerService
+from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 
 
 def test_extract_message_text_flattens_discord_embed_content() -> None:
@@ -144,8 +146,26 @@ def _listener_with_two_configured_users(tmp_path):
         discord_server_id="123",
         discord_user_id="789",
     )
-    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
-    return DiscordListenerService(config_service=config, catalog_service=catalog), catalog
+    database_path = tmp_path / "catalog.db"
+    catalog_repository = CatalogRepository(database_path)
+    catalog = CatalogService(catalog_repository)
+    discord_repository = DiscordMessageRepository(database_path)
+    importer = AutomaticImportService(
+        catalog,
+        roll_projection_coordinator=RollProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
+    )
+    return (
+        DiscordListenerService(
+            config_service=config,
+            catalog_service=catalog,
+            importer=importer,
+            discord_message_repository=discord_repository,
+        ),
+        catalog,
+    )
 
 
 def _import_event_rows(database_path, kind: str):
@@ -1201,8 +1221,17 @@ def _durable_listener(tmp_path, *, importer=None):
         discord_server_id="123",
         discord_user_id="456",
     )
-    catalog = CatalogService(CatalogRepository(database_path))
+    catalog_repository = CatalogRepository(database_path)
+    catalog = CatalogService(catalog_repository)
     repository = DiscordMessageRepository(database_path)
+    if importer is None:
+        importer = AutomaticImportService(
+            catalog,
+            roll_projection_coordinator=RollProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+        )
     listener = DiscordListenerService(
         config_service=config,
         catalog_service=catalog,
@@ -1211,6 +1240,21 @@ def _durable_listener(tmp_path, *, importer=None):
     )
     listener._mudae_user_id = 999
     return listener, repository, database_path
+
+
+def _durable_importer_for(catalog, database_path):
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    return (
+        AutomaticImportService(
+            catalog,
+            roll_projection_coordinator=RollProjectionCoordinator(
+                catalog_repository,
+                discord_repository,
+            ),
+        ),
+        discord_repository,
+    )
 
 
 def _durable_roll_message(
@@ -1238,10 +1282,19 @@ def _receipt_rows(database_path, table: str):
 
 
 def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
-    listener, _repository, database_path = _durable_listener(tmp_path)
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
 
     asyncio.run(listener.handle_bot_response(_durable_roll_message()))
 
+    durable_context = importer.import_message.call_args.kwargs["durable_roll_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id == 1
+    assert durable_context.finished_at.tzinfo is not None
+    assert durable_context.finished_at.utcoffset() is not None
+    repository.mark_processing_success.assert_not_called()
     aggregates = _receipt_rows(database_path, "discord_message_aggregates")
     revisions = _receipt_rows(database_path, "discord_message_revisions")
     events = _receipt_rows(database_path, "discord_source_events")
@@ -1255,6 +1308,10 @@ def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
     assert attempts[0]["status"] == "succeeded"
     assert attempts[0]["parser_version"] == "mudae-parser-v1"
     assert attempts[0]["router_version"] == "mudae-router-v1"
+    assert _receipt_rows(database_path, "import_events")[0]["kind"] == "roll"
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_character_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 2
 
 
 def test_listener_receives_edit_as_new_revision_under_same_aggregate(tmp_path) -> None:
@@ -1348,7 +1405,7 @@ def test_listener_reconstruction_reuses_durable_identity_and_replays_projection(
     event = _receipt_rows(database_path, "discord_source_events")[0]
     assert event["id"] == first_event["id"]
     assert event["delivery_count"] == 2
-    assert len(_import_event_rows(database_path, "roll")) == 2
+    assert len(_import_event_rows(database_path, "roll")) == 1
 
 
 def test_listener_restart_replay_is_not_treated_as_projection_idempotent(tmp_path) -> None:
@@ -1573,30 +1630,32 @@ def test_listener_downstream_exception_records_retryable_failure(tmp_path) -> No
 
 
 def test_listener_retryable_failure_replay_creates_attempt_two(tmp_path) -> None:
-    first_importer = Mock()
-    first_importer.import_message.side_effect = RuntimeError("temporary importer failure")
-    first_listener, _repository, database_path = _durable_listener(
-        tmp_path, importer=first_importer
-    )
+    first_listener, repository, database_path = _durable_listener(tmp_path)
+    coordinator = first_listener._importer._roll_projection_coordinator
+    original_coordinate_roll = coordinator.coordinate_roll
+    coordinator.coordinate_roll = Mock(side_effect=RuntimeError("temporary coordinator failure"))
     message = _durable_roll_message()
     asyncio.run(first_listener.handle_bot_response(message))
 
-    second_importer = Mock()
-    second_importer.import_message.return_value = SimpleNamespace(message="replayed")
-    second_listener = DiscordListenerService(
-        config_service=ConfigService(tmp_path / "config.json"),
-        catalog_service=CatalogService(CatalogRepository(database_path)),
-        importer=second_importer,
-        discord_message_repository=DiscordMessageRepository(database_path),
+    failed_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert failed_attempt["status"] == "failed"
+    assert failed_attempt["retryable"] == 1
+    assert _receipt_rows(database_path, "import_events") == []
+
+    second_listener, second_repository, _ = _durable_listener(tmp_path)
+    second_listener._importer._roll_projection_coordinator.coordinate_roll = (
+        original_coordinate_roll
     )
-    second_listener._mudae_user_id = 999
     asyncio.run(second_listener.handle_bot_response(message))
 
     attempts = _receipt_rows(database_path, "discord_processing_attempts")
     assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
     assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
     assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
-    second_importer.import_message.assert_called_once()
+    assert len(_receipt_rows(database_path, "import_events")) == 1
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 2
+    assert second_repository.mark_processing_success is not None
 
 
 def test_listener_same_process_duplicate_creates_no_new_attempt(tmp_path) -> None:
@@ -1619,7 +1678,11 @@ def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path)
     asyncio.run(first_listener.handle_bot_response(message))
 
     importer = Mock()
-    importer.import_message.return_value = SimpleNamespace(message="replayed")
+    importer.import_message.return_value = SimpleNamespace(
+        message="replayed",
+        replay_skipped=True,
+        durable_success_recorded=True,
+    )
     restarted_listener = DiscordListenerService(
         config_service=ConfigService(tmp_path / "config.json"),
         catalog_service=CatalogService(CatalogRepository(database_path)),
@@ -1635,6 +1698,29 @@ def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path)
     assert attempts[0]["status"] == "succeeded"
     assert event["status"] == "succeeded"
     importer.import_message.assert_called_once()
+
+
+def test_listener_succeeded_restart_replay_passes_none_attempt_and_skips_projection(
+    tmp_path, caplog
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    caplog.set_level(logging.INFO, logger="moa.discord")
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    durable_context = importer.import_message.call_args.kwargs["durable_roll_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id is None
+    assert durable_context.finished_at.tzinfo is not None
+    assert "Skipped duplicate durable roll projection" in caplog.text
+    assert len(_receipt_rows(database_path, "import_events")) == 1
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 2
 
 
 def test_listener_nonretryable_replay_replays_without_new_attempt(tmp_path) -> None:
@@ -1678,7 +1764,7 @@ def test_listener_nonretryable_replay_replays_without_new_attempt(tmp_path) -> N
     assert attempts[-1]["status"] == "failed"
     assert attempts[-1]["retryable"] == 0
     assert event["status"] == "failed"
-    replay_importer.import_message.assert_called_once()
+    replay_importer.import_message.assert_not_called()
 
 
 def test_listener_active_processing_replay_does_not_complete_or_start_attempt(tmp_path) -> None:
@@ -1711,7 +1797,7 @@ def test_listener_active_processing_replay_does_not_complete_or_start_attempt(tm
     assert attempts[-1]["id"] == active.attempt_id
     assert attempts[-1]["status"] == "processing"
     assert event["status"] == "processing"
-    replay_importer.import_message.assert_called_once()
+    replay_importer.import_message.assert_not_called()
 
 
 def test_listener_begin_persistence_failure_prevents_downstream_work(tmp_path) -> None:
@@ -1727,18 +1813,60 @@ def test_listener_begin_persistence_failure_prevents_downstream_work(tmp_path) -
     assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "received"
 
 
-def test_listener_success_completion_failure_is_not_reported_as_success(tmp_path, caplog) -> None:
+def test_listener_coordinator_owns_success_completion(tmp_path) -> None:
     listener, repository, database_path = _durable_listener(tmp_path)
     repository.mark_processing_success = Mock(side_effect=RuntimeError("success persistence failed"))
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    repository.mark_processing_success.assert_not_called()
+
+
+def test_listener_cleanup_failure_after_durable_success_does_not_complete_failure(
+    tmp_path, caplog
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.mark_processing_failure = Mock(wraps=repository.mark_processing_failure)
+    listener._consume_context = Mock(side_effect=RuntimeError("cleanup unavailable"))
     caplog.set_level(logging.ERROR, logger="moa.discord")
 
     asyncio.run(listener.handle_bot_response(_durable_roll_message()))
 
     attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
     event = _receipt_rows(database_path, "discord_source_events")[0]
-    assert attempt["status"] == "processing"
-    assert event["status"] == "processing"
-    assert "lifecycle state was not reported as successful" in caplog.text
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    repository.mark_processing_failure.assert_not_called()
+    assert "Best-effort cleanup failed after durable roll success" in caplog.text
+
+
+def test_listener_non_roll_keeps_listener_managed_success_without_durable_context(
+    tmp_path,
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
+    message = SimpleNamespace(
+        id=1210,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(name="k", user=SimpleNamespace(id=456)),
+        content="You have 12,114 :kakera:!\nBronze IV · Max reached!",
+        embeds=(),
+    )
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert "durable_roll_context" not in importer.import_message.call_args.kwargs
+    repository.mark_processing_success.assert_called_once()
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert attempt["status"] == "succeeded"
 
 
 def test_listener_failure_completion_failure_preserves_original_processing_error(
@@ -1819,7 +1947,7 @@ def test_listener_characterizes_reaction_acknowledgement_identity_and_attributio
     assert _receipt_rows(tmp_path / "catalog.db", "discord_processing_attempts") == []
 
 
-def test_listener_replay_after_restart_creates_a_second_projection(
+def test_listener_replay_after_restart_skips_the_existing_projection(
     tmp_path,
 ) -> None:
     config_path = tmp_path / "config.json"
@@ -1832,9 +1960,15 @@ def test_listener_replay_after_restart_creates_a_second_projection(
         discord_user_id="456",
     )
     first_catalog = CatalogService(CatalogRepository(database_path))
+    first_importer, first_discord_repository = _durable_importer_for(
+        first_catalog,
+        database_path,
+    )
     first_listener = DiscordListenerService(
         config_service=config,
         catalog_service=first_catalog,
+        importer=first_importer,
+        discord_message_repository=first_discord_repository,
     )
     first_listener._mudae_user_id = 999
     event = SimpleNamespace(
@@ -1856,20 +1990,23 @@ def test_listener_replay_after_restart_creates_a_second_projection(
     assert len(_import_event_rows(database_path, "roll")) == 1
 
     restarted_catalog = CatalogService(CatalogRepository(database_path))
+    restarted_importer, restarted_discord_repository = _durable_importer_for(
+        restarted_catalog,
+        database_path,
+    )
     restarted_listener = DiscordListenerService(
         config_service=ConfigService(config_path),
         catalog_service=restarted_catalog,
+        importer=restarted_importer,
+        discord_message_repository=restarted_discord_repository,
     )
     restarted_listener._mudae_user_id = 999
     asyncio.run(restarted_listener.handle_bot_response(event))
 
     rows = _import_event_rows(database_path, "roll")
-    assert len(rows) == 2
-    assert [row[0] for row in rows] == [
-        "discord:guild=123:channel=900:message=1204",
-        "discord:guild=123:channel=900:message=1204",
-    ]
-    assert len(restarted_catalog.recent_rolls("Test Server", "user_a", 10)) == 2
+    assert len(rows) == 1
+    assert [row[0] for row in rows] == ["discord:guild=123:channel=900:message=1204"]
+    assert len(restarted_catalog.recent_rolls("Test Server", "user_a", 10)) == 1
 
 
 def test_listener_pending_workflow_is_lost_after_restart(
@@ -2010,7 +2147,13 @@ def test_listener_uses_active_account_for_untagged_slash_roll(tmp_path) -> None:
     )
     config.use_identity_ids("123", "456")
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
-    listener = DiscordListenerService(config_service=config, catalog_service=catalog)
+    importer, discord_repository = _durable_importer_for(catalog, tmp_path / "catalog.db")
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=discord_repository,
+    )
     listener._mudae_user_id = 999
     response = SimpleNamespace(
         id=987,
@@ -2048,7 +2191,13 @@ def test_listener_does_not_guess_between_multiple_active_server_accounts(tmp_pat
     )
     config.use_identity_ids("123", "456")
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
-    listener = DiscordListenerService(config_service=config, catalog_service=catalog)
+    importer, discord_repository = _durable_importer_for(catalog, tmp_path / "catalog.db")
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=discord_repository,
+    )
     listener._mudae_user_id = 999
     response = SimpleNamespace(
         id=987,
@@ -2083,8 +2232,15 @@ def test_listener_attributes_metadata_only_slash_roll_to_the_metadata_user(tmp_p
         discord_server_id="123",
         discord_user_id="789",
     )
-    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
-    listener = DiscordListenerService(config_service=config, catalog_service=catalog)
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    importer, discord_repository = _durable_importer_for(catalog, database_path)
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=discord_repository,
+    )
     listener._mudae_user_id = 999
     response = SimpleNamespace(
         id=987,
