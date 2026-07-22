@@ -399,6 +399,40 @@ def _apply_durable_discord_projection_links(
     )
 
 
+def _apply_durable_discord_source_event_server_attributions(
+    connection: sqlite3.Connection,
+) -> None:
+    """Create the durable, storage-only Discord server attribution schema."""
+    connection.execute(
+        """
+        CREATE TABLE discord_source_event_server_attributions (
+            source_event_id INTEGER PRIMARY KEY
+                REFERENCES discord_source_events(id)
+                ON DELETE CASCADE
+                ON UPDATE RESTRICT,
+            status TEXT NOT NULL CHECK (
+                status IN ('resolved', 'unresolved', 'ambiguous')
+            ),
+            server_name TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            CHECK (
+                (
+                    status = 'resolved'
+                    AND server_name IS NOT NULL
+                    AND length(trim(server_name)) > 0
+                )
+                OR
+                (
+                    status IN ('unresolved', 'ambiguous')
+                    AND server_name IS NULL
+                )
+            )
+        )
+        """
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -414,5 +448,10 @@ CATALOG_MIGRATIONS = (
         version=3,
         name="durable-discord-projection-links",
         apply=_apply_durable_discord_projection_links,
+    ),
+    Migration(
+        version=4,
+        name="durable-discord-source-event-server-attributions",
+        apply=_apply_durable_discord_source_event_server_attributions,
     ),
 )

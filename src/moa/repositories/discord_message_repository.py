@@ -29,6 +29,18 @@ class DiscordMessageProcessingConflictError(DiscordMessageProcessingError):
     """Raised when a processing lifecycle transition is not currently valid."""
 
 
+class DiscordSourceEventServerAttributionNotFoundError(RuntimeError):
+    """Raised when a source event is missing for an attribution write."""
+
+
+class DiscordSourceEventServerAttributionValidationError(ValueError):
+    """Raised when an attribution status and server name do not agree."""
+
+
+class DiscordSourceEventServerAttributionConflictError(RuntimeError):
+    """Raised when an immutable attribution decision conflicts with a new one."""
+
+
 @dataclass(frozen=True, slots=True)
 class ReceivedMessageEvent:
     """The durable rows affected by one :meth:`receive_message` call."""
@@ -62,6 +74,17 @@ class ProcessingAttemptResult:
     failure_code: str | None
     failure_detail: str | None
     legacy_import_event_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordSourceEventServerAttribution:
+    """The durable server attribution decision for one Discord source event."""
+
+    source_event_id: int
+    status: str
+    server_name: str | None
+    created_at: datetime
+    updated_at: datetime
 
 
 class DiscordMessageRepository:
@@ -395,6 +418,106 @@ class DiscordMessageRepository:
                 )
             return self._processing_result(connection, source_event_id, attempt_id)
 
+    def get_server_attribution(
+        self, source_event_id: int
+    ) -> DiscordSourceEventServerAttribution | None:
+        """Read the current durable server attribution for one source event."""
+        self._validate_processing_identity(source_event_id=source_event_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, created_at, updated_at
+                FROM discord_source_event_server_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            return self._server_attribution_result(row)
+
+    def record_server_attribution(
+        self,
+        source_event_id: int,
+        *,
+        status: Literal["resolved", "unresolved", "ambiguous"],
+        server_name: str | None,
+        recorded_at: datetime,
+    ) -> DiscordSourceEventServerAttribution:
+        """Record one durable server attribution decision with fail-closed replay."""
+        self._validate_processing_identity(source_event_id=source_event_id)
+        self._validate_server_attribution(status=status, server_name=server_name)
+        normalized_recorded_at = self._normalize_processing_datetime(recorded_at, "recorded_at")
+        recorded_at_value = normalized_recorded_at.isoformat()
+
+        with self._connection() as connection:
+            source_event = connection.execute(
+                "SELECT 1 FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+            if source_event is None:
+                raise DiscordSourceEventServerAttributionNotFoundError(
+                    f"Discord source event {source_event_id} was not found"
+                )
+
+            existing = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, created_at, updated_at
+                FROM discord_source_event_server_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO discord_source_event_server_attributions (
+                        source_event_id, status, server_name, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_event_id,
+                        status,
+                        server_name,
+                        recorded_at_value,
+                        recorded_at_value,
+                    ),
+                )
+            else:
+                self._validate_server_attribution_transition(
+                    existing_status=str(existing["status"]),
+                    existing_server_name=(
+                        str(existing["server_name"])
+                        if existing["server_name"] is not None
+                        else None
+                    ),
+                    status=status,
+                    server_name=server_name,
+                    source_event_id=source_event_id,
+                )
+                if str(existing["status"]) != status:
+                    connection.execute(
+                        """
+                        UPDATE discord_source_event_server_attributions
+                        SET status = ?, server_name = ?, updated_at = ?
+                        WHERE source_event_id = ?
+                        """,
+                        (status, server_name, recorded_at_value, source_event_id),
+                    )
+
+            row = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, created_at, updated_at
+                FROM discord_source_event_server_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            result = self._server_attribution_result(row)
+            if result is None:
+                raise RuntimeError(
+                    "Inserted Discord server attribution could not be reloaded"
+                )
+            return result
+
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)
 
@@ -416,6 +539,64 @@ class DiscordMessageRepository:
         if value.utcoffset() is None:
             raise ValueError(f"{field_name} must be timezone-aware")
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _validate_server_attribution(
+        *,
+        status: str,
+        server_name: str | None,
+    ) -> None:
+        if not isinstance(status, str) or status not in {
+            "resolved",
+            "unresolved",
+            "ambiguous",
+        }:
+            raise DiscordSourceEventServerAttributionValidationError(
+                "status must be 'resolved', 'unresolved', or 'ambiguous'"
+            )
+        if status == "resolved":
+            if not isinstance(server_name, str) or not server_name.strip():
+                raise DiscordSourceEventServerAttributionValidationError(
+                    "resolved attribution requires a nonblank server_name"
+                )
+            return
+        if server_name is not None:
+            raise DiscordSourceEventServerAttributionValidationError(
+                f"{status} attribution requires server_name to be None"
+            )
+
+    @staticmethod
+    def _validate_server_attribution_transition(
+        *,
+        existing_status: str,
+        existing_server_name: str | None,
+        status: str,
+        server_name: str | None,
+        source_event_id: int,
+    ) -> None:
+        if existing_status == status and existing_server_name == server_name:
+            return
+        if existing_status in {"unresolved", "ambiguous"} and status == "resolved":
+            return
+        raise DiscordSourceEventServerAttributionConflictError(
+            "Discord source event "
+            f"{source_event_id} has immutable attribution "
+            f"{existing_status!r} / {existing_server_name!r}"
+        )
+
+    @staticmethod
+    def _server_attribution_result(
+        row: sqlite3.Row | None,
+    ) -> DiscordSourceEventServerAttribution | None:
+        if row is None:
+            return None
+        return DiscordSourceEventServerAttribution(
+            source_event_id=int(row["source_event_id"]),
+            status=str(row["status"]),
+            server_name=(str(row["server_name"]) if row["server_name"] is not None else None),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
 
     @staticmethod
     def _validate_begin_state(
