@@ -27,6 +27,7 @@ from moa.services.key_progress_service import KeyProgressService
 from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
 from moa.services.harem_search_service import HaremSearchService
+from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
@@ -184,9 +185,14 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        profile_projection_coordinator = ProfileProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
+            profile_projection_coordinator=profile_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
