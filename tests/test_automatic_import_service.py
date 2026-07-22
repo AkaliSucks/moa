@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from moa.models.character import ProfileSnapshot, RollObservation
+from moa.models.character import ClaimConfirmation, ProfileSnapshot, RollObservation
 from moa.models.catalog import AutomaticImportResult
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.parser.mudae import MudaeTextParser
@@ -12,10 +12,15 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import (
     AutomaticImportService,
+    DurableClaimImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.claim_projection_coordinator import (
+    ClaimProjectionCoordinator,
+    ClaimProjectionResult,
+)
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
     ProfileProjectionResult,
@@ -28,6 +33,7 @@ from moa.services.roll_projection_coordinator import (
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
+CLAIM_MESSAGE = "ernieuuu and Pakunoda are now married!"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -115,6 +121,40 @@ def _durable_profile_importer(tmp_path):
     service = AutomaticImportService(
         CatalogService(catalog_repository),
         profile_projection_coordinator=coordinator,
+    )
+    return service, received.source_event_id, attempt.attempt_id
+
+
+def _durable_claim_importer(tmp_path):
+    database_path = tmp_path / "durable-claim.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = ClaimProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "claim-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "claim-payload-hash", "revision-1"
+        ),
+        event_key="claim-event",
+        event_kind="message_create",
+        raw_text=CLAIM_MESSAGE,
+        payload_json='{"content":"claim"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        claim_projection_coordinator=coordinator,
     )
     return service, received.source_event_id, attempt.attempt_id
 
@@ -376,6 +416,274 @@ def test_automatic_import_non_durable_roll_keeps_catalog_path_and_neutral_result
     assert result.import_event_id is None
     assert result.replay_skipped is False
     assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_claim_delegates_once_with_parsed_claim_and_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_claim_confirmation.return_value = ClaimConfirmation(
+        account_name="parsed-account", character_name="Parsed Character"
+    )
+    coordinator = Mock()
+    coordinator.coordinate_claim.return_value = ClaimProjectionResult(
+        imported_count=1,
+        import_event_id=52,
+        claim_observation_id=53,
+        character_id=54,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("claim_observations", 53),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        claim_projection_coordinator=coordinator,
+    )
+    context = DurableClaimImportContext(
+        source_event_id=31,
+        attempt_id=37,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        CLAIM_MESSAGE,
+        "discord:message",
+        " Lake ",
+        " parsed-account ",
+        detected_kind="claim",
+        observed_at=OBSERVED_AT,
+        durable_claim_context=context,
+    )
+
+    parser.parse_claim_confirmation.assert_called_once_with(CLAIM_MESSAGE)
+    coordinator.coordinate_claim.assert_called_once_with(
+        source_event_id=31,
+        attempt_id=37,
+        claim=parser.parse_claim_confirmation.return_value,
+        server="Lake",
+        account="parsed-account",
+        raw=CLAIM_MESSAGE,
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_claim.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id == 52
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+    assert "Parsed Character" in result.message
+    assert "parsed-account" in result.message
+
+
+def test_automatic_import_durable_claim_maps_completed_replay(tmp_path) -> None:
+    service, source_event_id, attempt_id = _durable_claim_importer(tmp_path)
+    first = service.import_message(
+        CLAIM_MESSAGE,
+        "discord",
+        "Lake",
+        "ernieuuu",
+        detected_kind="claim",
+        observed_at=OBSERVED_AT,
+        durable_claim_context=DurableClaimImportContext(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    replay = service.import_message(
+        CLAIM_MESSAGE,
+        "discord",
+        "Lake",
+        "ernieuuu",
+        detected_kind="claim",
+        observed_at=OBSERVED_AT,
+        durable_claim_context=DurableClaimImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+
+
+def test_automatic_import_durable_claim_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_claim_confirmation.return_value = ClaimConfirmation(
+        account_name="ernieuuu", character_name="Pakunoda"
+    )
+    coordinator = Mock()
+    coordinator.coordinate_claim.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        claim_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            CLAIM_MESSAGE,
+            "discord",
+            "Lake",
+            "ernieuuu",
+            detected_kind="claim",
+            durable_claim_context=DurableClaimImportContext(
+                source_event_id=31,
+                attempt_id=37,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_claim.assert_not_called()
+
+
+def test_automatic_import_durable_claim_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_claim_confirmation.return_value = ClaimConfirmation(
+        account_name="ernieuuu", character_name="Pakunoda"
+    )
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="ClaimProjectionCoordinator"):
+        service.import_message(
+            CLAIM_MESSAGE,
+            "discord",
+            "Lake",
+            "ernieuuu",
+            detected_kind="claim",
+            durable_claim_context=DurableClaimImportContext(
+                source_event_id=31,
+                attempt_id=37,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_claim_confirmation.assert_called_once_with(CLAIM_MESSAGE)
+    catalog.import_claim.assert_not_called()
+
+
+def test_automatic_import_non_durable_claim_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_claim_confirmation.return_value = ClaimConfirmation(
+        account_name="ernieuuu", character_name="Pakunoda"
+    )
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        claim_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        CLAIM_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="claim",
+    )
+
+    parser.parse_claim_confirmation.assert_called_once_with(CLAIM_MESSAGE)
+    catalog.import_claim.assert_called_once_with(
+        parser.parse_claim_confirmation.return_value,
+        "Lake",
+        "ernieuuu",
+        CLAIM_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_claim.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_claim_context_does_not_affect_roll_or_profile_routes() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    parser.parse_profile.return_value = PROFILE
+    claim_coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        claim_projection_coordinator=claim_coordinator,
+    )
+    context = DurableClaimImportContext(
+        source_event_id=31,
+        attempt_id=37,
+        finished_at=FINISHED_AT,
+    )
+
+    roll_result = service.import_message(
+        ROLL_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+        durable_claim_context=context,
+    )
+    profile_result = service.import_message(
+        PROFILE_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="profile",
+        durable_claim_context=context,
+    )
+
+    catalog.import_roll.assert_called_once_with(
+        parser.parse_roll.return_value,
+        "Lake",
+        "ernieuuu",
+        ROLL_MESSAGE,
+        "clipboard",
+    )
+    catalog.import_profile.assert_called_once_with(
+        PROFILE,
+        "Lake",
+        "ernieuuu",
+        PROFILE_MESSAGE,
+        "clipboard",
+    )
+    claim_coordinator.coordinate_claim.assert_not_called()
+    assert roll_result.imported_count == profile_result.imported_count == 1
+
+
+def test_automatic_import_non_claim_routes_never_call_claim_coordinator(tmp_path) -> None:
+    coordinator = Mock()
+    service = AutomaticImportService(
+        CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        claim_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "Looking for a specific command? Try $search",
+        "clipboard",
+        durable_claim_context=DurableClaimImportContext(
+            source_event_id=31,
+            attempt_id=37,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert result.kind == "help"
+    coordinator.coordinate_claim.assert_not_called()
 
 
 def test_automatic_import_durable_profile_delegates_once_with_all_context() -> None:

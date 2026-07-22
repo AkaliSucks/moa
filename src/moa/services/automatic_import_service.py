@@ -7,6 +7,7 @@ from moa.models.catalog import AutomaticImportResult
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.mudae import MudaeTextParser
 from moa.services.catalog_service import CatalogService
+from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 
@@ -29,6 +30,15 @@ class DurableProfileImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableClaimImportContext:
+    """Durable lifecycle identifiers and completion time for one claim import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -39,12 +49,14 @@ class AutomaticImportService:
         router: MudaeMessageRouter | None = None,
         roll_projection_coordinator: RollProjectionCoordinator | None = None,
         profile_projection_coordinator: ProfileProjectionCoordinator | None = None,
+        claim_projection_coordinator: ClaimProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
         self._router = router or MudaeMessageRouter(self._parser)
         self._roll_projection_coordinator = roll_projection_coordinator
         self._profile_projection_coordinator = profile_projection_coordinator
+        self._claim_projection_coordinator = claim_projection_coordinator
 
     def import_message(
         self,
@@ -58,6 +70,7 @@ class AutomaticImportService:
         observed_at: datetime | None = None,
         durable_roll_context: DurableRollImportContext | None = None,
         durable_profile_context: DurableProfileImportContext | None = None,
+        durable_claim_context: DurableClaimImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -179,13 +192,40 @@ class AutomaticImportService:
                 raise ValueError(
                     f"Claim confirmation is for {claim.account_name!r}, not configured account {account!r}."
                 )
-            result = self._catalog.import_claim(
-                claim, server, account, raw_message, source
-            )
+            if durable_claim_context is None:
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+                self._catalog.import_claim(claim, server, account, raw_message, source)
+            else:
+                coordinator = self._claim_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A ClaimProjectionCoordinator is required for a durable claim import."
+                    )
+                coordinated = coordinator.coordinate_claim(
+                    source_event_id=durable_claim_context.source_event_id,
+                    attempt_id=durable_claim_context.attempt_id,
+                    claim=claim,
+                    server=server,
+                    account=account,
+                    raw=raw_message,
+                    source=source,
+                    observed_at=observed_at or durable_claim_context.finished_at,
+                    finished_at=durable_claim_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=1,
+                imported_count=imported_count,
                 message=f"Imported claim: {claim.character_name} for {claim.account_name}.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
         if kind == "divorce_prompt":
             prompt = self._parser.parse_divorce_prompt(raw_message)
