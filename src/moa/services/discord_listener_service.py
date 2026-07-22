@@ -22,7 +22,10 @@ from moa.repositories.discord_message_repository import (
     DiscordMessageRepository,
     ReceivedMessageEvent,
 )
-from moa.services.automatic_import_service import AutomaticImportService
+from moa.services.automatic_import_service import (
+    AutomaticImportService,
+    DurableRollImportContext,
+)
 from moa.services.catalog_service import CatalogService
 
 
@@ -580,7 +583,15 @@ class DiscordListenerService:
             self._seen_payloads = set(list(self._seen_payloads)[-1000:])
 
         processing_attempt = None
-        if received_event is not None:
+        if received_event is not None and kind == "roll" and received_event.status == "processing":
+            self._logger.info(
+                "Did not import roll source event %s because processing is already active",
+                received_event.source_event_id,
+            )
+            return
+        if received_event is not None and not (
+            kind == "roll" and received_event.status == "succeeded"
+        ):
             try:
                 processing_attempt = self._discord_message_repository.begin_processing_attempt(
                     source_event_id=received_event.source_event_id,
@@ -596,6 +607,13 @@ class DiscordListenerService:
                     received_event.source_event_id,
                     error,
                 )
+                if kind == "roll":
+                    self._logger.info(
+                        "Did not import roll source event %s because its durable lifecycle "
+                        "is not retryable",
+                        received_event.source_event_id,
+                    )
+                    return
             except DiscordMessageProcessingError as error:
                 self._logger.warning(
                     "Could not begin Discord processing for source event %s; "
@@ -621,6 +639,7 @@ class DiscordListenerService:
             import_identity.account,
         )
 
+        durable_success_recorded = False
         try:
             scan_id = self._scan_id_for_page(
                 kind,
@@ -636,19 +655,53 @@ class DiscordListenerService:
             source = (
                 f"discord:guild={message.guild.id}:channel={message.channel.id}:message={message.id}"
             )
+            import_kwargs: dict[str, Any] = {
+                "harem_scan_id": scan_id,
+                "detected_kind": kind,
+            }
+            if kind == "roll" and received_event is not None:
+                finished_at = datetime.now(timezone.utc)
+                import_kwargs["durable_roll_context"] = DurableRollImportContext(
+                    source_event_id=received_event.source_event_id,
+                    attempt_id=(
+                        processing_attempt.attempt_id if processing_attempt is not None else None
+                    ),
+                    finished_at=finished_at,
+                )
             result = self._importer.import_message(
                 raw_message,
                 source,
                 import_identity.server,
                 import_identity.account,
-                harem_scan_id=scan_id,
-                detected_kind=kind,
+                **import_kwargs,
             )
+            durable_success_recorded = bool(
+                getattr(result, "durable_success_recorded", False)
+            )
+            if (
+                kind == "roll"
+                and received_event is not None
+                and received_event.status == "succeeded"
+                and not getattr(result, "replay_skipped", False)
+            ):
+                raise RuntimeError(
+                    "Succeeded durable roll replay did not return a replay-skipped result."
+                )
             self._logger.info(
                 "Imported Discord Mudae message %s: %s",
                 message.id,
                 result.message,
             )
+            if getattr(result, "replay_skipped", False):
+                self._logger.info(
+                    "Skipped duplicate durable roll projection for source event %s",
+                    received_event.source_event_id if received_event is not None else "unknown",
+                )
+        except Exception as error:  # Keep one malformed Discord payload from stopping the listener.
+            self._record_processing_failure(received_event, processing_attempt, error, message.id)
+            return
+
+        try:
             if kind == "divorce_declined" or kind == "divorce_complete":
                 self._consume_context(message.channel.id, context)
             if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
@@ -661,11 +714,24 @@ class DiscordListenerService:
                 import_identity,
                 scan_id,
             )
-        except Exception as error:  # Keep one malformed Discord payload from stopping the listener.
-            self._record_processing_failure(received_event, processing_attempt, error, message.id)
+        except Exception as cleanup_error:
+            if durable_success_recorded:
+                self._logger.error(
+                    "Best-effort cleanup failed after durable roll success for message %s; "
+                    "the succeeded source event and attempt remain unchanged: %s",
+                    message.id,
+                    cleanup_error,
+                )
+            else:
+                self._record_processing_failure(
+                    received_event,
+                    processing_attempt,
+                    cleanup_error,
+                    message.id,
+                )
             return
 
-        if processing_attempt is not None:
+        if processing_attempt is not None and not durable_success_recorded:
             try:
                 self._discord_message_repository.mark_processing_success(
                     source_event_id=processing_attempt.source_event_id,

@@ -11,6 +11,7 @@ from moa.core.config import ConfigService
 from moa.database.sqlite import DEFAULT_DATABASE_PATH
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
@@ -29,6 +30,7 @@ from moa.services.harem_search_service import HaremSearchService
 from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
+from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
@@ -175,10 +177,23 @@ def discord_listen(
     )
     logging.getLogger("moa.discord").setLevel(logging.INFO)
     try:
+        catalog_repository = CatalogRepository(DEFAULT_DATABASE_PATH)
+        catalog_service = CatalogService(catalog_repository)
+        discord_message_repository = DiscordMessageRepository(DEFAULT_DATABASE_PATH)
+        roll_projection_coordinator = RollProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
+        importer = AutomaticImportService(
+            catalog_service,
+            roll_projection_coordinator=roll_projection_coordinator,
+        )
         DiscordListenerService(
+            catalog_service=catalog_service,
+            importer=importer,
             profile_name=profile,
             status_text=status,
-            discord_message_repository=DiscordMessageRepository(DEFAULT_DATABASE_PATH),
+            discord_message_repository=discord_message_repository,
         ).run(token, parsed_mudae_user_id)
     except ValueError as error:
         console.print(f"[red]{error}[/red]")

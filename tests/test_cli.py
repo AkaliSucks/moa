@@ -5,6 +5,11 @@ from typer.testing import CliRunner
 
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
+from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.automatic_import_service import AutomaticImportService
+from moa.services.catalog_service import CatalogService
+from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
@@ -153,6 +158,47 @@ def test_discord_listener_rejects_example_bot_token() -> None:
 
     assert result.exit_code == 1
     assert "Replace YOUR_DISCORD_BOT_TOKEN" in result.stdout
+
+
+def test_discord_listener_wires_shared_database_and_roll_coordinator(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "moa.db"
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+    captured: dict[str, object] = {}
+
+    class FakeListener:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, token, mudae_user_id):
+            captured["token"] = token
+            captured["mudae_user_id"] = mudae_user_id
+
+    monkeypatch.setattr(main, "DiscordListenerService", FakeListener)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--mudae-user-id", "999"],
+    )
+
+    assert result.exit_code == 0
+    catalog_service = captured["catalog_service"]
+    discord_repository = captured["discord_message_repository"]
+    importer = captured["importer"]
+    coordinator = importer._roll_projection_coordinator
+    assert isinstance(catalog_service, CatalogService)
+    assert isinstance(catalog_service._repository, CatalogRepository)
+    assert isinstance(discord_repository, DiscordMessageRepository)
+    assert isinstance(importer, AutomaticImportService)
+    assert isinstance(coordinator, RollProjectionCoordinator)
+    assert catalog_service._repository._database_path == database_path
+    assert discord_repository._database_path == database_path
+    assert coordinator._catalog is catalog_service._repository
+    assert coordinator._discord is discord_repository
+    assert captured["catalog_service"] is importer._catalog
+    assert captured["token"] == "test-token"
+    assert captured["mudae_user_id"] == 999
 
 
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
