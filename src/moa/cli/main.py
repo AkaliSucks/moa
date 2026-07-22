@@ -19,6 +19,7 @@ from moa.services.account_comparison_service import AccountComparisonService
 from moa.services.action_service import ActionService
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
+from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.command_service import CommandService
 from moa.services.discord_listener_service import DiscordListenerService
 from moa.services.keyfarm_service import KeyFarmService
@@ -189,10 +190,15 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        claim_projection_coordinator = ClaimProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
             profile_projection_coordinator=profile_projection_coordinator,
+            claim_projection_coordinator=claim_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
