@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from moa.database.sqlite import connect
-from moa.models.character import RollObservation
+from moa.models.character import ProfileSnapshot, RollObservation
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -17,6 +17,24 @@ ROLL = RollObservation(
     kakera_value=12,
     displayed_key_type="gold",
     displayed_key_count=3,
+)
+PROFILE = ProfileSnapshot(
+    profile_name="profile-account",
+    collection_size=35,
+    female_percent=100,
+    male_percent=0,
+    pokedex_count=2,
+    pokedex_pokemon=("gulpin", "piloswine"),
+    kakera_reacts={":kakeraY:": 497},
+    mudapins_collected=None,
+    mudapins_total=None,
+    kakera_balance=812,
+    bronze_keys=3,
+    silver_keys=0,
+    gold_keys=0,
+    sphere_stock=None,
+    spheres={":spP:": 2},
+    displayed_badges=(":silvmudae:", ":DiamondI:"),
 )
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -55,6 +73,7 @@ def _counts(connection: sqlite3.Connection) -> dict[str, int]:
         "characters",
         "server_contexts",
         "account_contexts",
+        "profile_observations",
         "roll_observations",
         "harem_key_observations",
         "rank_snapshots",
@@ -95,6 +114,7 @@ def test_roll_helper_writes_all_projections_on_supplied_connection(tmp_path) -> 
             "characters": 1,
             "server_contexts": 1,
             "account_contexts": 1,
+            "profile_observations": 0,
             "roll_observations": 1,
             "harem_key_observations": 1,
             "rank_snapshots": 1,
@@ -114,6 +134,171 @@ def test_public_roll_wrapper_keeps_public_result_and_transaction_behavior(tmp_pa
     assert result.account_name == "Account"
     with connect(database_path) as connection:
         assert _counts(connection)["import_events"] == 1
+
+
+def test_public_profile_wrapper_keeps_result_and_writes_expected_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_profile(PROFILE, " Server ", " Account ", "profile payload", "discord")
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    with connect(database_path) as connection:
+        assert _counts(connection) == {
+            "import_events": 1,
+            "characters": 0,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "profile_observations": 1,
+            "roll_observations": 0,
+            "harem_key_observations": 0,
+            "rank_snapshots": 0,
+            "server_character_observations": 0,
+            "discord_projection_links": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("profile", "discord", "profile payload")
+        row = connection.execute(
+            """
+            SELECT id, profile_name, collection_size, pokedex_json, kakera_reacts_json,
+                   displayed_badges_json, import_event_id
+            FROM profile_observations
+            """
+        ).fetchone()
+        assert row["id"] > 0
+        assert (row["profile_name"], row["collection_size"], row["import_event_id"]) == (
+            "profile-account",
+            35,
+            result.import_event_id,
+        )
+        assert row["pokedex_json"] == '["gulpin", "piloswine"]'
+        assert row["kakera_reacts_json"] == '{":kakeraY:": 497}'
+        assert row["displayed_badges_json"] == '[":silvmudae:", ":DiamondI:"]'
+
+
+def test_profile_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_profile_with_connection(
+            connection,
+            profile=PROFILE,
+            server="Server",
+            account="Account",
+            raw="profile payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT import_event_id FROM profile_observations WHERE id = ?",
+            (imported.profile_observation_id,),
+        ).fetchone()[0] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 0
+
+
+def test_profile_helper_commit_persists_all_rows_and_result_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_profile_with_connection(
+            connection,
+            profile=PROFILE,
+            server="Server",
+            account="Account",
+            raw="profile payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == imported.import_event_id
+        assert connection.execute(
+            "SELECT id FROM profile_observations WHERE id = ?", (imported.profile_observation_id,)
+        ).fetchone()[0] == imported.profile_observation_id
+        assert _counts(connection)["profile_observations"] == 1
+        assert _counts(connection)["discord_projection_links"] == 0
+
+
+def test_profile_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_profile_with_connection(
+                connection,
+                profile=PROFILE,
+                server="Server",
+                account="Account",
+                raw="profile payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == {
+            "import_events": 0,
+            "characters": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "profile_observations": 0,
+            "roll_observations": 0,
+            "harem_key_observations": 0,
+            "rank_snapshots": 0,
+            "server_character_observations": 0,
+            "discord_projection_links": 0,
+        }
+
+
+def test_profile_helper_reuses_canonical_rows_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_profile(PROFILE, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_profile_with_connection(
+                connection,
+                profile=PROFILE,
+                server=" SERVER ",
+                account=" ACCOUNT ",
+                raw="second payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _counts(connection)["import_events"] == 1
+        assert _counts(connection)["profile_observations"] == 1
 
 
 def test_processing_success_helper_updates_supplied_connection(tmp_path) -> None:
@@ -203,6 +388,7 @@ def test_failure_after_roll_helper_rolls_back_catalog_and_canonical_rows(tmp_pat
             "characters": 0,
             "server_contexts": 0,
             "account_contexts": 0,
+            "profile_observations": 0,
             "roll_observations": 0,
             "harem_key_observations": 0,
             "rank_snapshots": 0,

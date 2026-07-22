@@ -428,6 +428,14 @@ class _RollImportConnectionResult:
     server_character_observation_id: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProfileImportConnectionResult:
+    """Rows created by one profile import on a caller-owned connection."""
+
+    import_event_id: int
+    profile_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2844,13 +2852,42 @@ class CatalogRepository:
         """Store one account-scoped `$profile` progress snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("profile", source, observed_at.isoformat(), raw_message),
+            imported = self._import_profile_with_connection(
+                connection,
+                profile=snapshot,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return ProfileImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_profile_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        profile: ProfileSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _ProfileImportConnectionResult:
+        """Store one profile without taking ownership of the surrounding transaction."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("profile", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        profile_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO profile_observations (
@@ -2862,31 +2899,30 @@ class CatalogRepository:
                 """,
                 (
                     account_id,
-                    snapshot.profile_name,
-                    snapshot.collection_size,
-                    snapshot.female_percent,
-                    snapshot.male_percent,
-                    snapshot.pokedex_count,
-                    json.dumps(list(snapshot.pokedex_pokemon)),
-                    json.dumps(snapshot.kakera_reacts),
-                    snapshot.mudapins_collected,
-                    snapshot.mudapins_total,
-                    snapshot.kakera_balance,
-                    snapshot.bronze_keys,
-                    snapshot.silver_keys,
-                    snapshot.gold_keys,
-                    snapshot.sphere_stock,
-                    json.dumps(snapshot.spheres),
-                    json.dumps(list(snapshot.displayed_badges)),
+                    profile.profile_name,
+                    profile.collection_size,
+                    profile.female_percent,
+                    profile.male_percent,
+                    profile.pokedex_count,
+                    json.dumps(list(profile.pokedex_pokemon)),
+                    json.dumps(profile.kakera_reacts),
+                    profile.mudapins_collected,
+                    profile.mudapins_total,
+                    profile.kakera_balance,
+                    profile.bronze_keys,
+                    profile.silver_keys,
+                    profile.gold_keys,
+                    profile.sphere_stock,
+                    json.dumps(profile.spheres),
+                    json.dumps(list(profile.displayed_badges)),
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return ProfileImportResult(
+            ).lastrowid
+        )
+        return _ProfileImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            profile_observation_id=profile_observation_id,
         )
 
     def profile(self, server_name: str, account_name: str) -> ProfileObservation | None:
