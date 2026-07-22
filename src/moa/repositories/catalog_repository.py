@@ -436,6 +436,15 @@ class _ProfileImportConnectionResult:
     profile_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _ClaimImportConnectionResult:
+    """Rows created by one claim import on a caller-owned connection."""
+
+    import_event_id: int
+    claim_observation_id: int
+    character_id: int | None
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -853,37 +862,68 @@ class CatalogRepository:
     ) -> ClaimImportResult:
         """Store claim evidence without inventing a character series."""
         observed_at = datetime.now(timezone.utc)
-        normalized_name = self._normalize(claim.character_name)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("claim", source, observed_at.isoformat(), raw_message),
+            imported = self._import_claim_with_connection(
+                connection,
+                claim=claim,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return ClaimImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            character_name=claim.character_name,
+            character_id=imported.character_id,
+            observed_at=observed_at,
+        )
 
-            character_row = connection.execute(
-                """
-                SELECT characters.id
-                FROM roll_observations
-                JOIN characters ON characters.id = roll_observations.character_id
-                WHERE roll_observations.account_context_id = ?
-                  AND characters.normalized_name = ?
-                ORDER BY roll_observations.id DESC
-                LIMIT 1
-                """,
-                (account_id, normalized_name),
-            ).fetchone()
-            character_id = int(character_row["id"]) if character_row is not None else None
-            if character_id is None:
-                candidates = connection.execute(
-                    "SELECT id FROM characters WHERE normalized_name = ?",
-                    (normalized_name,),
-                ).fetchall()
-                if len(candidates) == 1:
-                    character_id = int(candidates[0]["id"])
+    def _import_claim_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        claim: ClaimConfirmation,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _ClaimImportConnectionResult:
+        """Store one claim without taking ownership of the surrounding transaction."""
+        normalized_name = self._normalize(claim.character_name)
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("claim", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
 
+        character_row = connection.execute(
+            """
+            SELECT characters.id
+            FROM roll_observations
+            JOIN characters ON characters.id = roll_observations.character_id
+            WHERE roll_observations.account_context_id = ?
+              AND characters.normalized_name = ?
+            ORDER BY roll_observations.id DESC
+            LIMIT 1
+            """,
+            (account_id, normalized_name),
+        ).fetchone()
+        character_id = int(character_row["id"]) if character_row is not None else None
+        if character_id is None:
+            candidates = connection.execute(
+                "SELECT id FROM characters WHERE normalized_name = ?",
+                (normalized_name,),
+            ).fetchall()
+            if len(candidates) == 1:
+                character_id = int(candidates[0]["id"])
+
+        claim_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO claim_observations (
@@ -899,14 +939,12 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return ClaimImportResult(
+            ).lastrowid
+        )
+        return _ClaimImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            character_name=claim.character_name,
+            claim_observation_id=claim_observation_id,
             character_id=character_id,
-            observed_at=observed_at,
         )
 
     def import_divorce(
