@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
@@ -415,6 +416,18 @@ class CatalogRepositoryProtocol(Protocol):
     def server_settings(self, server_name: str) -> ServerSettingsObservation | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _RollImportConnectionResult:
+    """Rows created by one roll import on a caller-owned connection."""
+
+    import_event_id: int
+    character_id: int
+    roll_observation_id: int
+    harem_key_observation_id: int | None
+    rank_snapshot_id: int | None
+    server_character_observation_id: int | None
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -703,12 +716,42 @@ class CatalogRepository:
         """Store one roll and preserve any directly displayed rank/value observations."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("roll", source, observed_at.isoformat(), raw_message),
+            imported = self._import_roll_with_connection(
+                connection,
+                roll=roll,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            character_id = self._upsert_character(
+        return RollImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            character_id=imported.character_id,
+            observed_at=observed_at,
+        )
+
+    def _import_roll_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        roll: RollObservation,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _RollImportConnectionResult:
+        """Store one roll without taking ownership of the surrounding transaction."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("roll", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        character_id = int(
+            self._upsert_character(
                 connection,
                 name=roll.name,
                 series=roll.series,
@@ -716,8 +759,10 @@ class CatalogRepository:
                 roulette=None,
                 observed_at=observed_at,
             ).fetchone()["id"]
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        )
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        roll_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO roll_observations (
@@ -732,8 +777,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-            if roll.displayed_key_count is not None and roll.displayed_key_type is not None:
+            ).lastrowid
+        )
+        harem_key_observation_id = None
+        if roll.displayed_key_count is not None and roll.displayed_key_type is not None:
+            harem_key_observation_id = int(
                 connection.execute(
                     """
                     INSERT INTO harem_key_observations (
@@ -752,8 +800,11 @@ class CatalogRepository:
                         observed_at.isoformat(),
                         import_event_id,
                     ),
-                )
-            if roll.claim_rank is not None:
+                ).lastrowid
+            )
+        rank_snapshot_id = None
+        if roll.claim_rank is not None:
+            rank_snapshot_id = int(
                 connection.execute(
                     """
                     INSERT INTO rank_snapshots (
@@ -761,8 +812,11 @@ class CatalogRepository:
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
                     (character_id, roll.claim_rank, None, observed_at.isoformat(), import_event_id),
-                )
-            if roll.kakera_value is not None:
+                ).lastrowid
+            )
+        server_character_observation_id = None
+        if roll.kakera_value is not None:
+            server_character_observation_id = int(
                 connection.execute(
                     """
                     INSERT INTO server_character_observations (
@@ -770,13 +824,15 @@ class CatalogRepository:
                     ) VALUES (?, ?, ?, ?, ?)
                     """,
                     (server_id, character_id, roll.kakera_value, observed_at.isoformat(), import_event_id),
-                )
-        return RollImportResult(
+                ).lastrowid
+            )
+        return _RollImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
             character_id=character_id,
-            observed_at=observed_at,
+            roll_observation_id=roll_observation_id,
+            harem_key_observation_id=harem_key_observation_id,
+            rank_snapshot_id=rank_snapshot_id,
+            server_character_observation_id=server_character_observation_id,
         )
 
     def import_claim(
