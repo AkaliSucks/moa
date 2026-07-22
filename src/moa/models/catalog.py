@@ -582,6 +582,9 @@ class AutomaticImportResult(MOAModel):
     kind: str
     imported_count: int
     message: str
+    import_event_id: int | None = None
+    replay_skipped: bool = False
+    durable_success_recorded: bool = False
 
 
 class RollImportResult(MOAModel):
