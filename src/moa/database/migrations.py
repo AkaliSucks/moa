@@ -343,6 +343,62 @@ def _apply_durable_discord_message_ingestion(
         connection.execute(statement)
 
 
+def _apply_durable_discord_projection_links(
+    connection: sqlite3.Connection,
+) -> None:
+    """Create durable links between Discord source events and projections."""
+    connection.execute(
+        """
+        CREATE TABLE discord_projection_links (
+            id INTEGER PRIMARY KEY,
+            source_event_id INTEGER NOT NULL
+                REFERENCES discord_source_events(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            projection_kind TEXT NOT NULL,
+            projection_slot TEXT NOT NULL,
+            projection_table TEXT NULL,
+            projection_row_id INTEGER NULL,
+            state TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            completed_at TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_event_id, projection_kind, projection_slot),
+            CHECK(length(trim(projection_kind)) > 0),
+            CHECK(length(trim(projection_slot)) > 0),
+            CHECK(
+                projection_table IS NULL
+                OR length(trim(projection_table)) > 0
+            ),
+            CHECK(
+                projection_row_id IS NULL
+                OR projection_row_id > 0
+            ),
+            CHECK(
+                (projection_table IS NULL AND projection_row_id IS NULL)
+                OR
+                (projection_table IS NOT NULL AND projection_row_id IS NOT NULL)
+            ),
+            CHECK(state IN ('claimed', 'completed')),
+            CHECK(
+                (
+                    state = 'claimed'
+                    AND completed_at IS NULL
+                )
+                OR
+                (
+                    state = 'completed'
+                    AND projection_table IS NOT NULL
+                    AND projection_row_id IS NOT NULL
+                    AND completed_at IS NOT NULL
+                )
+            )
+        )
+        """
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -353,5 +409,10 @@ CATALOG_MIGRATIONS = (
         version=2,
         name="durable-discord-message-ingestion",
         apply=_apply_durable_discord_message_ingestion,
+    ),
+    Migration(
+        version=3,
+        name="durable-discord-projection-links",
+        apply=_apply_durable_discord_projection_links,
     ),
 )

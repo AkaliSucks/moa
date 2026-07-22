@@ -28,10 +28,12 @@ def _make_baseline_database(database_path):
     """Create a version-1 database to exercise the version-2 upgrade path."""
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
+        connection.execute("DROP TABLE discord_projection_links")
         connection.execute("DROP TABLE discord_processing_attempts")
         connection.execute("DROP TABLE discord_source_events")
         connection.execute("DROP TABLE discord_message_revisions")
         connection.execute("DROP TABLE discord_message_aggregates")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
         connection.execute("DELETE FROM schema_migrations WHERE version = 2")
 
 
@@ -154,6 +156,43 @@ def _insert_attempt(
     ).lastrowid
 
 
+def _insert_projection_link(
+    connection,
+    source_event_id,
+    *,
+    projection_kind="roll",
+    projection_slot="account:1",
+    projection_table=None,
+    projection_row_id=None,
+    state="claimed",
+    claimed_at="2026-07-18T00:00:00+00:00",
+    completed_at=None,
+    created_at="2026-07-18T00:00:00+00:00",
+    updated_at="2026-07-18T00:00:00+00:00",
+):
+    return connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            projection_kind,
+            projection_slot,
+            projection_table,
+            projection_row_id,
+            state,
+            claimed_at,
+            completed_at,
+            created_at,
+            updated_at,
+        ),
+    ).lastrowid
+
+
 def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
 
@@ -173,10 +212,12 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "discord_message_revisions",
         "discord_source_events",
         "discord_processing_attempts",
+        "discord_projection_links",
     } <= tables
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
         (2, "durable-discord-message-ingestion"),
+        (3, "durable-discord-projection-links"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -249,6 +290,19 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "failure_detail",
             "created_at",
         },
+        "discord_projection_links": {
+            "id",
+            "source_event_id",
+            "projection_kind",
+            "projection_slot",
+            "projection_table",
+            "projection_row_id",
+            "state",
+            "claimed_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        },
     }
     with _open_database(database_path) as connection:
         for table, columns in expected_columns.items():
@@ -283,7 +337,256 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
         (2, "durable-discord-message-ingestion"),
+        (3, "durable-discord-projection-links"),
     ]
+
+
+def test_upgrade_from_version_2_preserves_discord_and_catalog_data(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:2])
+        connection.execute(
+            "INSERT INTO characters "
+            "(name, series, normalized_name, normalized_series, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("Asuna", "Sword Art Online", "asuna", "sword art online", "now", "now"),
+        )
+        import_event_id = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+            "VALUES (?, ?, ?, ?)",
+            ("roll", "discord", "now", "legacy roll"),
+        ).lastrowid
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        source_event_id = _insert_source_event(
+            connection, revision_id, legacy_import_event_id=import_event_id
+        )
+        catalog_rows = connection.execute(
+            "SELECT name, series FROM characters"
+        ).fetchall()
+        import_rows = connection.execute(
+            "SELECT kind, source, raw_message FROM import_events"
+        ).fetchall()
+        source_event_rows = connection.execute(
+            "SELECT id, event_key, revision_id, legacy_import_event_id "
+            "FROM discord_source_events"
+        ).fetchall()
+        assert source_event_id == source_event_rows[0][0]
+        assert _migration_rows(database_path) == [
+            (1, "catalog-schema-baseline"),
+            (2, "durable-discord-message-ingestion"),
+        ]
+
+        connection.commit()
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        assert connection.execute(
+            "SELECT name, series FROM characters"
+        ).fetchall() == catalog_rows
+        assert connection.execute(
+            "SELECT kind, source, raw_message FROM import_events"
+        ).fetchall() == import_rows
+        assert connection.execute(
+            "SELECT id, event_key, revision_id, legacy_import_event_id "
+            "FROM discord_source_events"
+        ).fetchall() == source_event_rows
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+        ).fetchone()[0] == 1
+
+
+def _current_database_with_source_event(database_path):
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        return _insert_source_event(connection, revision_id)
+
+
+def test_projection_links_are_idempotent_across_restart(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+    with _open_database(database_path) as connection:
+        _insert_projection_link(connection, source_event_id)
+
+    CatalogRepository(database_path)
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 3"
+        ).fetchone()[0] == 1
+
+
+def test_projection_link_source_event_foreign_key_requires_parent(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, 999)
+        _insert_projection_link(connection, source_event_id)
+
+
+def test_projection_link_identity_is_unique_per_source_event(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    first_source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        second_aggregate_id = _insert_aggregate(connection, guild_id="guild-2")
+        second_revision_id = _insert_revision(
+            connection,
+            second_aggregate_id,
+            source_revision_marker="revision-2",
+            normalized_payload_hash="hash-2",
+        )
+        second_source_event_id = _insert_source_event(
+            connection, second_revision_id, event_key="event-2"
+        )
+        _insert_projection_link(connection, first_source_event_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, first_source_event_id)
+        _insert_projection_link(connection, second_source_event_id)
+        _insert_projection_link(
+            connection, first_source_event_id, projection_slot="account:2"
+        )
+        _insert_projection_link(
+            connection, first_source_event_id, projection_kind="profile"
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links"
+        ).fetchone()[0] == 4
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"projection_kind": ""},
+        {"projection_kind": "   "},
+        {"projection_slot": " "},
+        {"projection_table": " "},
+    ],
+)
+def test_projection_link_rejects_blank_semantic_identity_and_target(
+    tmp_path, overrides
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, source_event_id, **overrides)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"projection_table": "roll_observations"},
+        {"projection_row_id": 1},
+        {"projection_table": "roll_observations", "projection_row_id": 0},
+        {"projection_table": "roll_observations", "projection_row_id": -1},
+    ],
+)
+def test_projection_link_rejects_invalid_projection_targets(tmp_path, overrides) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, source_event_id, **overrides)
+
+
+def test_projection_link_claimed_state_requires_no_completion(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        _insert_projection_link(connection, source_event_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(
+                connection,
+                source_event_id,
+                projection_slot="account:2",
+                completed_at="2026-07-18T00:01:00+00:00",
+            )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"projection_table": None},
+        {"projection_row_id": None},
+        {"completed_at": None},
+    ],
+)
+def test_projection_link_completed_state_requires_target_and_completion(
+    tmp_path, overrides
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            values = {
+                "state": "completed",
+                "projection_table": "roll_observations",
+                "projection_row_id": 1,
+                "completed_at": "2026-07-18T00:01:00+00:00",
+            }
+            values.update(overrides)
+            _insert_projection_link(
+                connection,
+                source_event_id,
+                **values,
+            )
+        _insert_projection_link(
+            connection,
+            source_event_id,
+            state="completed",
+            projection_table="roll_observations",
+            projection_row_id=1,
+            completed_at="2026-07-18T00:01:00+00:00",
+        )
+
+
+def test_projection_link_rejects_invalid_state(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, source_event_id, state="failed")
+
+
+def test_failed_projection_link_migration_rolls_back_schema_and_metadata(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:2])
+
+        def fail_after_schema(migration_connection):
+            CATALOG_MIGRATIONS[2].apply(migration_connection)
+            raise RuntimeError("migration 3 failed")
+
+        with pytest.raises(RuntimeError, match="migration 3 failed"):
+            run_migrations(
+                connection,
+                CATALOG_MIGRATIONS[:2]
+                + (Migration(3, "failing-projection-links", fail_after_schema),),
+            )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,)]
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'discord_projection_links'"
+        ).fetchone() is None
 
 
 def test_aggregate_identity_is_unique_without_using_payload_hash(tmp_path) -> None:
@@ -503,6 +806,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
         (2, "durable-discord-message-ingestion"),
+        (3, "durable-discord-projection-links"),
     ]
 
 
@@ -525,6 +829,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
         (2, "durable-discord-message-ingestion"),
+        (3, "durable-discord-projection-links"),
     ]
 
 
@@ -610,11 +915,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (3, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (4, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(3,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(4,)]
