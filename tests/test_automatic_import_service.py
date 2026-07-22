@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from moa.models.character import RollObservation
+from moa.models.character import ProfileSnapshot, RollObservation
 from moa.models.catalog import AutomaticImportResult
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.parser.mudae import MudaeTextParser
@@ -12,9 +12,14 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import (
     AutomaticImportService,
+    DurableProfileImportContext,
     DurableRollImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.profile_projection_coordinator import (
+    ProfileProjectionCoordinator,
+    ProfileProjectionResult,
+)
 from moa.services.roll_projection_coordinator import (
     RollProjectionCoordinator,
     RollProjectionResult,
@@ -22,8 +27,28 @@ from moa.services.roll_projection_coordinator import (
 
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
+PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
+
+PROFILE = ProfileSnapshot(
+    profile_name="profile-account",
+    collection_size=0,
+    female_percent=0,
+    male_percent=0,
+    pokedex_count=None,
+    pokedex_pokemon=(),
+    kakera_reacts={},
+    mudapins_collected=None,
+    mudapins_total=None,
+    kakera_balance=None,
+    bronze_keys=0,
+    silver_keys=0,
+    gold_keys=0,
+    sphere_stock=None,
+    spheres={},
+    displayed_badges=(),
+)
 
 
 def _durable_roll_importer(tmp_path):
@@ -56,6 +81,40 @@ def _durable_roll_importer(tmp_path):
     service = AutomaticImportService(
         CatalogService(catalog_repository),
         roll_projection_coordinator=coordinator,
+    )
+    return service, received.source_event_id, attempt.attempt_id
+
+
+def _durable_profile_importer(tmp_path):
+    database_path = tmp_path / "durable-profile.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = ProfileProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "profile-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "profile-payload-hash", "revision-1"
+        ),
+        event_key="profile-event",
+        event_kind="message_create",
+        raw_text=PROFILE_MESSAGE,
+        payload_json='{"content":"profile"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        profile_projection_coordinator=coordinator,
     )
     return service, received.source_event_id, attempt.attempt_id
 
@@ -317,6 +376,225 @@ def test_automatic_import_non_durable_roll_keeps_catalog_path_and_neutral_result
     assert result.import_event_id is None
     assert result.replay_skipped is False
     assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_profile_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_profile.return_value = PROFILE
+    coordinator = Mock()
+    coordinator.coordinate_profile.return_value = ProfileProjectionResult(
+        imported_count=1,
+        import_event_id=43,
+        profile_observation_id=44,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("profile_observations", 44),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        profile_projection_coordinator=coordinator,
+    )
+    context = DurableProfileImportContext(
+        source_event_id=21,
+        attempt_id=23,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        PROFILE_MESSAGE,
+        "discord:message",
+        " Lake ",
+        " ernieuuu ",
+        detected_kind="profile",
+        observed_at=OBSERVED_AT,
+        durable_profile_context=context,
+    )
+
+    parser.parse_profile.assert_called_once_with(PROFILE_MESSAGE)
+    coordinator.coordinate_profile.assert_called_once_with(
+        source_event_id=21,
+        attempt_id=23,
+        profile=PROFILE,
+        server="Lake",
+        account="ernieuuu",
+        raw=PROFILE_MESSAGE,
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_profile.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id == 43
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_profile_maps_completed_replay(tmp_path) -> None:
+    service, source_event_id, attempt_id = _durable_profile_importer(tmp_path)
+    first = service.import_message(
+        PROFILE_MESSAGE,
+        "discord",
+        "Lake",
+        "moa",
+        detected_kind="profile",
+        observed_at=OBSERVED_AT,
+        durable_profile_context=DurableProfileImportContext(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    replay = service.import_message(
+        PROFILE_MESSAGE,
+        "discord",
+        "Lake",
+        "moa",
+        detected_kind="profile",
+        observed_at=OBSERVED_AT,
+        durable_profile_context=DurableProfileImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+
+
+def test_automatic_import_durable_profile_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_profile.return_value = PROFILE
+    coordinator = Mock()
+    coordinator.coordinate_profile.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        profile_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            PROFILE_MESSAGE,
+            "discord",
+            "Lake",
+            "moa",
+            detected_kind="profile",
+            durable_profile_context=DurableProfileImportContext(
+                source_event_id=21,
+                attempt_id=23,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_profile.assert_not_called()
+
+
+def test_automatic_import_durable_profile_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_profile.return_value = PROFILE
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="ProfileProjectionCoordinator"):
+        service.import_message(
+            PROFILE_MESSAGE,
+            "discord",
+            "Lake",
+            "moa",
+            detected_kind="profile",
+            durable_profile_context=DurableProfileImportContext(
+                source_event_id=21,
+                attempt_id=23,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_profile.assert_called_once_with(PROFILE_MESSAGE)
+    catalog.import_profile.assert_not_called()
+
+
+def test_automatic_import_non_durable_profile_keeps_catalog_path_and_parses_once() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_profile.return_value = PROFILE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        profile_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        PROFILE_MESSAGE,
+        "clipboard",
+        "Lake",
+        "moa",
+        detected_kind="profile",
+    )
+
+    parser.parse_profile.assert_called_once_with(PROFILE_MESSAGE)
+    catalog.import_profile.assert_called_once_with(
+        PROFILE,
+        "Lake",
+        "moa",
+        PROFILE_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_profile.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_profile_context_does_not_affect_roll_route() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    profile_coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        profile_projection_coordinator=profile_coordinator,
+    )
+
+    result = service.import_message(
+        ROLL_MESSAGE,
+        "clipboard",
+        "Lake",
+        "moa",
+        detected_kind="roll",
+        durable_profile_context=DurableProfileImportContext(
+            source_event_id=21,
+            attempt_id=23,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    catalog.import_roll.assert_called_once_with(
+        parser.parse_roll.return_value,
+        "Lake",
+        "moa",
+        ROLL_MESSAGE,
+        "clipboard",
+    )
+    profile_coordinator.coordinate_profile.assert_not_called()
+    assert result.imported_count == 1
 
 
 def test_automatic_import_non_roll_routes_never_call_roll_coordinator(tmp_path) -> None:
