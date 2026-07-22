@@ -1256,6 +1256,46 @@ def _durable_listener(tmp_path, *, importer=None):
     return listener, repository, database_path
 
 
+def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
+    database_path = tmp_path / "catalog.db"
+    config = ConfigService(tmp_path / config_name)
+    for server, account, role, user_id in accounts:
+        config.add_account(
+            server,
+            account,
+            role=role,
+            discord_server_id="123",
+            discord_user_id=user_id,
+        )
+    catalog_repository = CatalogRepository(database_path)
+    catalog = CatalogService(catalog_repository)
+    repository = DiscordMessageRepository(database_path)
+    if importer is None:
+        importer = AutomaticImportService(
+            catalog,
+            roll_projection_coordinator=RollProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            profile_projection_coordinator=ProfileProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            claim_projection_coordinator=ClaimProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+        )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=repository,
+    )
+    listener._mudae_user_id = 999
+    return listener, repository, database_path
+
+
 def _durable_importer_for(catalog, database_path):
     catalog_repository = CatalogRepository(database_path)
     discord_repository = DiscordMessageRepository(database_path)
@@ -1328,6 +1368,15 @@ def _durable_claim_message(
 def _receipt_rows(database_path, table: str):
     with connect(database_path) as connection:
         return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
+
+
+def _server_attribution_rows(database_path):
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT source_event_id, status, server_name FROM "
+            "discord_source_event_server_attributions ORDER BY source_event_id"
+        ).fetchall()
+    return [tuple(row) for row in rows]
 
 
 def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
@@ -2685,3 +2734,232 @@ def test_listener_claim_uses_parsed_claimant_over_stale_channel_context(tmp_path
     assert importer.import_message.call_args.args[3] == "user_a"
     assert len(catalog.claim_observations("Test Server", "user_a")) == 1
     assert catalog.claim_observations("Test Server", "user_b") == ()
+
+
+def test_listener_records_server_attribution_before_seen_payloads(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    seen_sizes = []
+    original_record = repository.record_server_attribution
+
+    def record_attribution(*args, **kwargs):
+        seen_sizes.append(len(listener._seen_payloads))
+        return original_record(*args, **kwargs)
+
+    repository.record_server_attribution = record_attribution
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    assert seen_sizes == [0]
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+
+def test_listener_reuses_persisted_resolved_attribution_after_reconstruction(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, restarted_repository, _ = _durable_listener(tmp_path)
+    get_attribution = Mock(wraps=restarted_repository.get_server_attribution)
+    restarted_repository.get_server_attribution = get_attribution
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    get_attribution.assert_called_once_with(1)
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+
+
+def test_listener_conflicting_live_server_evidence_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "first.json",
+        (("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")),
+    )
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    importer = Mock()
+    restarted_listener, restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "second.json",
+        (("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(name="wa", user=SimpleNamespace(id=789))
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    restarted_repository.record_server_attribution = Mock()
+
+
+def test_listener_no_server_evidence_records_unresolved_and_blocks_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "empty.json",
+        (),
+        importer=importer,
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (attempt["status"], attempt["retryable"], attempt["failure_code"]) == (
+        "unresolved_attribution",
+        1,
+        "unresolved_server_attribution",
+    )
+
+
+def test_listener_conflicting_authoritative_servers_record_ambiguous(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "ambiguous.json",
+        (("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")),
+        importer=importer,
+    )
+    message = _durable_claim_message(claimant="user_b", interaction_user_id=456)
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "ambiguous", None)]
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert attempt["failure_code"] == "ambiguous_server_attribution"
+    assert attempt["status"] == "unresolved_attribution"
+
+
+def test_listener_parsed_claimant_uniquely_resolves_server(tmp_path) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "claim.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    message = _durable_claim_message(interaction_user_id=456)
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_receipt_rows(database_path, "claim_observations")) == 1
+
+
+def test_listener_parsed_profile_account_uniquely_resolves_server(tmp_path) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "profile.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    message = _durable_profile_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
+
+
+def test_listener_unresolved_attribution_transitions_to_resolved(tmp_path) -> None:
+    first_importer = Mock()
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "unresolved-first.json",
+        (),
+        importer=first_importer,
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    second_listener, _second_repository, _ = _attribution_listener(
+        tmp_path,
+        "resolved-second.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    message.interaction_metadata = SimpleNamespace(name="wa", user=SimpleNamespace(id=456))
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["status"] for attempt in attempts] == [
+        "unresolved_attribution",
+        "succeeded",
+    ]
+
+
+def test_listener_ambiguous_attribution_transitions_to_resolved(tmp_path) -> None:
+    first_importer = Mock()
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "ambiguous-first.json",
+        (("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")),
+        importer=first_importer,
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    second_listener, _second_repository, _ = _attribution_listener(
+        tmp_path,
+        "resolved-second.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    message.interaction_metadata = SimpleNamespace(name="wa", user=SimpleNamespace(id=456))
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+
+@pytest.mark.parametrize(
+    ("initial_accounts", "later_accounts", "expected_status"),
+    [
+        ((), (("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")), "unresolved"),
+        ((("Test Server", "user_a", "primary", "456"), ("Other Server", "user_b", "alt", "789")), (), "ambiguous"),
+    ],
+)
+def test_listener_does_not_rewrite_unresolved_or_ambiguous_attribution(
+    tmp_path,
+    initial_accounts,
+    later_accounts,
+    expected_status,
+) -> None:
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "initial.json",
+        initial_accounts,
+        importer=Mock(),
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    later_listener, _later_repository, _ = _attribution_listener(
+        tmp_path,
+        "later.json",
+        later_accounts,
+        importer=Mock(),
+    )
+    asyncio.run(later_listener.handle_bot_response(message))
+
+    assert _server_attribution_rows(database_path) == [(1, expected_status, None)]
+
+
+def test_listener_attribution_write_failure_prevents_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, repository, database_path = _durable_listener(tmp_path, importer=importer)
+    repository.record_server_attribution = Mock(side_effect=RuntimeError("attribution unavailable"))
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    importer.import_message.assert_not_called()
+    assert listener._seen_payloads == set()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
