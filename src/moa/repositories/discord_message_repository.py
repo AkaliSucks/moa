@@ -265,50 +265,70 @@ class DiscordMessageRepository:
         self._validate_processing_identity(source_event_id=source_event_id)
         self._validate_processing_identity(attempt_id=attempt_id)
         normalized_finished_at = self._normalize_processing_datetime(finished_at, "finished_at")
-
         with self._connection() as connection:
-            event, attempt = self._load_processing_rows(
-                connection, source_event_id=source_event_id, attempt_id=attempt_id
+            return self._mark_processing_success_with_connection(
+                connection,
+                source_event_id=source_event_id,
+                attempt_id=attempt_id,
+                finished_at=normalized_finished_at,
+                legacy_import_event_id=legacy_import_event_id,
             )
-            self._validate_completion_state(event, attempt, source_event_id, attempt_id)
-            self._validate_finished_at(attempt, normalized_finished_at)
-            if legacy_import_event_id is not None:
-                self._validate_processing_identity(legacy_import_event_id=legacy_import_event_id)
-                import_event = connection.execute(
-                    "SELECT 1 FROM import_events WHERE id = ?",
-                    (legacy_import_event_id,),
-                ).fetchone()
-                if import_event is None:
-                    raise DiscordMessageProcessingNotFoundError(
-                        f"Legacy import event {legacy_import_event_id} was not found"
-                    )
-            finished_at_value = normalized_finished_at.isoformat()
-            updated_attempt = connection.execute(
-                """
-                UPDATE discord_processing_attempts
-                SET status = 'succeeded', retryable = 0, finished_at = ?,
-                    failure_code = NULL, failure_detail = NULL
-                WHERE id = ? AND source_event_id = ? AND status = 'processing'
-                """,
-                (finished_at_value, attempt_id, source_event_id),
-            )
-            if updated_attempt.rowcount != 1:
-                raise DiscordMessageProcessingConflictError(
-                    f"Discord processing attempt {attempt_id} is no longer processing"
+
+    def _mark_processing_success_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_event_id: int,
+        attempt_id: int,
+        finished_at: datetime,
+        legacy_import_event_id: int | None,
+    ) -> ProcessingAttemptResult:
+        """Complete one active attempt without owning the surrounding transaction."""
+        self._validate_processing_identity(source_event_id=source_event_id)
+        self._validate_processing_identity(attempt_id=attempt_id)
+        normalized_finished_at = self._normalize_processing_datetime(finished_at, "finished_at")
+        event, attempt = self._load_processing_rows(
+            connection, source_event_id=source_event_id, attempt_id=attempt_id
+        )
+        self._validate_completion_state(event, attempt, source_event_id, attempt_id)
+        self._validate_finished_at(attempt, normalized_finished_at)
+        if legacy_import_event_id is not None:
+            self._validate_processing_identity(legacy_import_event_id=legacy_import_event_id)
+            import_event = connection.execute(
+                "SELECT 1 FROM import_events WHERE id = ?",
+                (legacy_import_event_id,),
+            ).fetchone()
+            if import_event is None:
+                raise DiscordMessageProcessingNotFoundError(
+                    f"Legacy import event {legacy_import_event_id} was not found"
                 )
-            updated_event = connection.execute(
-                """
-                UPDATE discord_source_events
-                SET status = 'succeeded', legacy_import_event_id = ?, updated_at = ?
-                WHERE id = ? AND status = 'processing'
-                """,
-                (legacy_import_event_id, finished_at_value, source_event_id),
+        finished_at_value = normalized_finished_at.isoformat()
+        updated_attempt = connection.execute(
+            """
+            UPDATE discord_processing_attempts
+            SET status = 'succeeded', retryable = 0, finished_at = ?,
+                failure_code = NULL, failure_detail = NULL
+            WHERE id = ? AND source_event_id = ? AND status = 'processing'
+            """,
+            (finished_at_value, attempt_id, source_event_id),
+        )
+        if updated_attempt.rowcount != 1:
+            raise DiscordMessageProcessingConflictError(
+                f"Discord processing attempt {attempt_id} is no longer processing"
             )
-            if updated_event.rowcount != 1:
-                raise DiscordMessageProcessingConflictError(
-                    f"Discord source event {source_event_id} is no longer processing"
-                )
-            return self._processing_result(connection, source_event_id, attempt_id)
+        updated_event = connection.execute(
+            """
+            UPDATE discord_source_events
+            SET status = 'succeeded', legacy_import_event_id = ?, updated_at = ?
+            WHERE id = ? AND status = 'processing'
+            """,
+            (legacy_import_event_id, finished_at_value, source_event_id),
+        )
+        if updated_event.rowcount != 1:
+            raise DiscordMessageProcessingConflictError(
+                f"Discord source event {source_event_id} is no longer processing"
+            )
+        return self._processing_result(connection, source_event_id, attempt_id)
 
     def mark_processing_failure(
         self,
