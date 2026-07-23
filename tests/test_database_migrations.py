@@ -29,6 +29,7 @@ def _make_baseline_database(database_path):
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
         connection.execute("DROP TABLE discord_source_event_server_attributions")
+        connection.execute("DROP TABLE discord_source_event_account_attributions")
         connection.execute("DROP TABLE discord_projection_links")
         connection.execute("DROP TABLE discord_processing_attempts")
         connection.execute("DROP TABLE discord_source_events")
@@ -37,6 +38,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 3")
         connection.execute("DELETE FROM schema_migrations WHERE version = 2")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 5")
 
 
 def _insert_aggregate(
@@ -216,12 +218,14 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "discord_processing_attempts",
         "discord_projection_links",
         "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
     } <= tables
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
         (2, "durable-discord-message-ingestion"),
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
+        (5, "durable-discord-source-event-account-attributions"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -314,6 +318,14 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "created_at",
             "updated_at",
         },
+        "discord_source_event_account_attributions": {
+            "source_event_id",
+            "status",
+            "server_name",
+            "account_name",
+            "created_at",
+            "updated_at",
+        },
     }
     with _open_database(database_path) as connection:
         for table, columns in expected_columns.items():
@@ -350,6 +362,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (2, "durable-discord-message-ingestion"),
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
+        (5, "durable-discord-source-event-account-attributions"),
     ]
 
 
@@ -410,6 +423,9 @@ def test_upgrade_from_version_2_preserves_discord_and_catalog_data(tmp_path) -> 
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
         ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
+        ).fetchone()[0] == 1
 
 
 def _current_database_with_source_event(database_path):
@@ -425,7 +441,9 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
         connection.execute("DROP TABLE discord_source_event_server_attributions")
+        connection.execute("DROP TABLE discord_source_event_account_attributions")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -452,6 +470,9 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         ).fetchone()[0] == "discord_source_event_server_attributions"
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = 4"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 5"
         ).fetchone()[0] == 1
     assert source_event_id == before[0][0]
 
@@ -541,6 +562,137 @@ def test_server_attribution_schema_enforces_identity_and_status_consistency(tmp_
         assert connection.execute(
             "SELECT COUNT(*) FROM discord_source_event_server_attributions"
         ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "status, server_name, account_name",
+    [
+        ("resolved", "Server A", "Account A"),
+        ("unresolved", None, None),
+        ("ambiguous", None, None),
+    ],
+)
+def test_account_attribution_schema_accepts_valid_status_identity_combinations(
+    tmp_path, status: str, server_name: str | None, account_name: str | None
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_account_attributions (
+                source_event_id, status, server_name, account_name, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_event_id,
+                status,
+                server_name,
+                account_name,
+                "now",
+                "now",
+            ),
+        )
+        assert connection.execute(
+            "SELECT status, server_name, account_name "
+            "FROM discord_source_event_account_attributions"
+        ).fetchone() == (status, server_name, account_name)
+
+
+@pytest.mark.parametrize(
+    "status, server_name, account_name",
+    [
+        ("resolved", None, "Account A"),
+        ("resolved", "Server A", None),
+        ("resolved", "   ", "Account A"),
+        ("resolved", "Server A", "   "),
+        ("unresolved", "Server A", None),
+        ("unresolved", None, "Account A"),
+        ("ambiguous", "Server A", None),
+        ("ambiguous", None, "Account A"),
+    ],
+)
+def test_account_attribution_schema_rejects_invalid_status_identity_combinations(
+    tmp_path, status: str, server_name: str | None, account_name: str | None
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO discord_source_event_account_attributions (
+                    source_event_id, status, server_name, account_name, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_event_id,
+                    status,
+                    server_name,
+                    account_name,
+                    "now",
+                    "now",
+                ),
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO discord_source_event_account_attributions (
+                    source_event_id, status, server_name, account_name, created_at, updated_at
+                ) VALUES (999, 'unresolved', NULL, NULL, 'now', 'now')
+                """
+            )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
+
+
+def test_account_attribution_schema_cascades_source_event_deletion(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_account_attributions (
+                source_event_id, status, server_name, account_name, created_at, updated_at
+            ) VALUES (?, 'resolved', 'Server A', 'Account A', 'now', 'now')
+            """,
+            (source_event_id,),
+        )
+        connection.execute("DELETE FROM discord_source_events WHERE id = ?", (source_event_id,))
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
+
+
+def test_failed_account_attribution_migration_rolls_back_schema_and_metadata(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:4])
+
+        def fail_after_schema(migration_connection):
+            CATALOG_MIGRATIONS[4].apply(migration_connection)
+            raise RuntimeError("migration 5 failed")
+
+        with pytest.raises(RuntimeError, match="migration 5 failed"):
+            run_migrations(
+                connection,
+                CATALOG_MIGRATIONS[:4]
+                + (Migration(5, "failing-account-attribution", fail_after_schema),),
+            )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,), (4,)]
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = "
+            "'discord_source_event_account_attributions'"
+        ).fetchone() is None
 
 
 def test_failed_server_attribution_migration_rolls_back_schema_and_metadata(tmp_path) -> None:
@@ -955,6 +1107,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (2, "durable-discord-message-ingestion"),
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
+        (5, "durable-discord-source-event-account-attributions"),
     ]
 
 
@@ -979,6 +1132,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (2, "durable-discord-message-ingestion"),
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
+        (5, "durable-discord-source-event-account-attributions"),
     ]
 
 
@@ -1064,11 +1218,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (5, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (6, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(5,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(6,)]

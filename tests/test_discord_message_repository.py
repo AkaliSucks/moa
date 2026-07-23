@@ -9,6 +9,10 @@ from moa.repositories.discord_message_repository import (
     DiscordMessageProcessingConflictError,
     DiscordMessageProcessingNotFoundError,
     DiscordMessageReceiveConflictError,
+    DiscordSourceEventAccountAttribution,
+    DiscordSourceEventAccountAttributionConflictError,
+    DiscordSourceEventAccountAttributionNotFoundError,
+    DiscordSourceEventAccountAttributionValidationError,
     DiscordSourceEventServerAttributionConflictError,
     DiscordSourceEventServerAttributionNotFoundError,
     DiscordSourceEventServerAttributionValidationError,
@@ -71,6 +75,24 @@ def record_attribution(
         source_event_id,
         status=status,
         server_name=server_name,
+        recorded_at=recorded_at,
+    )
+
+
+def record_account_attribution(
+    repository: DiscordMessageRepository,
+    source_event_id: int,
+    *,
+    status: str = "resolved",
+    server_name: str | None = "Server A",
+    account_name: str | None = "Account A",
+    recorded_at: datetime = datetime(2026, 7, 18, 0, 2, tzinfo=timezone.utc),
+):
+    return repository.record_account_attribution(
+        source_event_id,
+        status=status,
+        server_name=server_name,
+        account_name=account_name,
         recorded_at=recorded_at,
     )
 
@@ -1066,3 +1088,363 @@ def test_server_attribution_does_not_change_event_attempt_or_projection_lifecycl
             connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0],
         )
     assert after == before
+
+
+@pytest.mark.parametrize(
+    "status, server_name, account_name",
+    [
+        ("resolved", "  Configured Server  ", "  Configured Account  "),
+        ("unresolved", None, None),
+        ("ambiguous", None, None),
+    ],
+)
+def test_record_and_read_account_attribution(
+    tmp_path, status: str, server_name: str | None, account_name: str | None
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    recorded_at = datetime(2026, 7, 18, 3, 2, tzinfo=timezone.utc)
+
+    result = record_account_attribution(
+        repository,
+        received.source_event_id,
+        status=status,
+        server_name=server_name,
+        account_name=account_name,
+        recorded_at=recorded_at,
+    )
+
+    assert isinstance(result, DiscordSourceEventAccountAttribution)
+    assert result.source_event_id == received.source_event_id
+    assert result.status == status
+    assert result.server_name == server_name
+    assert result.account_name == account_name
+    assert result.created_at == recorded_at
+    assert result.updated_at == recorded_at
+    assert repository.get_account_attribution(received.source_event_id) == result
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM discord_source_event_account_attributions"
+        ).fetchone()
+    assert dict(row) == {
+        "source_event_id": received.source_event_id,
+        "status": status,
+        "server_name": server_name,
+        "account_name": account_name,
+        "created_at": recorded_at.isoformat(),
+        "updated_at": recorded_at.isoformat(),
+    }
+
+
+@pytest.mark.parametrize(
+    "status, server_name, account_name",
+    [
+        ("resolved", "Server A", "Account A"),
+        ("unresolved", None, None),
+        ("ambiguous", None, None),
+    ],
+)
+def test_exact_account_attribution_replay_is_idempotent(
+    tmp_path, status: str, server_name: str | None, account_name: str | None
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    first_time = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+    replay_time = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
+
+    first = record_account_attribution(
+        repository,
+        received.source_event_id,
+        status=status,
+        server_name=server_name,
+        account_name=account_name,
+        recorded_at=first_time,
+    )
+    replay = record_account_attribution(
+        repository,
+        received.source_event_id,
+        status=status,
+        server_name=server_name,
+        account_name=account_name,
+        recorded_at=replay_time,
+    )
+
+    assert replay == first
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 1
+        row = connection.execute(
+            "SELECT created_at, updated_at "
+            "FROM discord_source_event_account_attributions"
+        ).fetchone()
+    assert tuple(row) == (first_time.isoformat(), first_time.isoformat())
+
+
+@pytest.mark.parametrize("initial_status", ["unresolved", "ambiguous"])
+def test_unresolved_or_ambiguous_account_attribution_can_resolve(
+    tmp_path, initial_status: str
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    first_time = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+    resolved_time = datetime(2026, 7, 18, 3, 1, tzinfo=timezone.utc)
+
+    first = record_account_attribution(
+        repository,
+        received.source_event_id,
+        status=initial_status,
+        server_name=None,
+        account_name=None,
+        recorded_at=first_time,
+    )
+    resolved = record_account_attribution(
+        repository,
+        received.source_event_id,
+        status="resolved",
+        server_name="Server A",
+        account_name="Account A",
+        recorded_at=resolved_time,
+    )
+
+    assert first.status == initial_status
+    assert resolved.status == "resolved"
+    assert resolved.server_name == "Server A"
+    assert resolved.account_name == "Account A"
+    assert resolved.created_at == first_time
+    assert resolved.updated_at == resolved_time
+
+
+def test_resolved_account_attribution_conflicts_with_different_identity(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    record_account_attribution(repository, received.source_event_id)
+
+    with pytest.raises(DiscordSourceEventAccountAttributionConflictError, match="immutable"):
+        record_account_attribution(
+            repository,
+            received.source_event_id,
+            server_name="Server B",
+            recorded_at=datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT status, server_name, account_name "
+                "FROM discord_source_event_account_attributions"
+            ).fetchone()
+        ) == ("resolved", "Server A", "Account A")
+
+
+@pytest.mark.parametrize("status", ["unresolved", "ambiguous"])
+def test_resolved_account_attribution_cannot_be_downgraded(tmp_path, status: str) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    record_account_attribution(repository, received.source_event_id)
+
+    with pytest.raises(DiscordSourceEventAccountAttributionConflictError, match="immutable"):
+        record_account_attribution(
+            repository,
+            received.source_event_id,
+            status=status,
+            server_name=None,
+            account_name=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "initial_status, next_status",
+    [("unresolved", "ambiguous"), ("ambiguous", "unresolved")],
+)
+def test_nonresolved_account_attribution_rewrite_conflicts(
+    tmp_path, initial_status: str, next_status: str
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    record_account_attribution(
+        repository,
+        received.source_event_id,
+        status=initial_status,
+        server_name=None,
+        account_name=None,
+    )
+
+    with pytest.raises(DiscordSourceEventAccountAttributionConflictError, match="immutable"):
+        record_account_attribution(
+            repository,
+            received.source_event_id,
+            status=next_status,
+            server_name=None,
+            account_name=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "status, server_name, account_name",
+    [
+        ("invalid", None, None),
+        ("resolved", None, "Account A"),
+        ("resolved", "Server A", None),
+        ("resolved", "   ", "Account A"),
+        ("resolved", "Server A", "   "),
+        ("unresolved", "Server A", None),
+        ("unresolved", None, "Account A"),
+        ("ambiguous", "Server A", None),
+        ("ambiguous", None, "Account A"),
+    ],
+)
+def test_invalid_account_attribution_status_and_identity_fails_before_persistence(
+    tmp_path,
+    status: str,
+    server_name: str | None,
+    account_name: str | None,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+
+    with pytest.raises(DiscordSourceEventAccountAttributionValidationError):
+        record_account_attribution(
+            repository,
+            received.source_event_id,
+            status=status,
+            server_name=server_name,
+            account_name=account_name,
+        )
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
+
+
+def test_missing_source_event_account_attribution_fails_without_writes(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+
+    assert repository.get_account_attribution(999) is None
+    with pytest.raises(DiscordSourceEventAccountAttributionNotFoundError, match="999"):
+        record_account_attribution(repository, 999)
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
+
+
+def test_account_attribution_does_not_change_other_durable_lifecycle_state(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    with connect(database_path) as connection:
+        import_event_id = connection.execute(
+            """
+            INSERT INTO import_events (kind, source, observed_at, raw_message)
+            VALUES ('roll', 'discord', ?, 'legacy')
+            """,
+            ("2026-07-18T03:01:00+00:00",),
+        ).lastrowid
+    repository.mark_processing_success(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        finished_at=datetime(2026, 7, 18, 3, 1, tzinfo=timezone.utc),
+        legacy_import_event_id=import_event_id,
+    )
+    record_attribution(repository, received.source_event_id)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO discord_projection_links (
+                source_event_id, projection_kind, projection_slot, state,
+                claimed_at, created_at, updated_at
+            ) VALUES (?, 'roll', 'account:1', 'claimed', ?, ?, ?)
+            """,
+            (
+                received.source_event_id,
+                "2026-07-18T03:01:00+00:00",
+                "2026-07-18T03:01:00+00:00",
+                "2026-07-18T03:01:00+00:00",
+            ),
+        )
+        before = (
+            tuple(
+                connection.execute(
+                    "SELECT status, legacy_import_event_id "
+                    "FROM discord_source_events"
+                ).fetchone()
+            ),
+            tuple(
+                connection.execute(
+                    "SELECT status, server_name, created_at, updated_at "
+                    "FROM discord_source_event_server_attributions"
+                ).fetchone()
+            ),
+            tuple(
+                connection.execute(
+                    "SELECT status, retryable, finished_at "
+                    "FROM discord_processing_attempts"
+                ).fetchone()
+            ),
+            connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0],
+        )
+
+    record_account_attribution(
+        repository,
+        received.source_event_id,
+        recorded_at=datetime(2026, 7, 18, 3, 2, tzinfo=timezone.utc),
+    )
+
+    with connect(database_path) as connection:
+        after = (
+            tuple(
+                connection.execute(
+                    "SELECT status, legacy_import_event_id "
+                    "FROM discord_source_events"
+                ).fetchone()
+            ),
+            tuple(
+                connection.execute(
+                    "SELECT status, server_name, created_at, updated_at "
+                    "FROM discord_source_event_server_attributions"
+                ).fetchone()
+            ),
+            tuple(
+                connection.execute(
+                    "SELECT status, retryable, finished_at "
+                    "FROM discord_processing_attempts"
+                ).fetchone()
+            ),
+            connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0],
+        )
+        assert tuple(
+            connection.execute(
+                "SELECT server_name, account_name "
+                "FROM discord_source_event_account_attributions"
+            ).fetchone()
+        ) == ("Server A", "Account A")
+    assert after == before
+
+
+def test_source_event_deletion_cascades_account_attribution(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    record_account_attribution(repository, received.source_event_id)
+
+    with connect(database_path) as connection:
+        connection.execute(
+            "DELETE FROM discord_source_events WHERE id = ?", (received.source_event_id,)
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
