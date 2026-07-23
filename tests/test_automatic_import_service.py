@@ -1,10 +1,16 @@
 import sqlite3
 from datetime import datetime, timezone
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
-from moa.models.character import ClaimConfirmation, ProfileSnapshot, RollObservation
+from moa.models.character import (
+    ClaimConfirmation,
+    ProfileSnapshot,
+    RollObservation,
+    ServerSettingMetric,
+    ServerSettingsSnapshot,
+)
 from moa.models.catalog import AutomaticImportResult
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.parser.mudae import MudaeTextParser
@@ -15,6 +21,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
+    DurableSettingsImportContext,
 )
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import (
@@ -29,13 +36,38 @@ from moa.services.roll_projection_coordinator import (
     RollProjectionCoordinator,
     RollProjectionResult,
 )
+from moa.services.settings_projection_coordinator import (
+    SettingsProjectionCoordinator,
+    SettingsProjectionResult,
+)
 
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
 CLAIM_MESSAGE = "ernieuuu and Pakunoda are now married!"
+SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
+
+SETTINGS = ServerSettingsSnapshot(
+    server_premium=False,
+    prefix="$",
+    language="English",
+    claim_reset_minutes=60,
+    reset_minute="00",
+    reset_shift_minutes=0,
+    rolls_per_hour=10,
+    claim_reaction_expiry_seconds=30,
+    claimed_character_rarity_multiplier=2,
+    kakera_bonus_percent=15,
+    sphere_bonus_percent=5,
+    game_mode=1,
+    channel_instance=2,
+    metrics=(
+        ServerSettingMetric(label="Prefix", value="$"),
+        ServerSettingMetric(label="Lang", value="English"),
+    ),
+)
 
 PROFILE = ProfileSnapshot(
     profile_name="profile-account",
@@ -157,6 +189,49 @@ def _durable_claim_importer(tmp_path):
         claim_projection_coordinator=coordinator,
     )
     return service, received.source_event_id, attempt.attempt_id
+
+
+def _durable_settings_importer(tmp_path):
+    database_path = tmp_path / "durable-settings.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = SettingsProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "settings-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "settings-payload-hash", "revision-1"
+        ),
+        event_key="settings-event",
+        event_kind="message_create",
+        raw_text=SETTINGS_MESSAGE,
+        payload_json='{"content":"settings payload"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    parser = Mock()
+    parser.parse_server_settings.return_value = SETTINGS
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        parser=parser,
+        settings_projection_coordinator=coordinator,
+    )
+    return service, parser, received.source_event_id, attempt.attempt_id
 
 
 def test_automatic_import_routes_top_pages_without_server_context(tmp_path) -> None:
@@ -416,6 +491,247 @@ def test_automatic_import_non_durable_roll_keeps_catalog_path_and_neutral_result
     assert result.import_event_id is None
     assert result.replay_skipped is False
     assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_settings_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_server_settings.return_value = SETTINGS
+    coordinator = Mock()
+    coordinator.coordinate_settings.return_value = SettingsProjectionResult(
+        imported_count=2,
+        import_event_id=62,
+        server_settings_observation_id=63,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("server_settings_observations", 63),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        settings_projection_coordinator=coordinator,
+    )
+    context = DurableSettingsImportContext(
+        source_event_id=41,
+        attempt_id=43,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        SETTINGS_MESSAGE,
+        "discord:message",
+        " Lake ",
+        detected_kind="settings",
+        observed_at=OBSERVED_AT,
+        durable_settings_context=context,
+    )
+
+    parser.parse_server_settings.assert_called_once_with(SETTINGS_MESSAGE)
+    assert coordinator.method_calls == [
+        call.coordinate_settings(
+            source_event_id=41,
+            attempt_id=43,
+            settings=SETTINGS,
+            server="Lake",
+            raw=SETTINGS_MESSAGE,
+            source="discord:message",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        )
+    ]
+    catalog.import_server_settings.assert_not_called()
+    assert result.imported_count == 2
+    assert result.import_event_id == 62
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_settings_maps_completed_replay(tmp_path) -> None:
+    service, parser, source_event_id, attempt_id = _durable_settings_importer(tmp_path)
+    first = service.import_message(
+        SETTINGS_MESSAGE,
+        "discord",
+        "Lake",
+        detected_kind="settings",
+        observed_at=OBSERVED_AT,
+        durable_settings_context=DurableSettingsImportContext(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    replay = service.import_message(
+        SETTINGS_MESSAGE,
+        "discord",
+        "Lake",
+        detected_kind="settings",
+        observed_at=OBSERVED_AT,
+        durable_settings_context=DurableSettingsImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    parser.parse_server_settings.assert_has_calls([call(SETTINGS_MESSAGE), call(SETTINGS_MESSAGE)])
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert first.replay_skipped is False
+    assert first.durable_success_recorded is True
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+
+
+def test_automatic_import_durable_settings_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_server_settings.return_value = SETTINGS
+    coordinator = Mock()
+    coordinator.coordinate_settings.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        settings_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            SETTINGS_MESSAGE,
+            "discord",
+            "Lake",
+            detected_kind="settings",
+            durable_settings_context=DurableSettingsImportContext(
+                source_event_id=41,
+                attempt_id=43,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_server_settings.assert_called_once_with(SETTINGS_MESSAGE)
+    catalog.import_server_settings.assert_not_called()
+
+
+def test_automatic_import_durable_settings_requires_coordinator_before_catalog_write(tmp_path) -> None:
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    parser = Mock()
+    parser.parse_server_settings.return_value = SETTINGS
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="SettingsProjectionCoordinator"):
+        service.import_message(
+            SETTINGS_MESSAGE,
+            "discord",
+            "Lake",
+            detected_kind="settings",
+            durable_settings_context=DurableSettingsImportContext(
+                source_event_id=41,
+                attempt_id=43,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_server_settings.assert_called_once_with(SETTINGS_MESSAGE)
+    with sqlite3.connect(tmp_path / "catalog.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+
+
+def test_automatic_import_non_durable_settings_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_server_settings.return_value = SETTINGS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        settings_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        SETTINGS_MESSAGE,
+        "clipboard",
+        "Lake",
+        detected_kind="settings",
+    )
+
+    parser.parse_server_settings.assert_called_once_with(SETTINGS_MESSAGE)
+    catalog.import_server_settings.assert_called_once_with(
+        SETTINGS,
+        "Lake",
+        SETTINGS_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_settings.assert_not_called()
+    assert result.imported_count == len(SETTINGS.metrics)
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_settings_context_does_not_affect_non_settings_routes() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    parser.parse_profile.return_value = PROFILE
+    parser.parse_claim_confirmation.return_value = ClaimConfirmation(
+        account_name="ernieuuu", character_name="Parsed Character"
+    )
+    settings_coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        settings_projection_coordinator=settings_coordinator,
+    )
+    context = DurableSettingsImportContext(
+        source_event_id=41,
+        attempt_id=43,
+        finished_at=FINISHED_AT,
+    )
+
+    service.import_message(
+        ROLL_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+        durable_settings_context=context,
+    )
+    service.import_message(
+        PROFILE_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="profile",
+        durable_settings_context=context,
+    )
+    service.import_message(
+        CLAIM_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="claim",
+        durable_settings_context=context,
+    )
+    result = service.import_message(
+        "Looking for a specific command? Try $search",
+        "clipboard",
+        detected_kind="help",
+        durable_settings_context=context,
+    )
+
+    catalog.import_roll.assert_called_once()
+    catalog.import_profile.assert_called_once()
+    catalog.import_claim.assert_called_once()
+    settings_coordinator.coordinate_settings.assert_not_called()
+    assert result.kind == "help"
 
 
 def test_automatic_import_durable_claim_delegates_once_with_parsed_claim_and_context() -> None:
