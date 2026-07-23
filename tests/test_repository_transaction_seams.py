@@ -10,6 +10,7 @@ from moa.models.character import (
     RollObservation,
     ServerSettingMetric,
     ServerSettingsSnapshot,
+    KakeralootSettingsSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
@@ -61,6 +62,11 @@ SETTINGS = ServerSettingsSnapshot(
         ServerSettingMetric(label="Prefix", value="$"),
         ServerSettingMetric(label="Lang", value="English"),
     ),
+)
+KAKERALOOT_SETTINGS = KakeralootSettingsSnapshot(
+    loot_cost=500,
+    quantity_quality_base_cost=2000,
+    quantity_quality_level_increment=200,
 )
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -118,6 +124,21 @@ def _settings_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "import_events",
         "server_contexts",
         "server_settings_observations",
+        "discord_projection_links",
+        "discord_source_event_server_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _kakeraloot_settings_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "kakeraloot_settings_observations",
         "discord_projection_links",
         "discord_source_event_server_attributions",
         "discord_processing_attempts",
@@ -564,6 +585,217 @@ def test_server_settings_helper_does_not_write_projection_or_attribution_state(t
     assert after["discord_projection_links"] == before["discord_projection_links"]
     assert after["discord_source_event_server_attributions"] == before["discord_source_event_server_attributions"]
     assert after["discord_processing_attempts"] == before["discord_processing_attempts"]
+
+
+def test_public_kakeraloot_settings_wrapper_preserves_result_rows_and_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_kakeraloot_settings(
+        KAKERALOOT_SETTINGS, " Server ", "infokl payload", "discord"
+    )
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    settings = catalog.kakeraloot_settings("Server")
+    assert settings is not None
+    assert (settings.loot_cost, settings.quantity_quality_base_cost, settings.quantity_quality_level_increment) == (
+        500,
+        2000,
+        200,
+    )
+    with connect(database_path) as connection:
+        assert _kakeraloot_settings_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "kakeraloot_settings_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("kakeraloot_settings", "discord", "infokl payload")
+        observation = connection.execute(
+            """
+            SELECT id, server_context_id, loot_cost, quantity_quality_base_cost,
+                   quantity_quality_level_increment, observed_at, import_event_id
+            FROM kakeraloot_settings_observations
+            """
+        ).fetchone()
+        assert observation["id"] > 0
+        assert observation["server_context_id"] == connection.execute(
+            "SELECT id FROM server_contexts WHERE normalized_name = ?",
+            ("server",),
+        ).fetchone()[0]
+        assert tuple(observation)[2:] == (
+            500,
+            2000,
+            200,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        )
+
+
+def test_kakeraloot_settings_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakeraloot_settings_with_connection(
+            connection,
+            settings=KAKERALOOT_SETTINGS,
+            server="Server",
+            raw="infokl payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM kakeraloot_settings_observations").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT import_event_id FROM kakeraloot_settings_observations WHERE id = ?",
+            (imported.kakeraloot_settings_observation_id,),
+        ).fetchone()[0] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM kakeraloot_settings_observations").fetchone()[0] == 0
+
+
+def test_kakeraloot_settings_helper_commit_persists_rows_and_result_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakeraloot_settings_with_connection(
+            connection,
+            settings=KAKERALOOT_SETTINGS,
+            server="Server",
+            raw="infokl payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == imported.import_event_id
+        assert connection.execute(
+            "SELECT id FROM kakeraloot_settings_observations WHERE id = ?",
+            (imported.kakeraloot_settings_observation_id,),
+        ).fetchone()[0] == imported.kakeraloot_settings_observation_id
+        row = connection.execute(
+            """
+            SELECT loot_cost, quantity_quality_base_cost, quantity_quality_level_increment,
+                   import_event_id
+            FROM kakeraloot_settings_observations
+            WHERE id = ?
+            """,
+            (imported.kakeraloot_settings_observation_id,),
+        ).fetchone()
+        assert tuple(row) == (500, 2000, 200, imported.import_event_id)
+
+
+def test_kakeraloot_settings_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_kakeraloot_settings_with_connection(
+                connection,
+                settings=KAKERALOOT_SETTINGS,
+                server="Server",
+                raw="infokl payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        assert _kakeraloot_settings_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "kakeraloot_settings_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_kakeraloot_settings_helper_reuses_server_and_rollback_preserves_it(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_kakeraloot_settings(KAKERALOOT_SETTINGS, "Server", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        before_counts = _kakeraloot_settings_counts(connection)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            catalog._import_kakeraloot_settings_with_connection(
+                connection,
+                settings=KAKERALOOT_SETTINGS,
+                server=" SERVER ",
+                raw="second payload",
+                source="discord",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _kakeraloot_settings_counts(connection) == before_counts
+
+
+def test_kakeraloot_settings_helper_does_not_write_projection_or_discord_state(tmp_path) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    with connect(database_path) as connection:
+        before_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        before_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0]
+        before_counts = _kakeraloot_settings_counts(connection)
+        catalog._import_kakeraloot_settings_with_connection(
+            connection,
+            settings=KAKERALOOT_SETTINGS,
+            server="Server",
+            raw="infokl payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        after_counts = _kakeraloot_settings_counts(connection)
+        after_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        after_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0]
+
+    assert after_counts["import_events"] == before_counts["import_events"] + 1
+    assert after_counts["server_contexts"] == before_counts["server_contexts"] + 1
+    assert after_counts["kakeraloot_settings_observations"] == before_counts["kakeraloot_settings_observations"] + 1
+    assert after_counts["discord_projection_links"] == before_counts["discord_projection_links"]
+    assert after_counts["discord_source_event_server_attributions"] == before_counts[
+        "discord_source_event_server_attributions"
+    ]
+    assert after_counts["discord_processing_attempts"] == before_counts["discord_processing_attempts"]
+    assert tuple(after_event) == tuple(before_event)
+    assert after_attempt == before_attempt
 
 
 def test_profile_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
