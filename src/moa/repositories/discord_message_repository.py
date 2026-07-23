@@ -41,6 +41,18 @@ class DiscordSourceEventServerAttributionConflictError(RuntimeError):
     """Raised when an immutable attribution decision conflicts with a new one."""
 
 
+class DiscordSourceEventAccountAttributionNotFoundError(RuntimeError):
+    """Raised when a source event is missing for an account attribution write."""
+
+
+class DiscordSourceEventAccountAttributionValidationError(ValueError):
+    """Raised when an account attribution status and identity do not agree."""
+
+
+class DiscordSourceEventAccountAttributionConflictError(RuntimeError):
+    """Raised when an immutable account attribution conflicts with a new one."""
+
+
 @dataclass(frozen=True, slots=True)
 class ReceivedMessageEvent:
     """The durable rows affected by one :meth:`receive_message` call."""
@@ -83,6 +95,18 @@ class DiscordSourceEventServerAttribution:
     source_event_id: int
     status: str
     server_name: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordSourceEventAccountAttribution:
+    """The durable account attribution decision for one Discord source event."""
+
+    source_event_id: int
+    status: str
+    server_name: str | None
+    account_name: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -518,6 +542,126 @@ class DiscordMessageRepository:
                 )
             return result
 
+    def get_account_attribution(
+        self, source_event_id: int
+    ) -> DiscordSourceEventAccountAttribution | None:
+        """Read the current durable account attribution for one source event."""
+        self._validate_processing_identity(source_event_id=source_event_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, account_name,
+                       created_at, updated_at
+                FROM discord_source_event_account_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            return self._account_attribution_result(row)
+
+    def record_account_attribution(
+        self,
+        source_event_id: int,
+        *,
+        status: Literal["resolved", "unresolved", "ambiguous"],
+        server_name: str | None,
+        account_name: str | None,
+        recorded_at: datetime,
+    ) -> DiscordSourceEventAccountAttribution:
+        """Record one durable account attribution decision with fail-closed replay."""
+        self._validate_processing_identity(source_event_id=source_event_id)
+        self._validate_account_attribution(
+            status=status, server_name=server_name, account_name=account_name
+        )
+        normalized_recorded_at = self._normalize_processing_datetime(recorded_at, "recorded_at")
+        recorded_at_value = normalized_recorded_at.isoformat()
+
+        with self._connection() as connection:
+            source_event = connection.execute(
+                "SELECT 1 FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+            if source_event is None:
+                raise DiscordSourceEventAccountAttributionNotFoundError(
+                    f"Discord source event {source_event_id} was not found"
+                )
+
+            existing = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, account_name,
+                       created_at, updated_at
+                FROM discord_source_event_account_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO discord_source_event_account_attributions (
+                        source_event_id, status, server_name, account_name,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_event_id,
+                        status,
+                        server_name,
+                        account_name,
+                        recorded_at_value,
+                        recorded_at_value,
+                    ),
+                )
+            else:
+                self._validate_account_attribution_transition(
+                    existing_status=str(existing["status"]),
+                    existing_server_name=(
+                        str(existing["server_name"])
+                        if existing["server_name"] is not None
+                        else None
+                    ),
+                    existing_account_name=(
+                        str(existing["account_name"])
+                        if existing["account_name"] is not None
+                        else None
+                    ),
+                    status=status,
+                    server_name=server_name,
+                    account_name=account_name,
+                    source_event_id=source_event_id,
+                )
+                if str(existing["status"]) != status:
+                    connection.execute(
+                        """
+                        UPDATE discord_source_event_account_attributions
+                        SET status = ?, server_name = ?, account_name = ?, updated_at = ?
+                        WHERE source_event_id = ?
+                        """,
+                        (
+                            status,
+                            server_name,
+                            account_name,
+                            recorded_at_value,
+                            source_event_id,
+                        ),
+                    )
+
+            row = connection.execute(
+                """
+                SELECT source_event_id, status, server_name, account_name,
+                       created_at, updated_at
+                FROM discord_source_event_account_attributions
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            ).fetchone()
+            result = self._account_attribution_result(row)
+            if result is None:
+                raise RuntimeError(
+                    "Inserted Discord account attribution could not be reloaded"
+                )
+            return result
+
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)
 
@@ -566,6 +710,36 @@ class DiscordMessageRepository:
             )
 
     @staticmethod
+    def _validate_account_attribution(
+        *,
+        status: str,
+        server_name: str | None,
+        account_name: str | None,
+    ) -> None:
+        if not isinstance(status, str) or status not in {
+            "resolved",
+            "unresolved",
+            "ambiguous",
+        }:
+            raise DiscordSourceEventAccountAttributionValidationError(
+                "status must be 'resolved', 'unresolved', or 'ambiguous'"
+            )
+        if status == "resolved":
+            if not isinstance(server_name, str) or not server_name.strip():
+                raise DiscordSourceEventAccountAttributionValidationError(
+                    "resolved attribution requires a nonblank server_name"
+                )
+            if not isinstance(account_name, str) or not account_name.strip():
+                raise DiscordSourceEventAccountAttributionValidationError(
+                    "resolved attribution requires a nonblank account_name"
+                )
+            return
+        if server_name is not None or account_name is not None:
+            raise DiscordSourceEventAccountAttributionValidationError(
+                f"{status} attribution requires server_name and account_name to be None"
+            )
+
+    @staticmethod
     def _validate_server_attribution_transition(
         *,
         existing_status: str,
@@ -585,6 +759,31 @@ class DiscordMessageRepository:
         )
 
     @staticmethod
+    def _validate_account_attribution_transition(
+        *,
+        existing_status: str,
+        existing_server_name: str | None,
+        existing_account_name: str | None,
+        status: str,
+        server_name: str | None,
+        account_name: str | None,
+        source_event_id: int,
+    ) -> None:
+        if (
+            existing_status == status
+            and existing_server_name == server_name
+            and existing_account_name == account_name
+        ):
+            return
+        if existing_status in {"unresolved", "ambiguous"} and status == "resolved":
+            return
+        raise DiscordSourceEventAccountAttributionConflictError(
+            "Discord source event "
+            f"{source_event_id} has immutable account attribution "
+            f"{existing_status!r} / {existing_server_name!r} / {existing_account_name!r}"
+        )
+
+    @staticmethod
     def _server_attribution_result(
         row: sqlite3.Row | None,
     ) -> DiscordSourceEventServerAttribution | None:
@@ -594,6 +793,23 @@ class DiscordMessageRepository:
             source_event_id=int(row["source_event_id"]),
             status=str(row["status"]),
             server_name=(str(row["server_name"]) if row["server_name"] is not None else None),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    @staticmethod
+    def _account_attribution_result(
+        row: sqlite3.Row | None,
+    ) -> DiscordSourceEventAccountAttribution | None:
+        if row is None:
+            return None
+        return DiscordSourceEventAccountAttribution(
+            source_event_id=int(row["source_event_id"]),
+            status=str(row["status"]),
+            server_name=(str(row["server_name"]) if row["server_name"] is not None else None),
+            account_name=(
+                str(row["account_name"]) if row["account_name"] is not None else None
+            ),
             created_at=datetime.fromisoformat(str(row["created_at"])),
             updated_at=datetime.fromisoformat(str(row["updated_at"])),
         )
