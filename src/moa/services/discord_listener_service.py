@@ -20,6 +20,7 @@ from moa.repositories.discord_message_repository import (
     DiscordMessageProcessingConflictError,
     DiscordMessageProcessingError,
     DiscordMessageRepository,
+    DiscordSourceEventAccountAttribution,
     DiscordSourceEventServerAttribution,
     ReceivedMessageEvent,
 )
@@ -54,6 +55,16 @@ class _ServerAttributionDecision:
 
     status: Literal["resolved", "unresolved", "ambiguous"]
     server_name: str | None
+    authoritative_evidence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _AccountAttributionDecision:
+    """The listener-local account decision before durable persistence."""
+
+    status: Literal["resolved", "unresolved", "ambiguous"]
+    server_name: str | None
+    account_name: str | None
     authoritative_evidence: bool = False
 
 
@@ -95,6 +106,7 @@ class DiscordListenerService:
         "husbandog",
     }
     _DURABLE_IMPORT_KINDS = {"claim", "infokl", "profile", "roll", "settings"}
+    _DURABLE_ACCOUNT_KINDS = {"claim", "profile", "roll"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -556,10 +568,56 @@ class DiscordListenerService:
                 attribution.status,
             )
             return
+        persisted_account_attribution = None
+        durable_account_identity = None
+        if (
+            received_event is not None
+            and kind in self._DURABLE_ACCOUNT_KINDS
+            and self._is_durable_import_kind(kind)
+        ):
+            try:
+                persisted_account_attribution = (
+                    self._discord_message_repository.get_account_attribution(
+                        received_event.source_event_id
+                    )
+                )
+            except Exception as error:
+                self._logger.warning(
+                    "Could not read Discord account attribution for source event %s; "
+                    "downstream processing was not started: %s",
+                    received_event.source_event_id,
+                    error,
+                )
+                return
+            account_attribution = self._resolve_and_record_account_attribution(
+                message,
+                raw_message,
+                kind,
+                attribution,
+                persisted_account_attribution,
+                received_event,
+            )
+            if account_attribution is None:
+                return
+            if account_attribution.status != "resolved":
+                self._logger.info(
+                    "Deferred %s source event %s because account attribution is %s; "
+                    "no processing attempt was started",
+                    kind,
+                    received_event.source_event_id,
+                    account_attribution.status,
+                )
+                return
+            durable_account_identity = ConfigAccount(
+                server=account_attribution.server_name or attribution.server_name or "",
+                account=account_attribution.account_name or "",
+                discord_server_id=str(message.guild.id),
+            )
         if context is None and kind != "infokl":
-            if kind == "roll":
+            if kind == "roll" and durable_account_identity is None:
                 self._warn_once_for_unattributed_roll(message)
-            return
+            if durable_account_identity is None:
+                return
         if context is not None and context.expected_kind == "personalrare" and context.personal_rare_argument_supplied:
             self._logger.info(
                 "Ignoring textual Mudae response %s for a value-setting $persr command; "
@@ -578,7 +636,7 @@ class DiscordListenerService:
                 len(raw_message.splitlines()),
             )
             return
-        import_identity = context.identity if context is not None else None
+        import_identity = durable_account_identity or (context.identity if context is not None else None)
         if import_identity is not None and attribution.status == "resolved" and attribution.server_name is not None:
             import_identity = import_identity.model_copy(update={"server": attribution.server_name})
         if kind == "claim":
@@ -587,18 +645,19 @@ class DiscordListenerService:
             # burst of rolls from multiple configured accounts, so the
             # channel's latest command context may belong to somebody else.
             claim = self._parser.parse_claim_confirmation(raw_message)
-            target_identity = self._unique_identity_for_account(
-                str(message.guild.id), claim.account_name
+            target_identity = (
+                durable_account_identity
+                or self._unique_identity_for_account(str(message.guild.id), claim.account_name)
             )
             if target_identity is None:
                 self._logger.info(
                     "Ignoring Mudae claim %s for unconfigured account %s in %s",
                     message.id,
                     claim.account_name,
-                    context.identity.server,
+                    context.identity.server if context is not None else attribution.server_name,
                 )
                 return
-            if target_identity.account.casefold() != context.identity.account.casefold():
+            if context is not None and target_identity.account.casefold() != context.identity.account.casefold():
                 self._logger.info(
                     "Attributed Mudae claim %s to %s / %s from the confirmation claimant "
                     "instead of stale context %s / %s",
@@ -628,15 +687,16 @@ class DiscordListenerService:
                 return
         if kind == "profile":
             profile = self._parser.parse_profile(raw_message)
-            target_identity = self._unique_identity_for_account(
-                str(message.guild.id), profile.profile_name
+            target_identity = (
+                durable_account_identity
+                or self._unique_identity_for_account(str(message.guild.id), profile.profile_name)
             )
             if target_identity is None:
                 self._logger.info(
                     "Ignoring Mudae profile %s for unconfigured account %s in %s",
                     message.id,
                     profile.profile_name,
-                    context.identity.server,
+                    context.identity.server if context is not None else attribution.server_name,
                 )
                 return
             import_identity = target_identity
@@ -971,6 +1031,210 @@ class DiscordListenerService:
         if len(guild_names) > 1:
             return _ServerAttributionDecision("ambiguous", None)
         return _ServerAttributionDecision("unresolved", None)
+
+    def _resolve_and_record_account_attribution(
+        self,
+        message: discord.Message,
+        raw_message: str,
+        kind: str,
+        server_attribution: _ServerAttributionDecision,
+        persisted: DiscordSourceEventAccountAttribution | None,
+        received_event: ReceivedMessageEvent,
+    ) -> _AccountAttributionDecision | None:
+        """Resolve and durably record account evidence for the durable account routes."""
+        if server_attribution.server_name is None:
+            return None
+        live = self._live_account_attribution(
+            message,
+            raw_message,
+            kind,
+            server_attribution.server_name,
+        )
+        if persisted is not None and persisted.status == "resolved":
+            if (
+                persisted.server_name is None
+                or persisted.server_name.casefold() != server_attribution.server_name.casefold()
+                or persisted.account_name is None
+            ):
+                self._logger.warning(
+                    "Discord account attribution conflict for source event %s; "
+                    "persisted account=%s / %s, server=%s",
+                    persisted.source_event_id,
+                    persisted.server_name,
+                    persisted.account_name,
+                    server_attribution.server_name,
+                )
+                return None
+            if live.authoritative_evidence and (
+                live.status != "resolved"
+                or live.server_name is None
+                or live.account_name is None
+                or live.server_name.casefold() != persisted.server_name.casefold()
+                or live.account_name.casefold() != persisted.account_name.casefold()
+            ):
+                self._logger.warning(
+                    "Discord account attribution conflict for source event %s; "
+                    "persisted=%s / %s, live=%s / %s",
+                    persisted.source_event_id,
+                    persisted.server_name,
+                    persisted.account_name,
+                    live.server_name,
+                    live.account_name or live.status,
+                )
+                return None
+            return _AccountAttributionDecision(
+                "resolved",
+                persisted.server_name,
+                persisted.account_name,
+            )
+
+        if persisted is not None and live.status != "resolved":
+            return _AccountAttributionDecision(
+                persisted.status,
+                persisted.server_name,
+                persisted.account_name,
+            )
+
+        decision = live
+        should_record = persisted is None or (
+            persisted.status in {"unresolved", "ambiguous"}
+            and decision.status == "resolved"
+        )
+        if not should_record:
+            return decision
+        try:
+            return self._discord_message_repository.record_account_attribution(
+                received_event.source_event_id,
+                status=decision.status,
+                server_name=decision.server_name,
+                account_name=decision.account_name,
+                recorded_at=datetime.now(timezone.utc),
+            )
+        except Exception as error:
+            self._logger.warning(
+                "Could not record Discord account attribution for source event %s; "
+                "downstream processing was not started: %s",
+                received_event.source_event_id,
+                error,
+            )
+            return None
+
+    def _live_account_attribution(
+        self,
+        message: discord.Message,
+        raw_message: str,
+        kind: str,
+        server_name: str,
+    ) -> _AccountAttributionDecision:
+        """Gather only route-approved strong account evidence."""
+        if kind in {"profile", "claim"}:
+            account_name = self._parsed_account_name(kind, raw_message)
+            if account_name is not None:
+                matches = self._configured_accounts_for_server(
+                    str(message.guild.id), server_name, account_name
+                )
+                if len(matches) == 1:
+                    identity = matches[0]
+                    return _AccountAttributionDecision(
+                        "resolved", identity.server, identity.account, True
+                    )
+                return _AccountAttributionDecision(
+                    "ambiguous" if len(matches) > 1 else "unresolved",
+                    None,
+                    None,
+                    True,
+                )
+        candidates: list[ConfigAccount] = []
+        ambiguous = False
+        interaction_user_id = self._interaction_user_id(message)
+        if interaction_user_id is not None:
+            matches = self._configured_accounts_for_server_user(
+                str(message.guild.id), server_name, interaction_user_id
+            )
+            if len(matches) != 1:
+                ambiguous = ambiguous or len(matches) > 1
+            candidates.extend(matches)
+
+        for context in self._compatible_account_contexts(message, raw_message, kind):
+            matches = self._configured_accounts_for_server_user(
+                str(message.guild.id), server_name, context.user_id
+            )
+            if len(matches) != 1:
+                ambiguous = ambiguous or len(matches) > 1
+            candidates.extend(matches)
+
+        distinct = {
+            (identity.server.casefold(), identity.account.casefold()): identity
+            for identity in candidates
+        }
+        if ambiguous or len(distinct) > 1:
+            return _AccountAttributionDecision("ambiguous", None, None, True)
+        if len(distinct) == 1:
+            identity = next(iter(distinct.values()))
+            return _AccountAttributionDecision(
+                "resolved", identity.server, identity.account, True
+            )
+        return _AccountAttributionDecision("unresolved", None, None)
+
+    def _configured_accounts_for_server(
+        self,
+        guild_id: str,
+        server_name: str,
+        account_name: str,
+    ) -> tuple[ConfigAccount, ...]:
+        normalized_server = server_name.casefold()
+        normalized_account = account_name.casefold()
+        return tuple(
+            identity
+            for identity in self._configured_accounts_for_guild(guild_id)
+            if identity.server.casefold() == normalized_server
+            and identity.account.casefold() == normalized_account
+        )
+
+    def _configured_accounts_for_server_user(
+        self,
+        guild_id: str,
+        server_name: str,
+        user_id: str,
+    ) -> tuple[ConfigAccount, ...]:
+        normalized_server = server_name.casefold()
+        return tuple(
+            identity
+            for identity in self._configured_accounts_for_guild(guild_id)
+            if identity.server.casefold() == normalized_server
+            and identity.discord_user_id == str(user_id)
+        )
+
+    def _compatible_account_contexts(
+        self,
+        message: discord.Message,
+        raw_message: str,
+        kind: str,
+    ) -> tuple[DiscordCommandContext, ...]:
+        """Return active command/interaction contexts compatible with this route."""
+        now = time.monotonic()
+        contexts: list[DiscordCommandContext] = []
+        for key, context in list(self._pending_contexts.items()):
+            if key[:2] != (str(message.guild.id), int(message.channel.id)):
+                continue
+            if now - context.captured_at > self._CONTEXT_TTL_SECONDS:
+                self._pending_contexts.pop(key, None)
+                continue
+            if context.evidence_source not in {"command_author", "interaction"}:
+                continue
+            if self._resolve_message_kind(context.expected_kind, raw_message) != kind:
+                continue
+            contexts.append(context)
+        return tuple(contexts)
+
+    @staticmethod
+    def _interaction_user_id(message: discord.Message) -> str | None:
+        metadata = getattr(message, "interaction_metadata", None)
+        if metadata is None and not isinstance(message, discord.Message):
+            metadata = getattr(message, "interaction", None)
+        user = getattr(metadata, "user", None)
+        user_id = getattr(user, "id", None)
+        return str(user_id) if user_id is not None else None
 
     def _configured_accounts_for_guild(self, guild_id: str) -> tuple[ConfigAccount, ...]:
         normalized_guild_id = str(guild_id)
