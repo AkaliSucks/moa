@@ -17,6 +17,7 @@ from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.discord_listener_service import DiscordListenerService
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
+from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 
 
 def test_extract_message_text_flattens_discord_embed_content() -> None:
@@ -1245,6 +1246,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            settings_projection_coordinator=SettingsProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1282,6 +1287,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             claim_projection_coordinator=ClaimProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            settings_projection_coordinator=SettingsProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1360,6 +1369,40 @@ def _durable_claim_message(
             name="wa", user=SimpleNamespace(id=interaction_user_id)
         ),
         content=f"{claimant} and Pakunoda are now married!",
+        embeds=(),
+        edited_at=None,
+    )
+
+
+def _durable_settings_message(message_id: int = 1213, *, content: str | None = None):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(
+            name="settings", user=SimpleNamespace(id=456)
+        ),
+        # Sanitized real Mudae `$settings` response.
+        content=content
+        or "\n".join(
+            (
+                "Server Settings",
+                "(Server not premium)",
+                "- Prefix: $ ($prefix)",
+                "- Lang: en ($lang)",
+                "- Claim reset: every 180 min. ($setclaim)",
+                "- Exact minute of the reset: xx:14 ($setinterval)",
+                "- Reset shifted: by +0 min. ($shifthour)",
+                "- Rolls per hour: 10 ($setrolls)",
+                "- Time before the claim reaction expires: 45 sec. ($settimer)",
+                "- Spawn rarity multiplier for already claimed characters: 4 ($setrare)",
+                "- % kakera bonus: +0 ($setkakerabonus)",
+                "- % sphere bonus: +0 ($setspherebonus)",
+                "- Game mode: 1 ($gamemode)",
+                "- This channel instance: 1 ($channelinstance)",
+            )
+        ),
         embeds=(),
         edited_at=None,
     )
@@ -1558,6 +1601,233 @@ def test_listener_profile_cleanup_failure_preserves_durable_success(tmp_path, ca
     assert "Best-effort cleanup failed after durable profile success" in caplog.text
 
 
+def test_listener_first_durable_settings_coordinates_and_owns_success(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
+
+    asyncio.run(listener.handle_bot_response(_durable_settings_message()))
+
+    durable_context = importer.import_message.call_args.kwargs["durable_settings_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id == 1
+    assert durable_context.finished_at.tzinfo is not None
+    assert durable_context.finished_at.utcoffset() is not None
+    repository.mark_processing_success.assert_not_called()
+    assert len(_import_event_rows(database_path, "server_settings")) == 1
+    assert len(_receipt_rows(database_path, "server_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+    assert _receipt_rows(database_path, "discord_processing_attempts")[0]["status"] == "succeeded"
+
+
+def test_listener_succeeded_settings_restart_replays_without_new_projection(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_settings_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    actual_importer = restarted_listener._importer
+    results = []
+
+    def import_replay(*args, **kwargs):
+        result = actual_importer.import_message(*args, **kwargs)
+        results.append(result)
+        return result
+
+    importer = Mock()
+    importer.import_message.side_effect = import_replay
+    restarted_listener._importer = importer
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    durable_context = importer.import_message.call_args.kwargs["durable_settings_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id is None
+    assert results[0].imported_count == 0
+    assert results[0].replay_skipped is True
+    assert results[0].durable_success_recorded is True
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_import_event_rows(database_path, "server_settings")) == 1
+    assert len(_receipt_rows(database_path, "server_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_retryable_settings_coordinator_failure_retries_transactionally(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._settings_projection_coordinator
+    coordinator.coordinate_settings = Mock(side_effect=RuntimeError("settings coordinator failed"))
+    message = _durable_settings_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    first_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert first_attempt["status"] == "failed"
+    assert first_attempt["retryable"] == 1
+    assert _import_event_rows(database_path, "server_settings") == []
+    assert _receipt_rows(database_path, "server_settings_observations") == []
+    assert _receipt_rows(database_path, "server_contexts") == []
+    assert _receipt_rows(database_path, "discord_projection_links") == []
+
+    retry_listener, _retry_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(retry_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["attempt_number"], row["status"]) for row in attempts] == [
+        (1, "failed"),
+        (2, "succeeded"),
+    ]
+    assert len(_import_event_rows(database_path, "server_settings")) == 1
+    assert len(_receipt_rows(database_path, "server_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_active_settings_does_not_start_attempt_or_import(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_settings_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_listener_nonretryable_settings_terminal_state_fails_closed(
+    tmp_path, terminal_status
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_settings_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status=terminal_status,
+        retryable=False,
+        failure_code="terminal_test_failure",
+        failure_detail="terminal settings test failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == terminal_status
+    assert _import_event_rows(database_path, "server_settings") == []
+    assert _receipt_rows(database_path, "server_settings_observations") == []
+    assert _receipt_rows(database_path, "discord_projection_links") == []
+
+
+def test_listener_settings_cleanup_error_after_durable_success_does_not_complete_failure(
+    tmp_path, caplog
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.mark_processing_failure = Mock(wraps=repository.mark_processing_failure)
+    listener._consume_context = Mock(side_effect=RuntimeError("cleanup unavailable"))
+    caplog.set_level(logging.ERROR, logger="moa.discord")
+
+    asyncio.run(listener.handle_bot_response(_durable_settings_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    repository.mark_processing_failure.assert_not_called()
+    assert "Best-effort cleanup failed after durable settings success" in caplog.text
+
+
+def test_listener_same_process_settings_duplicate_is_suppressed_before_attempt_work(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_settings_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+    assert len(_import_event_rows(database_path, "server_settings")) == 1
+    assert len(_receipt_rows(database_path, "server_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_settings_without_resolved_attribution_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "settings-unresolved.json",
+        (),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_settings_message()))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (attempt["status"], attempt["retryable"], attempt["failure_code"]) == (
+        "unresolved_attribution",
+        1,
+        "unresolved_server_attribution",
+    )
+
+
+def test_listener_conflicting_persisted_settings_attribution_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_settings_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    importer = Mock()
+    restarted_listener, _restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "settings-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Other Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="settings", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_import_event_rows(database_path, "server_settings")) == 1
+
+
 def test_listener_non_durable_profile_keeps_direct_path_without_context(tmp_path) -> None:
     config = ConfigService(tmp_path / "config.json")
     config.add_account(
@@ -1581,6 +1851,30 @@ def test_listener_non_durable_profile_keeps_direct_path_without_context(tmp_path
     assert "durable_profile_context" not in kwargs
     assert "durable_roll_context" not in kwargs
     assert len(_receipt_rows(tmp_path / "catalog.db", "profile_observations")) == 1
+
+
+def test_listener_non_durable_settings_keeps_direct_path_without_context(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_settings_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_settings_context" not in kwargs
+    assert len(_receipt_rows(tmp_path / "catalog.db", "server_settings_observations")) == 1
 
 
 def test_listener_same_process_profile_duplicate_is_suppressed_before_import(tmp_path) -> None:
