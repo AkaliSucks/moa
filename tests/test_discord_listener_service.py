@@ -10,7 +10,7 @@ import pytest
 from moa.database.sqlite import connect
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
-from moa.core.config import ConfigService
+from moa.core.config import ConfigAccount, ConfigService, MOAConfig
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
@@ -1451,6 +1451,315 @@ def _server_attribution_rows(database_path):
             "discord_source_event_server_attributions ORDER BY source_event_id"
         ).fetchall()
     return [tuple(row) for row in rows]
+
+
+def _account_attribution_rows(database_path):
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT source_event_id, status, server_name, account_name, created_at, updated_at "
+            "FROM discord_source_event_account_attributions ORDER BY source_event_id"
+        ).fetchall()
+    return [tuple(row) for row in rows]
+
+
+def test_listener_records_unique_roll_account_before_seen_payloads(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    seen_sizes = []
+    original_record = repository.record_account_attribution
+
+    def record_attribution(*args, **kwargs):
+        seen_sizes.append(len(listener._seen_payloads))
+        return original_record(*args, **kwargs)
+
+    repository.record_account_attribution = record_attribution
+
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    assert seen_sizes == [0]
+    row = _account_attribution_rows(database_path)[0]
+    assert row[1:4] == ("resolved", "Test Server", "user_a")
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+
+
+def test_listener_records_unresolved_roll_account_without_attempt_or_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "unresolved-account.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert listener._seen_payloads == set()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_records_ambiguous_roll_account_without_active_account_selection(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "ambiguous-account.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    command = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$wa",
+    )
+    asyncio.run(listener.handle_message(command))
+    asyncio.run(listener.handle_bot_response(_durable_roll_message()))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert listener._seen_payloads == set()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_unresolved_roll_account_later_resolves_and_imports(tmp_path) -> None:
+    first_importer = Mock()
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "account-first.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=first_importer,
+    )
+    message = _durable_roll_message()
+    message.interaction_metadata = None
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    second_listener, _second_repository, _ = _attribution_listener(
+        tmp_path,
+        "account-second.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    message.interaction_metadata = SimpleNamespace(name="wa", user=SimpleNamespace(id=456))
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+
+
+def test_listener_ambiguous_roll_account_later_resolves(tmp_path) -> None:
+    first_importer = Mock()
+    first_listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "ambiguous-account-first.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=first_importer,
+    )
+    command = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$wa",
+    )
+    asyncio.run(first_listener.handle_message(command))
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    second_listener, _second_repository, _ = _attribution_listener(
+        tmp_path,
+        "ambiguous-account-second.json",
+        (("Test Server", "user_a", "primary", "456"),),
+    )
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert len(_receipt_rows(database_path, "roll_observations")) == 1
+
+
+def test_listener_persisted_resolved_account_conflict_fails_closed(tmp_path) -> None:
+    first_listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    original_row = _account_attribution_rows(database_path)[0]
+
+    importer = Mock()
+    restarted_listener, restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "account-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(name="wa", user=SimpleNamespace(id=789))
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0] == original_row
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert restarted_repository.get_account_attribution(1).account_name == "user_a"
+
+
+def test_listener_profile_payload_identity_overrides_stale_pending_context(tmp_path) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "profile-payload.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+    stale_command = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$profile",
+    )
+    asyncio.run(listener.handle_message(stale_command))
+    asyncio.run(listener.handle_bot_response(_durable_profile_message()))
+
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert len(_receipt_rows(database_path, "profile_observations")) == 1
+
+
+def test_listener_claim_payload_identity_overrides_stale_pending_context(tmp_path) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "claim-payload.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+    stale_command = SimpleNamespace(
+        id=1200,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=False, id=789),
+        content="$wa",
+    )
+    asyncio.run(listener.handle_message(stale_command))
+    asyncio.run(listener.handle_bot_response(_durable_claim_message()))
+
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert len(_receipt_rows(database_path, "claim_observations")) == 1
+
+
+def test_listener_unknown_profile_payload_records_unresolved_account(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "unknown-profile.json",
+        (("Test Server", "user_a", "primary", "456"),),
+        importer=importer,
+    )
+    message = _durable_profile_message(content="unknown\nCollection size: 0 (0%:female: 0% :male:)")
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_duplicate_profile_account_mapping_records_ambiguous(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    profile = config.profile()
+    duplicate = ConfigAccount(
+        server="Test Server",
+        account="user_a",
+        role="alt",
+        discord_server_id="123",
+        discord_user_id="789",
+    )
+    config.save(
+        MOAConfig(
+            profiles=(profile.model_copy(update={"accounts": (*profile.accounts, duplicate)}),)
+        )
+    )
+    catalog_repository = CatalogRepository(database_path)
+    catalog = CatalogService(catalog_repository)
+    repository = DiscordMessageRepository(database_path)
+    importer = Mock()
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=repository,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_profile_message()))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_account_attribution_replay_keeps_timestamps_and_settings_has_no_row(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    asyncio.run(listener.handle_bot_response(message))
+    first_row = _account_attribution_rows(database_path)[0]
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    assert _account_attribution_rows(database_path)[0] == first_row
+
+    settings = _durable_settings_message()
+    asyncio.run(restarted_listener.handle_bot_response(settings))
+    assert _account_attribution_rows(database_path) == [first_row]
 
 
 def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
@@ -3048,7 +3357,7 @@ def test_listener_recovers_context_from_legacy_mudae_interaction_response(tmp_pa
     assert context.expected_kind == "roll"
 
 
-def test_listener_uses_active_account_for_untagged_slash_roll(tmp_path) -> None:
+def test_listener_does_not_use_active_account_for_durable_roll_attribution(tmp_path) -> None:
     config = ConfigService(tmp_path / "config.json")
     config.add_account(
         "Lake Arrowhead 2025",
@@ -3081,8 +3390,13 @@ def test_listener_uses_active_account_for_untagged_slash_roll(tmp_path) -> None:
     asyncio.run(listener.handle_bot_response(response))
 
     rolls = catalog.recent_rolls("Lake Arrowhead 2025", "ernieuuu", 1)
-    assert len(rolls) == 1
-    assert rolls[0].character.name == "Berry (YD)"
+    assert rolls == ()
+    with connect(tmp_path / "catalog.db") as connection:
+        attribution = connection.execute(
+            "SELECT status, server_name, account_name "
+            "FROM discord_source_event_account_attributions"
+        ).fetchone()
+    assert tuple(attribution) == ("unresolved", None, None)
 
 
 def test_listener_does_not_guess_between_multiple_active_server_accounts(tmp_path) -> None:
