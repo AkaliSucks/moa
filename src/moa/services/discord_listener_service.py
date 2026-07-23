@@ -28,6 +28,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
+    DurableSettingsImportContext,
 )
 from moa.services.catalog_service import CatalogService
 
@@ -92,7 +93,7 @@ class DiscordListenerService:
         "hg",
         "husbandog",
     }
-    _DURABLE_IMPORT_KINDS = {"claim", "profile", "roll"}
+    _DURABLE_IMPORT_KINDS = {"claim", "profile", "roll", "settings"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -754,8 +755,12 @@ class DiscordListenerService:
                     import_kwargs["durable_profile_context"] = DurableProfileImportContext(
                         **context_kwargs
                     )
-                else:
+                elif kind == "claim":
                     import_kwargs["durable_claim_context"] = DurableClaimImportContext(
+                        **context_kwargs
+                    )
+                else:
+                    import_kwargs["durable_settings_context"] = DurableSettingsImportContext(
                         **context_kwargs
                     )
             result = self._importer.import_message(
