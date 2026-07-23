@@ -1448,3 +1448,101 @@ def test_source_event_deletion_cascades_account_attribution(tmp_path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM discord_source_event_account_attributions"
         ).fetchone()[0] == 0
+
+
+def test_caller_owned_attribution_read_seams_use_current_transaction_without_writes(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    timestamp = datetime(2026, 7, 18, 5, 0, tzinfo=timezone.utc).isoformat()
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_server_attributions (
+                source_event_id, status, server_name, created_at, updated_at
+            ) VALUES (?, 'resolved', 'Server A', ?, ?)
+            """,
+            (received.source_event_id, timestamp, timestamp),
+        )
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_account_attributions (
+                source_event_id, status, server_name, account_name, created_at, updated_at
+            ) VALUES (?, 'resolved', 'Server A', 'Account A', ?, ?)
+            """,
+            (received.source_event_id, timestamp, timestamp),
+        )
+        before = (
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM discord_source_event_server_attributions"
+                )
+            ),
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM discord_source_event_account_attributions"
+                )
+            ),
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT status, legacy_import_event_id FROM discord_source_events"
+                )
+            ),
+            connection.execute(
+                "SELECT COUNT(*) FROM discord_processing_attempts"
+            ).fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0],
+        )
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        assert (
+            repository._get_server_attribution_with_connection(
+                connection, received.source_event_id
+            ).server_name
+            == "Server A"
+        )
+        assert (
+            repository._get_account_attribution_with_connection(
+                connection, received.source_event_id
+            ).account_name
+            == "Account A"
+        )
+        assert not any(
+            statement.strip().upper().startswith(("COMMIT", "ROLLBACK"))
+            for statement in statements
+        )
+        after = (
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM discord_source_event_server_attributions"
+                )
+            ),
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT * FROM discord_source_event_account_attributions"
+                )
+            ),
+            tuple(
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT status, legacy_import_event_id FROM discord_source_events"
+                )
+            ),
+            connection.execute(
+                "SELECT COUNT(*) FROM discord_processing_attempts"
+            ).fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0],
+            connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0],
+        )
+        assert after == before
+        connection.rollback()

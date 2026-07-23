@@ -123,6 +123,19 @@ def _durable_roll_importer(tmp_path):
         source_observed_at=OBSERVED_AT,
         received_at=OBSERVED_AT,
     )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    discord_repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        account_name="ernieuuu",
+        recorded_at=OBSERVED_AT,
+    )
     attempt = discord_repository.begin_processing_attempt(
         source_event_id=received.source_event_id,
         parser_version="parser-1",

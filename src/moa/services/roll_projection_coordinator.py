@@ -103,6 +103,12 @@ class RollProjectionCoordinator:
                     raise DiscordMessageProcessingConflictError(
                         f"Discord source event {source_event_id} has already succeeded"
                     )
+                self._validate_attribution(
+                    connection,
+                    source_event_id=source_event_id,
+                    server=server,
+                    account=account,
+                )
                 return self._coordinate_replay(connection, event, expected)
 
             if attempt_id is None:
@@ -110,6 +116,12 @@ class RollProjectionCoordinator:
                     f"Discord source event {source_event_id} has no active processing attempt"
                 )
             self._validate_active_attempt(connection, event, source_event_id, attempt_id)
+            self._validate_attribution(
+                connection,
+                source_event_id=source_event_id,
+                server=server,
+                account=account,
+            )
             links = self._load_links(connection, source_event_id)
             self._validate_existing_links(
                 connection,
@@ -208,6 +220,56 @@ class RollProjectionCoordinator:
             durable_success_recorded=True,
             projection_targets=targets,
         )
+
+    def _validate_attribution(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_event_id: int,
+        server: str,
+        account: str,
+    ) -> None:
+        server_attribution = self._discord._get_server_attribution_with_connection(
+            connection, source_event_id
+        )
+        if server_attribution is None:
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted server attribution"
+            )
+        if server_attribution.status != "resolved":
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved server attribution"
+            )
+        if server_attribution.server_name is None or self._normalize(
+            server_attribution.server_name
+        ) != self._normalize(server):
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another server"
+            )
+
+        account_attribution = self._discord._get_account_attribution_with_connection(
+            connection, source_event_id
+        )
+        if account_attribution is None:
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted account attribution"
+            )
+        if account_attribution.status != "resolved":
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved account attribution"
+            )
+        if account_attribution.server_name is None or self._normalize(
+            account_attribution.server_name
+        ) != self._normalize(server_attribution.server_name):
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} has mismatched account attribution server"
+            )
+        if account_attribution.account_name is None or self._normalize(
+            account_attribution.account_name
+        ) != self._normalize(account):
+            raise RollProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another account"
+            )
 
     @staticmethod
     def _load_source_event(connection: sqlite3.Connection, source_event_id: int) -> sqlite3.Row:

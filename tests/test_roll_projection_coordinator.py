@@ -66,7 +66,81 @@ def _receive_and_begin(discord, *, suffix="one"):
         router_version="router-1",
         started_at=OBSERVED_AT,
     )
+    discord.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        recorded_at=OBSERVED_AT,
+    )
+    discord.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        account_name="Account",
+        recorded_at=OBSERVED_AT,
+    )
     return received.source_event_id, attempt.attempt_id
+
+
+def _set_attribution_failure(database_path, failure: str) -> None:
+    statements = {
+        "missing_server": (
+            "DELETE FROM discord_source_event_server_attributions",
+            (),
+        ),
+        "unresolved_server": (
+            "UPDATE discord_source_event_server_attributions SET status = 'unresolved', server_name = NULL",
+            (),
+        ),
+        "ambiguous_server": (
+            "UPDATE discord_source_event_server_attributions SET status = 'ambiguous', server_name = NULL",
+            (),
+        ),
+        "server_mismatch": (
+            "UPDATE discord_source_event_server_attributions SET server_name = 'Server B'",
+            (),
+        ),
+        "missing_account": (
+            "DELETE FROM discord_source_event_account_attributions",
+            (),
+        ),
+        "unresolved_account": (
+            "UPDATE discord_source_event_account_attributions SET status = 'unresolved', server_name = NULL, account_name = NULL",
+            (),
+        ),
+        "ambiguous_account": (
+            "UPDATE discord_source_event_account_attributions SET status = 'ambiguous', server_name = NULL, account_name = NULL",
+            (),
+        ),
+        "account_server_mismatch": (
+            "UPDATE discord_source_event_account_attributions SET server_name = 'Server B'",
+            (),
+        ),
+        "account_mismatch": (
+            "UPDATE discord_source_event_account_attributions SET account_name = 'Account B'",
+            (),
+        ),
+    }
+    statement, parameters = statements[failure]
+    with connect(database_path) as connection:
+        connection.execute(statement, parameters)
+
+
+def _attribution_rows(connection: sqlite3.Connection):
+    return (
+        tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM discord_source_event_server_attributions ORDER BY source_event_id"
+            )
+        ),
+        tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM discord_source_event_account_attributions ORDER BY source_event_id"
+            )
+        ),
+    )
 
 
 def _counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -177,6 +251,108 @@ def test_roll_without_optional_projections_only_creates_roll_projection(tmp_path
         assert counts["rank_snapshots"] == 0
         assert counts["server_character_observations"] == 0
         assert counts["discord_projection_links"] == 1
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ],
+)
+def test_first_processing_attribution_failure_is_before_all_projection_writes(
+    tmp_path, failure: str, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _set_attribution_failure(database_path, failure)
+
+    with connect(database_path) as connection:
+        before_counts = _counts(connection)
+        before_event, before_attempt = _event_and_attempt(connection)
+        before_attributions = _attribution_rows(connection)
+
+    with pytest.raises(RollProjectionIntegrityError, match=message):
+        coordinator.coordinate_roll(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            roll=ROLL_ALL,
+            server="Server",
+            account="Account",
+            raw="roll payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        )
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+        assert _event_and_attempt(connection) == (before_event, before_attempt)
+        assert _attribution_rows(connection) == before_attributions
+
+
+@pytest.mark.parametrize(
+    "failure, message",
+    [
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ],
+)
+def test_succeeded_replay_validates_attribution_before_trusting_links(
+    tmp_path, failure: str, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = coordinator.coordinate_roll(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        roll=ROLL_ALL,
+        server="Server",
+        account="Account",
+        raw="roll payload",
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    _set_attribution_failure(database_path, failure)
+
+    with connect(database_path) as connection:
+        before_counts = _counts(connection)
+        before_event, before_attempt = _event_and_attempt(connection)
+        before_attributions = _attribution_rows(connection)
+
+    with pytest.raises(RollProjectionIntegrityError, match=message):
+        coordinator.coordinate_roll(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            roll=ROLL_ALL,
+            server="Server",
+            account="Account",
+            raw="replayed roll payload",
+            source="discord",
+            observed_at=FINISHED_AT,
+            finished_at=FINISHED_AT,
+        )
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+        assert _event_and_attempt(connection) == (before_event, before_attempt)
+        assert _attribution_rows(connection) == before_attributions
+    assert first.replay_skipped is False
 
 
 def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_path, monkeypatch) -> None:
