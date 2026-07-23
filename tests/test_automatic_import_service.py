@@ -6,6 +6,7 @@ import pytest
 
 from moa.models.character import (
     ClaimConfirmation,
+    KakeralootSettingsSnapshot,
     ProfileSnapshot,
     RollObservation,
     ServerSettingMetric,
@@ -19,6 +20,7 @@ from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import (
     AutomaticImportService,
     DurableClaimImportContext,
+    DurableInfoklImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -27,6 +29,10 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import (
     ClaimProjectionCoordinator,
     ClaimProjectionResult,
+)
+from moa.services.infokl_projection_coordinator import (
+    InfoklProjectionCoordinator,
+    InfoklProjectionResult,
 )
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
@@ -67,6 +73,13 @@ SETTINGS = ServerSettingsSnapshot(
         ServerSettingMetric(label="Prefix", value="$"),
         ServerSettingMetric(label="Lang", value="English"),
     ),
+)
+
+INFOKL_MESSAGE = "infokl payload"
+INFOKL_SETTINGS = KakeralootSettingsSnapshot(
+    loot_cost=500,
+    quantity_quality_base_cost=1000,
+    quantity_quality_level_increment=250,
 )
 
 PROFILE = ProfileSnapshot(
@@ -230,6 +243,49 @@ def _durable_settings_importer(tmp_path):
         CatalogService(catalog_repository),
         parser=parser,
         settings_projection_coordinator=coordinator,
+    )
+    return service, parser, received.source_event_id, attempt.attempt_id
+
+
+def _durable_infokl_importer(tmp_path):
+    database_path = tmp_path / "durable-infokl.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = InfoklProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "infokl-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "infokl-payload-hash", "revision-1"
+        ),
+        event_key="infokl-event",
+        event_kind="message_create",
+        raw_text=INFOKL_MESSAGE,
+        payload_json='{"content":"infokl payload"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    parser = Mock()
+    parser.parse_kakeraloot_settings.return_value = INFOKL_SETTINGS
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        parser=parser,
+        infokl_projection_coordinator=coordinator,
     )
     return service, parser, received.source_event_id, attempt.attempt_id
 
@@ -732,6 +788,241 @@ def test_automatic_import_settings_context_does_not_affect_non_settings_routes()
     catalog.import_claim.assert_called_once()
     settings_coordinator.coordinate_settings.assert_not_called()
     assert result.kind == "help"
+
+
+def test_automatic_import_durable_infokl_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_settings.return_value = INFOKL_SETTINGS
+    coordinator = Mock()
+    coordinator.coordinate_infokl.return_value = InfoklProjectionResult(
+        imported_count=1,
+        import_event_id=72,
+        kakeraloot_settings_observation_id=73,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("kakeraloot_settings_observations", 73),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        infokl_projection_coordinator=coordinator,
+    )
+    context = DurableInfoklImportContext(
+        source_event_id=51,
+        attempt_id=53,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        INFOKL_MESSAGE,
+        "discord:message",
+        " Lake ",
+        detected_kind="infokl",
+        observed_at=OBSERVED_AT,
+        durable_infokl_context=context,
+    )
+
+    parser.parse_kakeraloot_settings.assert_called_once_with(INFOKL_MESSAGE)
+    coordinator.coordinate_infokl.assert_called_once_with(
+        source_event_id=51,
+        attempt_id=53,
+        settings=INFOKL_SETTINGS,
+        server="Lake",
+        raw=INFOKL_MESSAGE,
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_kakeraloot_settings.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id == 72
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_infokl_maps_completed_replay(tmp_path) -> None:
+    service, parser, source_event_id, attempt_id = _durable_infokl_importer(tmp_path)
+    first = service.import_message(
+        INFOKL_MESSAGE,
+        "discord",
+        "Lake",
+        detected_kind="infokl",
+        observed_at=OBSERVED_AT,
+        durable_infokl_context=DurableInfoklImportContext(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    replay = service.import_message(
+        INFOKL_MESSAGE,
+        "discord",
+        "Lake",
+        detected_kind="infokl",
+        observed_at=OBSERVED_AT,
+        durable_infokl_context=DurableInfoklImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert parser.parse_kakeraloot_settings.call_count == 2
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert first.replay_skipped is False
+    assert first.durable_success_recorded is True
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+
+
+def test_automatic_import_durable_infokl_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_settings.return_value = INFOKL_SETTINGS
+    coordinator = Mock()
+    coordinator.coordinate_infokl.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        infokl_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            INFOKL_MESSAGE,
+            "discord",
+            "Lake",
+            detected_kind="infokl",
+            durable_infokl_context=DurableInfoklImportContext(
+                source_event_id=51,
+                attempt_id=53,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_kakeraloot_settings.assert_called_once_with(INFOKL_MESSAGE)
+    catalog.import_kakeraloot_settings.assert_not_called()
+
+
+def test_automatic_import_durable_infokl_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_settings.return_value = INFOKL_SETTINGS
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="InfoklProjectionCoordinator"):
+        service.import_message(
+            INFOKL_MESSAGE,
+            "discord",
+            "Lake",
+            detected_kind="infokl",
+            durable_infokl_context=DurableInfoklImportContext(
+                source_event_id=51,
+                attempt_id=53,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_kakeraloot_settings.assert_called_once_with(INFOKL_MESSAGE)
+    catalog.import_kakeraloot_settings.assert_not_called()
+
+
+def test_automatic_import_non_durable_infokl_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_settings.return_value = INFOKL_SETTINGS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        infokl_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        INFOKL_MESSAGE,
+        "clipboard",
+        "Lake",
+        detected_kind="infokl",
+    )
+
+    parser.parse_kakeraloot_settings.assert_called_once_with(INFOKL_MESSAGE)
+    catalog.import_kakeraloot_settings.assert_called_once_with(
+        INFOKL_SETTINGS,
+        "Lake",
+        INFOKL_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_infokl.assert_not_called()
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_infokl_context_does_not_affect_other_routes() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_roll.return_value = RollObservation(
+        name="Hips", series="Series", claim_rank=None, kakera_value=30
+    )
+    parser.parse_server_settings.return_value = SETTINGS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        infokl_projection_coordinator=coordinator,
+    )
+    context = DurableInfoklImportContext(
+        source_event_id=51,
+        attempt_id=53,
+        finished_at=FINISHED_AT,
+    )
+
+    roll_result = service.import_message(
+        ROLL_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="roll",
+        durable_infokl_context=context,
+    )
+    settings_result = service.import_message(
+        SETTINGS_MESSAGE,
+        "clipboard",
+        "Lake",
+        detected_kind="settings",
+        durable_infokl_context=context,
+    )
+
+    catalog.import_roll.assert_called_once()
+    catalog.import_server_settings.assert_called_once()
+    coordinator.coordinate_infokl.assert_not_called()
+    assert roll_result.imported_count == 1
+    assert settings_result.imported_count == len(SETTINGS.metrics)
+
+
+def test_automatic_import_non_infokl_routes_never_call_infokl_coordinator(tmp_path) -> None:
+    coordinator = Mock()
+    service = AutomaticImportService(
+        CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        infokl_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "Looking for a specific command? Try $search", "clipboard"
+    )
+
+    assert result.kind == "help"
+    coordinator.coordinate_infokl.assert_not_called()
 
 
 def test_automatic_import_durable_claim_delegates_once_with_parsed_claim_and_context() -> None:

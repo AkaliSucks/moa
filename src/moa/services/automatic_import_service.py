@@ -8,6 +8,7 @@ from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.mudae import MudaeTextParser
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
+from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -49,6 +50,15 @@ class DurableSettingsImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableInfoklImportContext:
+    """Durable lifecycle identifiers and completion time for one Infokl import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -61,6 +71,7 @@ class AutomaticImportService:
         profile_projection_coordinator: ProfileProjectionCoordinator | None = None,
         claim_projection_coordinator: ClaimProjectionCoordinator | None = None,
         settings_projection_coordinator: SettingsProjectionCoordinator | None = None,
+        infokl_projection_coordinator: InfoklProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -69,6 +80,7 @@ class AutomaticImportService:
         self._profile_projection_coordinator = profile_projection_coordinator
         self._claim_projection_coordinator = claim_projection_coordinator
         self._settings_projection_coordinator = settings_projection_coordinator
+        self._infokl_projection_coordinator = infokl_projection_coordinator
 
     def import_message(
         self,
@@ -84,6 +96,7 @@ class AutomaticImportService:
         durable_profile_context: DurableProfileImportContext | None = None,
         durable_claim_context: DurableClaimImportContext | None = None,
         durable_settings_context: DurableSettingsImportContext | None = None,
+        durable_infokl_context: DurableInfoklImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -373,10 +386,41 @@ class AutomaticImportService:
                 durable_success_recorded=durable_success_recorded,
             )
         if kind == "infokl":
-            self._catalog.import_kakeraloot_settings(
-                self._parser.parse_kakeraloot_settings(raw_message), server, raw_message, source
+            settings = self._parser.parse_kakeraloot_settings(raw_message)
+            if durable_infokl_context is None:
+                self._catalog.import_kakeraloot_settings(settings, server, raw_message, source)
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._infokl_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "An InfoklProjectionCoordinator is required for a durable infokl import."
+                    )
+                coordinated = coordinator.coordinate_infokl(
+                    source_event_id=durable_infokl_context.source_event_id,
+                    attempt_id=durable_infokl_context.attempt_id,
+                    settings=settings,
+                    server=server,
+                    raw=raw_message,
+                    source=source,
+                    observed_at=observed_at or durable_infokl_context.finished_at,
+                    finished_at=durable_infokl_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported Kakeraloot configuration.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakeraloot configuration.")
         if kind == "profile":
             account = self._require(account_name, "account", kind)
             profile = self._parser.parse_profile(raw_message)
