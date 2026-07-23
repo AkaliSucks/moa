@@ -453,6 +453,14 @@ class _ServerSettingsImportConnectionResult:
     server_settings_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _KakeralootSettingsImportConnectionResult:
+    """Rows created by one Kakeraloot settings import on a caller-owned connection."""
+
+    import_event_id: int
+    kakeraloot_settings_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2833,12 +2841,38 @@ class CatalogRepository:
         """Store the latest server-scoped Kakeraloot price configuration."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("kakeraloot_settings", source, observed_at.isoformat(), raw_message),
+            imported = self._import_kakeraloot_settings_with_connection(
+                connection,
+                settings=settings,
+                server=server_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
+        return KakeralootSettingsImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_kakeraloot_settings_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        settings: KakeralootSettingsSnapshot,
+        server: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _KakeralootSettingsImportConnectionResult:
+        """Store one Kakeraloot settings snapshot without owning the transaction."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("kakeraloot_settings", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        kakeraloot_settings_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO kakeraloot_settings_observations (
@@ -2854,11 +2888,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return KakeralootSettingsImportResult(
+            ).lastrowid
+        )
+        return _KakeralootSettingsImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            observed_at=observed_at,
+            kakeraloot_settings_observation_id=kakeraloot_settings_observation_id,
         )
 
     def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
