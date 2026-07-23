@@ -15,6 +15,7 @@ from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.discord_listener_service import DiscordListenerService
+from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -1250,6 +1251,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            infokl_projection_coordinator=InfoklProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1291,6 +1296,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             settings_projection_coordinator=SettingsProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            infokl_projection_coordinator=InfoklProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1402,6 +1411,28 @@ def _durable_settings_message(message_id: int = 1213, *, content: str | None = N
                 "- Game mode: 1 ($gamemode)",
                 "- This channel instance: 1 ($channelinstance)",
             )
+        ),
+        embeds=(),
+        edited_at=None,
+    )
+
+
+def _durable_infokl_message(message_id: int = 1214, *, interaction=True):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="infokl", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$infokl` response.
+        content=(
+            "Each $kl costs 500:kakera:\n"
+            "Reaching the level 1 of quantity or quality costs 2,000:kakera: "
+            "(increased by 200/level)"
         ),
         embeds=(),
         edited_at=None,
@@ -1610,6 +1641,7 @@ def test_listener_first_durable_settings_coordinates_and_owns_success(tmp_path) 
     asyncio.run(listener.handle_bot_response(_durable_settings_message()))
 
     durable_context = importer.import_message.call_args.kwargs["durable_settings_context"]
+    assert "durable_infokl_context" not in importer.import_message.call_args.kwargs
     assert durable_context.source_event_id == 1
     assert durable_context.attempt_id == 1
     assert durable_context.finished_at.tzinfo is not None
@@ -1778,6 +1810,307 @@ def test_listener_same_process_settings_duplicate_is_suppressed_before_attempt_w
     assert len(_receipt_rows(database_path, "server_settings_observations")) == 1
     assert len(_receipt_rows(database_path, "server_contexts")) == 1
     assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_first_durable_infokl_coordinates_server_scoped_success(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message()))
+
+    durable_context = importer.import_message.call_args.kwargs["durable_infokl_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id == 1
+    assert durable_context.finished_at.tzinfo is not None
+    assert durable_context.finished_at.utcoffset() is not None
+    assert importer.import_message.call_args.args[3] is None
+    repository.mark_processing_success.assert_not_called()
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+    assert len(_receipt_rows(database_path, "kakeraloot_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (event["status"], event["legacy_import_event_id"]) == ("succeeded", 1)
+    assert (attempt["attempt_number"], attempt["status"]) == (1, "succeeded")
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+
+def test_listener_succeeded_infokl_restart_replays_without_live_context_or_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(first_listener.handle_bot_response(_durable_infokl_message()))
+
+    replay_listener, replay_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=replay_listener._importer)
+    replay_listener._importer = importer
+    replay_repository.mark_processing_success = Mock(wraps=replay_repository.mark_processing_success)
+    replay_repository.mark_processing_failure = Mock(wraps=replay_repository.mark_processing_failure)
+    replay_message = _durable_infokl_message(interaction=False)
+
+    asyncio.run(replay_listener.handle_bot_response(replay_message))
+
+    durable_context = importer.import_message.call_args.kwargs["durable_infokl_context"]
+    assert durable_context.source_event_id == 1
+    assert durable_context.attempt_id is None
+    assert durable_context.finished_at.tzinfo is not None
+    assert replay_listener._contexts == {}
+    assert replay_listener._pending_contexts == {}
+    replay_repository.mark_processing_success.assert_not_called()
+    replay_repository.mark_processing_failure.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+    assert len(_receipt_rows(database_path, "kakeraloot_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+
+def test_listener_retryable_infokl_coordinator_failure_retries_transactionally(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._infokl_projection_coordinator
+    coordinator.coordinate_infokl = Mock(side_effect=RuntimeError("infokl coordinator failed"))
+    message = _durable_infokl_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    first_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (first_attempt["status"], first_attempt["retryable"]) == ("failed", 1)
+    assert _import_event_rows(database_path, "kakeraloot_settings") == []
+    assert _receipt_rows(database_path, "kakeraloot_settings_observations") == []
+    assert _receipt_rows(database_path, "server_contexts") == []
+    assert _receipt_rows(database_path, "discord_projection_links") == []
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+    retry_listener, _retry_repository, _ = _durable_listener(tmp_path)
+    retry_message = _durable_infokl_message(interaction=False)
+    asyncio.run(retry_listener.handle_bot_response(retry_message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["attempt_number"], row["status"]) for row in attempts] == [
+        (1, "failed"),
+        (2, "succeeded"),
+    ]
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+    assert len(_receipt_rows(database_path, "kakeraloot_settings_observations")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_infokl_missing_attribution_does_not_start_processing(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "infokl-missing.json",
+        (),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    assert listener._seen_payloads == set()
+
+
+def test_listener_infokl_ambiguous_attribution_does_not_guess_server_or_account(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "infokl-ambiguous.json",
+        (
+            ("Server A", "user_a", "primary", "456"),
+            ("Server B", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _server_attribution_rows(database_path) == [(1, "ambiguous", None)]
+
+
+def test_listener_infokl_uses_unique_server_with_multiple_accounts_without_account_ownership(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "infokl-shared-channel.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message(interaction=False)))
+
+    assert importer.import_message.call_args.args[2:] == ("Test Server", None)
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+    assert len(_receipt_rows(database_path, "server_contexts")) == 1
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+
+
+def test_listener_infokl_persisted_attribution_conflict_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_infokl_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    importer = Mock()
+    conflict_listener, _conflict_repository, _ = _attribution_listener(
+        tmp_path,
+        "infokl-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Other Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="infokl", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(conflict_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+
+
+def test_listener_active_infokl_does_not_start_attempt_or_import(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_infokl_message(interaction=False)
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    attribution = listener._resolve_and_record_server_attribution(
+        message,
+        message.content,
+        "infokl",
+        None,
+        None,
+        received,
+    )
+    assert attribution is not None and attribution.status == "resolved"
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_listener_terminal_infokl_state_fails_closed(tmp_path, terminal_status) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_infokl_message(interaction=False)
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    listener._resolve_and_record_server_attribution(
+        message,
+        message.content,
+        "infokl",
+        None,
+        None,
+        received,
+    )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status=terminal_status,
+        retryable=False,
+        failure_code="terminal_infokl_test",
+        failure_detail="terminal infokl test failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == terminal_status
+
+
+def test_listener_infokl_cleanup_error_preserves_coordinator_success(tmp_path, caplog) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.mark_processing_failure = Mock(wraps=repository.mark_processing_failure)
+    listener._complete_scan_if_last_page = Mock(side_effect=RuntimeError("cleanup unavailable"))
+    caplog.set_level(logging.ERROR, logger="moa.discord")
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message()))
+
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "succeeded"
+    assert event["status"] == "succeeded"
+    repository.mark_processing_failure.assert_not_called()
+    assert "Best-effort cleanup failed after durable infokl success" in caplog.text
+
+
+def test_listener_same_process_infokl_duplicate_is_suppressed_before_attempt_work(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_infokl_message(interaction=False)
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+    assert len(_import_event_rows(database_path, "kakeraloot_settings")) == 1
+
+
+def test_listener_non_durable_infokl_keeps_direct_catalog_path_without_context(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_infokl_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_infokl_context" not in kwargs
+    assert importer.import_message.call_args.args[3] is None
+    assert len(_import_event_rows(tmp_path / "catalog.db", "kakeraloot_settings")) == 1
+    assert len(_receipt_rows(tmp_path / "catalog.db", "kakeraloot_settings_observations")) == 1
 
 
 def test_listener_settings_without_resolved_attribution_fails_closed(tmp_path) -> None:

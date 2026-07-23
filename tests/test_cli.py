@@ -10,6 +10,7 @@ from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
+from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -193,6 +194,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     profile_coordinator = importer._profile_projection_coordinator
     claim_coordinator = importer._claim_projection_coordinator
     settings_coordinator = importer._settings_projection_coordinator
+    infokl_coordinator = importer._infokl_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -201,6 +203,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(profile_coordinator, ProfileProjectionCoordinator)
     assert isinstance(claim_coordinator, ClaimProjectionCoordinator)
     assert isinstance(settings_coordinator, SettingsProjectionCoordinator)
+    assert isinstance(infokl_coordinator, InfoklProjectionCoordinator)
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -215,6 +218,9 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert settings_coordinator._catalog is catalog_service._repository
     assert settings_coordinator._discord is discord_repository
     assert settings_coordinator._database_path == database_path
+    assert infokl_coordinator._catalog is catalog_service._repository
+    assert infokl_coordinator._discord is discord_repository
+    assert infokl_coordinator._database_path == database_path
     assert captured["catalog_service"] is importer._catalog
     assert captured["token"] == "test-token"
     assert captured["mudae_user_id"] == 999

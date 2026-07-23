@@ -26,6 +26,7 @@ from moa.repositories.discord_message_repository import (
 from moa.services.automatic_import_service import (
     AutomaticImportService,
     DurableClaimImportContext,
+    DurableInfoklImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -93,7 +94,7 @@ class DiscordListenerService:
         "hg",
         "husbandog",
     }
-    _DURABLE_IMPORT_KINDS = {"claim", "profile", "roll", "settings"}
+    _DURABLE_IMPORT_KINDS = {"claim", "infokl", "profile", "roll", "settings"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -541,17 +542,25 @@ class DiscordListenerService:
             and kind not in self._SERVER_INDEPENDENT_KINDS
             and attribution.status != "resolved"
         ):
+            if kind == "infokl":
+                self._logger.info(
+                    "Deferred server-scoped infokl source event %s because server attribution "
+                    "is %s; no processing attempt was started",
+                    received_event.source_event_id,
+                    attribution.status,
+                )
+                return
             self._record_unresolved_attribution(
                 received_event,
                 message.id,
                 attribution.status,
             )
             return
-        if context is None:
+        if context is None and kind != "infokl":
             if kind == "roll":
                 self._warn_once_for_unattributed_roll(message)
             return
-        if context.expected_kind == "personalrare" and context.personal_rare_argument_supplied:
+        if context is not None and context.expected_kind == "personalrare" and context.personal_rare_argument_supplied:
             self._logger.info(
                 "Ignoring textual Mudae response %s for a value-setting $persr command; "
                 "waiting for the command acknowledgement reaction",
@@ -569,8 +578,8 @@ class DiscordListenerService:
                 len(raw_message.splitlines()),
             )
             return
-        import_identity = context.identity
-        if attribution.status == "resolved" and attribution.server_name is not None:
+        import_identity = context.identity if context is not None else None
+        if import_identity is not None and attribution.status == "resolved" and attribution.server_name is not None:
             import_identity = import_identity.model_copy(update={"server": attribution.server_name})
         if kind == "claim":
             # The claimant printed in Mudae's marriage confirmation is the
@@ -714,16 +723,16 @@ class DiscordListenerService:
             "Detected Mudae %s message %s for %s / %s",
             kind,
             message.id,
-            import_identity.server,
-            import_identity.account,
+            attribution.server_name if kind == "infokl" else import_identity.server,
+            "server-scoped" if kind == "infokl" else import_identity.account,
         )
 
         durable_success_recorded = False
         try:
-            scan_id = self._scan_id_for_page(
-                kind,
-                raw_message,
-                import_identity,
+            scan_id = (
+                self._scan_id_for_page(kind, raw_message, import_identity)
+                if import_identity is not None
+                else None
             )
             if kind in self._SCAN_KINDS:
                 self._scan_contexts[(int(message.guild.id), int(message.channel.id), kind)] = replace(
@@ -759,6 +768,10 @@ class DiscordListenerService:
                     import_kwargs["durable_claim_context"] = DurableClaimImportContext(
                         **context_kwargs
                     )
+                elif kind == "infokl":
+                    import_kwargs["durable_infokl_context"] = DurableInfoklImportContext(
+                        **context_kwargs
+                    )
                 else:
                     import_kwargs["durable_settings_context"] = DurableSettingsImportContext(
                         **context_kwargs
@@ -766,8 +779,8 @@ class DiscordListenerService:
             result = self._importer.import_message(
                 raw_message,
                 source,
-                import_identity.server,
-                import_identity.account,
+                attribution.server_name if kind == "infokl" else import_identity.server,
+                None if kind == "infokl" else import_identity.account,
                 **import_kwargs,
             )
             durable_success_recorded = bool(
@@ -802,7 +815,11 @@ class DiscordListenerService:
                 self._consume_context(message.channel.id, context)
             if kind in {"gift_kakera", "gift_spheres", "gift_character", "trade"} and self._transaction_is_terminal(kind, raw_message):
                 self._consume_context(message.channel.id, context)
-            elif context.expected_kind not in {"divorce", "divorce_confirmation", *self._SCAN_KINDS}:
+            elif context is not None and context.expected_kind not in {
+                "divorce",
+                "divorce_confirmation",
+                *self._SCAN_KINDS,
+            }:
                 self._consume_context(message.channel.id, context)
             self._complete_scan_if_last_page(
                 kind,
