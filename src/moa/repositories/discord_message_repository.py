@@ -448,15 +448,21 @@ class DiscordMessageRepository:
         """Read the current durable server attribution for one source event."""
         self._validate_processing_identity(source_event_id=source_event_id)
         with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT source_event_id, status, server_name, created_at, updated_at
-                FROM discord_source_event_server_attributions
-                WHERE source_event_id = ?
-                """,
-                (source_event_id,),
-            ).fetchone()
-            return self._server_attribution_result(row)
+            return self._get_server_attribution_with_connection(connection, source_event_id)
+
+    @staticmethod
+    def _get_server_attribution_with_connection(
+        connection: sqlite3.Connection, source_event_id: int
+    ) -> DiscordSourceEventServerAttribution | None:
+        row = connection.execute(
+            """
+            SELECT source_event_id, status, server_name, created_at, updated_at
+            FROM discord_source_event_server_attributions
+            WHERE source_event_id = ?
+            """,
+            (source_event_id,),
+        ).fetchone()
+        return DiscordMessageRepository._server_attribution_result(row)
 
     def record_server_attribution(
         self,
@@ -548,16 +554,22 @@ class DiscordMessageRepository:
         """Read the current durable account attribution for one source event."""
         self._validate_processing_identity(source_event_id=source_event_id)
         with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT source_event_id, status, server_name, account_name,
-                       created_at, updated_at
-                FROM discord_source_event_account_attributions
-                WHERE source_event_id = ?
-                """,
-                (source_event_id,),
-            ).fetchone()
-            return self._account_attribution_result(row)
+            return self._get_account_attribution_with_connection(connection, source_event_id)
+
+    @staticmethod
+    def _get_account_attribution_with_connection(
+        connection: sqlite3.Connection, source_event_id: int
+    ) -> DiscordSourceEventAccountAttribution | None:
+        row = connection.execute(
+            """
+            SELECT source_event_id, status, server_name, account_name,
+                   created_at, updated_at
+            FROM discord_source_event_account_attributions
+            WHERE source_event_id = ?
+            """,
+            (source_event_id,),
+        ).fetchone()
+        return DiscordMessageRepository._account_attribution_result(row)
 
     def record_account_attribution(
         self,
