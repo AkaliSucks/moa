@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 
 from moa.database.sqlite import connect
-from moa.models.character import ClaimConfirmation
+from moa.models.character import ClaimConfirmation, RollObservation
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -47,6 +47,19 @@ def _receive_and_begin(discord, *, suffix="one"):
         source_observed_at=OBSERVED_AT,
         received_at=OBSERVED_AT,
     )
+    discord.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        recorded_at=OBSERVED_AT,
+    )
+    discord.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        account_name="Account",
+        recorded_at=OBSERVED_AT,
+    )
     attempt = discord.begin_processing_attempt(
         source_event_id=received.source_event_id,
         parser_version="parser-1",
@@ -85,6 +98,137 @@ def _counts(connection: sqlite3.Connection) -> dict[str, int]:
         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         for table in tables
     }
+
+
+def _mutate_attribution(database_path, source_event_id: int, category: str) -> None:
+    with connect(database_path) as connection:
+        if category == "missing_server":
+            connection.execute(
+                "DELETE FROM discord_source_event_server_attributions WHERE source_event_id = ?",
+                (source_event_id,),
+            )
+        elif category == "unresolved_server":
+            connection.execute(
+                """
+                UPDATE discord_source_event_server_attributions
+                SET status = 'unresolved', server_name = NULL
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "ambiguous_server":
+            connection.execute(
+                """
+                UPDATE discord_source_event_server_attributions
+                SET status = 'ambiguous', server_name = NULL
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "server_mismatch":
+            connection.execute(
+                """
+                UPDATE discord_source_event_server_attributions
+                SET server_name = 'Other Server'
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "missing_account":
+            connection.execute(
+                "DELETE FROM discord_source_event_account_attributions WHERE source_event_id = ?",
+                (source_event_id,),
+            )
+        elif category == "unresolved_account":
+            connection.execute(
+                """
+                UPDATE discord_source_event_account_attributions
+                SET status = 'unresolved', server_name = NULL, account_name = NULL
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "ambiguous_account":
+            connection.execute(
+                """
+                UPDATE discord_source_event_account_attributions
+                SET status = 'ambiguous', server_name = NULL, account_name = NULL
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "account_server_mismatch":
+            connection.execute(
+                """
+                UPDATE discord_source_event_account_attributions
+                SET server_name = 'Other Server'
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        elif category == "account_mismatch":
+            connection.execute(
+                """
+                UPDATE discord_source_event_account_attributions
+                SET account_name = 'Other Account'
+                WHERE source_event_id = ?
+                """,
+                (source_event_id,),
+            )
+        else:
+            raise AssertionError(f"unknown attribution category: {category}")
+
+
+def _database_snapshot(database_path) -> dict[str, object]:
+    with connect(database_path) as connection:
+        return {
+            "counts": _counts(connection),
+            "event": tuple(
+                connection.execute(
+                    "SELECT status, legacy_import_event_id, updated_at FROM discord_source_events"
+                ).fetchone()
+            ),
+            "attempt": tuple(
+                connection.execute(
+                    "SELECT status, finished_at, failure_code FROM discord_processing_attempts"
+                ).fetchone()
+            ),
+            "links": [
+                tuple(row)
+                for row in connection.execute(
+                    """
+                    SELECT projection_kind, projection_slot, projection_table,
+                           projection_row_id, state, completed_at
+                    FROM discord_projection_links
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ],
+            "server_attribution": tuple(
+                connection.execute(
+                    """
+                    SELECT status, server_name, created_at, updated_at
+                    FROM discord_source_event_server_attributions
+                    """
+                ).fetchone()
+            )
+            if connection.execute(
+                "SELECT 1 FROM discord_source_event_server_attributions"
+            ).fetchone()
+            else None,
+            "account_attribution": tuple(
+                connection.execute(
+                    """
+                    SELECT status, server_name, account_name, created_at, updated_at
+                    FROM discord_source_event_account_attributions
+                    """
+                ).fetchone()
+            )
+            if connection.execute(
+                "SELECT 1 FROM discord_source_event_account_attributions"
+            ).fetchone()
+            else None,
+        }
 
 
 def test_first_claim_processing_and_projection_slot(tmp_path) -> None:
@@ -131,6 +275,74 @@ def test_first_claim_processing_and_projection_slot(tmp_path) -> None:
         attempt = connection.execute("SELECT status FROM discord_processing_attempts").fetchone()
         assert tuple(event) == ("succeeded", result.import_event_id)
         assert tuple(attempt) == ("succeeded",)
+
+
+@pytest.mark.parametrize(
+    ("category", "message"),
+    (
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ),
+)
+def test_first_claim_attribution_failures_are_atomic(
+    tmp_path, category: str, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _mutate_attribution(database_path, source_event_id, category)
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match=message):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert _database_snapshot(database_path) == before
+    assert before["event"][:2] == ("processing", None)
+    assert before["attempt"][:1] == ("processing",)
+    assert before["counts"]["discord_projection_links"] == 0
+    assert before["counts"]["import_events"] == 0
+    assert before["counts"]["claim_observations"] == 0
+
+
+def test_blank_typed_claimant_fails_before_any_writes(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match="valid typed claimant"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            attempt_id,
+            claim=ClaimConfirmation(account_name="   ", character_name=CLAIM.character_name),
+        )
+
+    assert _database_snapshot(database_path) == before
+
+
+def test_typed_claimant_mismatch_with_persisted_account_fails_closed(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _mutate_attribution(database_path, source_event_id, "account_mismatch")
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match="another account"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            attempt_id,
+            claim=ClaimConfirmation(
+                account_name="Other Account", character_name=CLAIM.character_name
+            ),
+        )
+
+    assert _database_snapshot(database_path) == before
 
 
 def test_equivalent_casing_and_whitespace_reuses_projection_slot_on_replay(tmp_path) -> None:
@@ -224,6 +436,77 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
     with connect(database_path) as connection:
         assert _counts(connection) == before
         assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    ("category", "message"),
+    (
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ),
+)
+def test_succeeded_replay_attribution_failures_leave_all_rows_unchanged(
+    tmp_path, category: str, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    _mutate_attribution(database_path, source_event_id, category)
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match=message):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _database_snapshot(database_path) == before
+    assert before["event"][:2] == ("succeeded", before["event"][1])
+    assert before["attempt"][:1] == ("succeeded",)
+    assert before["counts"]["import_events"] == 1
+    assert before["counts"]["claim_observations"] == 1
+    assert before["counts"]["discord_projection_links"] == 1
+
+
+def test_historical_succeeded_replay_without_account_attribution_fails_closed(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    _mutate_attribution(database_path, source_event_id, "missing_account")
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match="no persisted account attribution"):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _database_snapshot(database_path) == before
+
+
+def test_global_character_reuse_does_not_bypass_account_validation(tmp_path) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    catalog.import_roll(
+        RollObservation(
+            name=CLAIM.character_name,
+            series="Claim Series",
+            claim_rank=1,
+            kakera_value=10,
+        ),
+        "Server",
+        "Other Account",
+        "existing roll",
+        "discord",
+    )
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _mutate_attribution(database_path, source_event_id, "account_mismatch")
+    before = _database_snapshot(database_path)
+
+    with pytest.raises(ClaimProjectionIntegrityError, match="another account"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert _database_snapshot(database_path) == before
 
 
 def test_edited_revision_gets_independent_claim_projection(tmp_path) -> None:
@@ -375,7 +658,10 @@ def test_claimant_mismatch_is_rejected_without_writes(tmp_path) -> None:
             coordinator,
             source_event_id,
             attempt_id,
-            account="Other Account",
+            claim=ClaimConfirmation(
+                account_name="Other Account",
+                character_name=CLAIM.character_name,
+            ),
         )
     with connect(database_path) as connection:
         assert _counts(connection)["import_events"] == 0
