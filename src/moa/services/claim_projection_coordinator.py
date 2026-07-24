@@ -89,10 +89,6 @@ class ClaimProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        if self._normalize(claim.account_name) != self._normalize(account):
-            raise ClaimProjectionIntegrityError(
-                "parsed claim claimant does not match the resolved account"
-            )
         projection_slot = self._claim_slot(server, account, claim.character_name)
 
         connection = connect(self._database_path)
@@ -104,6 +100,17 @@ class ClaimProjectionCoordinator:
                     raise ClaimProjectionStateError(
                         f"Discord source event {source_event_id} has already succeeded"
                     )
+                persisted_account = self._validate_attribution(
+                    connection,
+                    source_event_id=source_event_id,
+                    server=server,
+                    account=account,
+                )
+                self._validate_claimant(
+                    claim,
+                    account=account,
+                    persisted_account=persisted_account,
+                )
                 return self._coordinate_replay(connection, event, projection_slot)
 
             if attempt_id is None:
@@ -111,6 +118,17 @@ class ClaimProjectionCoordinator:
                     f"Discord source event {source_event_id} has no active processing attempt"
                 )
             self._validate_active_attempt(connection, event, source_event_id, attempt_id)
+            persisted_account = self._validate_attribution(
+                connection,
+                source_event_id=source_event_id,
+                server=server,
+                account=account,
+            )
+            self._validate_claimant(
+                claim,
+                account=account,
+                persisted_account=persisted_account,
+            )
             links = self._load_links(connection, source_event_id)
             expected_key = (self._PROJECTION_KIND, projection_slot)
             if set(links) - {expected_key}:
@@ -185,6 +203,76 @@ class ClaimProjectionCoordinator:
             raise
         finally:
             connection.close()
+
+    def _validate_attribution(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_event_id: int,
+        server: str,
+        account: str,
+    ) -> str:
+        server_attribution = self._discord._get_server_attribution_with_connection(
+            connection, source_event_id
+        )
+        if server_attribution is None:
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted server attribution"
+            )
+        if server_attribution.status != "resolved":
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved server attribution"
+            )
+        if server_attribution.server_name is None or self._normalize(
+            server_attribution.server_name
+        ) != self._normalize(server):
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another server"
+            )
+
+        account_attribution = self._discord._get_account_attribution_with_connection(
+            connection, source_event_id
+        )
+        if account_attribution is None:
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted account attribution"
+            )
+        if account_attribution.status != "resolved":
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved account attribution"
+            )
+        if account_attribution.server_name is None or self._normalize(
+            account_attribution.server_name
+        ) != self._normalize(server_attribution.server_name):
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} has mismatched account attribution server"
+            )
+        if account_attribution.account_name is None or self._normalize(
+            account_attribution.account_name
+        ) != self._normalize(account):
+            raise ClaimProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another account"
+            )
+        return account_attribution.account_name
+
+    @staticmethod
+    def _validate_claimant(
+        claim: ClaimConfirmation,
+        *,
+        account: str,
+        persisted_account: str,
+    ) -> None:
+        if not isinstance(claim.account_name, str) or not claim.account_name.strip():
+            raise ClaimProjectionIntegrityError("claim has no valid typed claimant")
+        claimant = CatalogRepository._normalize(claim.account_name)
+        if claimant != CatalogRepository._normalize(account):
+            raise ClaimProjectionIntegrityError(
+                "parsed claim claimant does not match the resolved account"
+            )
+        if claimant != CatalogRepository._normalize(persisted_account):
+            raise ClaimProjectionIntegrityError(
+                "parsed claim claimant does not match persisted account attribution"
+            )
 
     def _coordinate_replay(
         self,
