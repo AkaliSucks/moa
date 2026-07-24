@@ -99,6 +99,17 @@ class ProfileProjectionCoordinator:
                     raise ProfileProjectionStateError(
                         f"Discord source event {source_event_id} has already succeeded"
                     )
+                persisted_account = self._validate_attribution(
+                    connection,
+                    source_event_id=source_event_id,
+                    server=server,
+                    account=account,
+                )
+                self._validate_profile_owner(
+                    profile,
+                    account=account,
+                    persisted_account=persisted_account,
+                )
                 return self._coordinate_replay(
                     connection,
                     event,
@@ -110,6 +121,17 @@ class ProfileProjectionCoordinator:
                     f"Discord source event {source_event_id} has no active processing attempt"
                 )
             self._validate_active_attempt(connection, source_event_id, attempt_id)
+            persisted_account = self._validate_attribution(
+                connection,
+                source_event_id=source_event_id,
+                server=server,
+                account=account,
+            )
+            self._validate_profile_owner(
+                profile,
+                account=account,
+                persisted_account=persisted_account,
+            )
             links = self._load_links(connection, source_event_id)
             expected_key = (self._PROJECTION_KIND, projection_slot)
             unexpected = set(links) - {expected_key}
@@ -182,6 +204,76 @@ class ProfileProjectionCoordinator:
             raise
         finally:
             connection.close()
+
+    def _validate_attribution(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        source_event_id: int,
+        server: str,
+        account: str,
+    ) -> str:
+        server_attribution = self._discord._get_server_attribution_with_connection(
+            connection, source_event_id
+        )
+        if server_attribution is None:
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted server attribution"
+            )
+        if server_attribution.status != "resolved":
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved server attribution"
+            )
+        if server_attribution.server_name is None or CatalogRepository._normalize(
+            server_attribution.server_name
+        ) != CatalogRepository._normalize(server):
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another server"
+            )
+
+        account_attribution = self._discord._get_account_attribution_with_connection(
+            connection, source_event_id
+        )
+        if account_attribution is None:
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} has no persisted account attribution"
+            )
+        if account_attribution.status != "resolved":
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} has non-resolved account attribution"
+            )
+        if account_attribution.server_name is None or CatalogRepository._normalize(
+            account_attribution.server_name
+        ) != CatalogRepository._normalize(server_attribution.server_name):
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} has mismatched account attribution server"
+            )
+        if account_attribution.account_name is None or CatalogRepository._normalize(
+            account_attribution.account_name
+        ) != CatalogRepository._normalize(account):
+            raise ProfileProjectionIntegrityError(
+                f"source event {source_event_id} is attributed to another account"
+            )
+        return account_attribution.account_name
+
+    @staticmethod
+    def _validate_profile_owner(
+        profile: ProfileSnapshot,
+        *,
+        account: str,
+        persisted_account: str,
+    ) -> None:
+        if not isinstance(profile.profile_name, str) or not profile.profile_name.strip():
+            raise ProfileProjectionIntegrityError("profile has no valid typed owner")
+        profile_owner = CatalogRepository._normalize(profile.profile_name)
+        if profile_owner != CatalogRepository._normalize(account):
+            raise ProfileProjectionIntegrityError(
+                "typed profile owner does not match caller account"
+            )
+        if profile_owner != CatalogRepository._normalize(persisted_account):
+            raise ProfileProjectionIntegrityError(
+                "typed profile owner does not match persisted account attribution"
+            )
 
     def _coordinate_replay(
         self,

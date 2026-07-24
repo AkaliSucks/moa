@@ -21,7 +21,7 @@ from moa.services.profile_projection_coordinator import (
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 PROFILE = ProfileSnapshot(
-    profile_name="profile-account",
+    profile_name="Account",
     collection_size=35,
     female_percent=100,
     male_percent=0,
@@ -70,6 +70,19 @@ def _receive_and_begin(discord, *, suffix="one"):
         router_version="router-1",
         started_at=OBSERVED_AT,
     )
+    discord.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        recorded_at=OBSERVED_AT,
+    )
+    discord.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Server",
+        account_name="Account",
+        recorded_at=OBSERVED_AT,
+    )
     return received.source_event_id, attempt.attempt_id
 
 
@@ -88,17 +101,85 @@ def _counts(connection: sqlite3.Connection) -> dict[str, int]:
     }
 
 
-def _coordinate(coordinator, source_event_id, attempt_id, *, server=" Server ", account=" Account "):
+def _coordinate(
+    coordinator,
+    source_event_id,
+    attempt_id,
+    *,
+    profile=PROFILE,
+    server=" Server ",
+    account=" Account ",
+):
     return coordinator.coordinate_profile(
         source_event_id=source_event_id,
         attempt_id=attempt_id,
-        profile=PROFILE,
+        profile=profile,
         server=server,
         account=account,
         raw="profile payload",
         source="discord",
         observed_at=OBSERVED_AT,
         finished_at=FINISHED_AT,
+    )
+
+
+def _set_attribution_failure(database_path, failure: str) -> None:
+    statements = {
+        "missing_server": "DELETE FROM discord_source_event_server_attributions",
+        "unresolved_server": (
+            "UPDATE discord_source_event_server_attributions "
+            "SET status = 'unresolved', server_name = NULL"
+        ),
+        "ambiguous_server": (
+            "UPDATE discord_source_event_server_attributions "
+            "SET status = 'ambiguous', server_name = NULL"
+        ),
+        "server_mismatch": (
+            "UPDATE discord_source_event_server_attributions SET server_name = 'Server B'"
+        ),
+        "missing_account": "DELETE FROM discord_source_event_account_attributions",
+        "unresolved_account": (
+            "UPDATE discord_source_event_account_attributions "
+            "SET status = 'unresolved', server_name = NULL, account_name = NULL"
+        ),
+        "ambiguous_account": (
+            "UPDATE discord_source_event_account_attributions "
+            "SET status = 'ambiguous', server_name = NULL, account_name = NULL"
+        ),
+        "account_server_mismatch": (
+            "UPDATE discord_source_event_account_attributions SET server_name = 'Server B'"
+        ),
+        "account_mismatch": (
+            "UPDATE discord_source_event_account_attributions SET account_name = 'Account B'"
+        ),
+    }
+    with connect(database_path) as connection:
+        connection.execute(statements[failure])
+
+
+def _attribution_rows(connection: sqlite3.Connection):
+    return (
+        tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM discord_source_event_server_attributions ORDER BY source_event_id"
+            )
+        ),
+        tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM discord_source_event_account_attributions ORDER BY source_event_id"
+            )
+        ),
+    )
+
+
+def _durable_state(connection: sqlite3.Connection):
+    return (
+        tuple(connection.execute("SELECT * FROM discord_source_events").fetchone()),
+        tuple(connection.execute("SELECT * FROM discord_processing_attempts").fetchone()),
+        _counts(connection),
+        _attribution_rows(connection),
     )
 
 
@@ -299,7 +380,7 @@ def test_succeeded_replay_rejects_semantic_slot_mismatch(tmp_path) -> None:
     source_event_id, attempt_id = _receive_and_begin(discord)
     _coordinate(coordinator, source_event_id, attempt_id)
 
-    with pytest.raises(ProfileProjectionIntegrityError, match="inconsistent profile projection link"):
+    with pytest.raises(ProfileProjectionIntegrityError, match="another account"):
         _coordinate(coordinator, source_event_id, None, account="Other Account")
 
 
@@ -359,3 +440,177 @@ def test_only_profile_projection_links_are_created(tmp_path) -> None:
             "SELECT projection_kind, projection_table FROM discord_projection_links"
         ).fetchall()
     assert [tuple(row) for row in rows] == [("catalog.profile", "profile_observations")]
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ],
+)
+def test_first_processing_requires_matching_persisted_attribution_before_writes(
+    tmp_path, failure, message
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _set_attribution_failure(database_path, failure)
+
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    with pytest.raises(ProfileProjectionIntegrityError, match=message):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()[0] == "processing"
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ProfileSnapshot(
+            profile_name="Other Account",
+            collection_size=35,
+            female_percent=100,
+            male_percent=0,
+            pokedex_count=2,
+            pokedex_pokemon=("gulpin", "piloswine"),
+            kakera_reacts={":kakeraY:": 497},
+            mudapins_collected=None,
+            mudapins_total=None,
+            kakera_balance=812,
+            bronze_keys=3,
+            silver_keys=0,
+            gold_keys=0,
+            sphere_stock=None,
+            spheres={":spP:": 2},
+            displayed_badges=(":silvmudae:", ":DiamondI:"),
+        ),
+        ProfileSnapshot(
+            profile_name="   ",
+            collection_size=35,
+            female_percent=100,
+            male_percent=0,
+            pokedex_count=2,
+            pokedex_pokemon=("gulpin", "piloswine"),
+            kakera_reacts={":kakeraY:": 497},
+            mudapins_collected=None,
+            mudapins_total=None,
+            kakera_balance=812,
+            bronze_keys=3,
+            silver_keys=0,
+            gold_keys=0,
+            sphere_stock=None,
+            spheres={":spP:": 2},
+            displayed_badges=(":silvmudae:", ":DiamondI:"),
+        ),
+    ],
+    ids=["owner-caller-mismatch", "blank-owner"],
+)
+def test_first_processing_requires_valid_typed_profile_owner_before_writes(
+    tmp_path, profile
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    with pytest.raises(ProfileProjectionIntegrityError, match="typed profile owner|valid typed owner"):
+        _coordinate(coordinator, source_event_id, attempt_id, profile=profile)
+
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
+
+
+def test_matching_succeeded_replay_validates_attribution_before_returning_existing_ids(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay == ProfileProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        profile_observation_id=first.profile_observation_id,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("missing_server", "no persisted server attribution"),
+        ("unresolved_server", "non-resolved server attribution"),
+        ("ambiguous_server", "non-resolved server attribution"),
+        ("server_mismatch", "another server"),
+        ("missing_account", "no persisted account attribution"),
+        ("unresolved_account", "non-resolved account attribution"),
+        ("ambiguous_account", "non-resolved account attribution"),
+        ("account_server_mismatch", "mismatched account attribution server"),
+        ("account_mismatch", "another account"),
+    ],
+)
+def test_succeeded_replay_requires_matching_persisted_attribution_and_changes_nothing(
+    tmp_path, failure, message
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    _set_attribution_failure(database_path, failure)
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    with pytest.raises(ProfileProjectionIntegrityError, match=message):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
+
+
+def test_succeeded_replay_requires_matching_typed_profile_owner(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    mismatched_profile = PROFILE.model_copy(update={"profile_name": "Other Account"})
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    with pytest.raises(ProfileProjectionIntegrityError, match="typed profile owner"):
+        _coordinate(coordinator, source_event_id, None, profile=mismatched_profile)
+
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
+
+
+def test_historical_succeeded_replay_without_account_attribution_fails_closed(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    _set_attribution_failure(database_path, "missing_account")
+    with connect(database_path) as connection:
+        before = _durable_state(connection)
+
+    with pytest.raises(ProfileProjectionIntegrityError, match="no persisted account attribution"):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _durable_state(connection) == before
