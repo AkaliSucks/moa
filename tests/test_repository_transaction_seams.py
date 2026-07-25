@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -11,6 +12,7 @@ from moa.models.character import (
     ServerSettingMetric,
     ServerSettingsSnapshot,
     KakeralootSettingsSnapshot,
+    TimerStateSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
@@ -67,6 +69,34 @@ KAKERALOOT_SETTINGS = KakeralootSettingsSnapshot(
     loot_cost=500,
     quantity_quality_base_cost=2000,
     quantity_quality_level_increment=200,
+)
+TIMER_STATE = TimerStateSnapshot(
+    can_claim_now=True,
+    claim_reset_minutes=0,
+    rolls_left=17,
+    rolls_reset_minutes=42,
+    rolls_reset_stock=0,
+    vote_reset_minutes=None,
+    daily_reset_minutes=613,
+    daily_kakera_ready=False,
+    rt_available=None,
+    can_react_kakera_now=True,
+    reaction_power_percent=72,
+    kakera_button_power_cost_percent=36,
+    soulmate_button_power_cost_percent=18,
+    kakera_stock=12114,
+    gold_key_stock_remaining=0,
+    gold_key_reset_minutes=None,
+    bku_reset_probability_percent=10,
+    oh_remaining=3,
+    oc_remaining=None,
+    oq_remaining=1,
+    oq_stored=0,
+    ot_remaining=8,
+    ouro_refill_minutes=918,
+    rolls_reset_status="limited_timer",
+    rolls_per_hour_limit=17,
+    rt_reset_minutes=612,
 )
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -141,6 +171,24 @@ def _kakeraloot_settings_counts(connection: sqlite3.Connection) -> dict[str, int
         "kakeraloot_settings_observations",
         "discord_projection_links",
         "discord_source_event_server_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _timer_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "timer_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
         "discord_processing_attempts",
     )
     return {
@@ -1052,3 +1100,209 @@ def test_failure_after_both_helpers_rolls_back_catalog_and_processing_success(tm
         ).fetchone()
         assert (event["status"], event["legacy_import_event_id"]) == ("processing", None)
         assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "processing"
+
+
+def test_public_timer_state_wrapper_preserves_result_rows_and_snapshot(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "timer payload with exact source text"
+
+    result = catalog.import_timer_state(
+        TIMER_STATE,
+        " Server ",
+        " Account ",
+        raw_message,
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    with connect(database_path) as connection:
+        assert _timer_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "timer_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("timer_state", "discord", raw_message, result.observed_at.isoformat())
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, snapshot_json, observed_at, import_event_id
+            FROM timer_state_observations
+            WHERE id = (SELECT MAX(id) FROM timer_state_observations)
+            """
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id, name, normalized_name FROM account_contexts"
+        ).fetchone()
+        server = connection.execute(
+            "SELECT name, normalized_name FROM server_contexts"
+        ).fetchone()
+        assert tuple(account) == (account["id"], "Account", "account")
+        assert tuple(server) == ("Server", "server")
+        assert observation["id"] > 0
+        assert observation["account_context_id"] == account["id"]
+        assert json.loads(observation["snapshot_json"]) == TIMER_STATE.model_dump()
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+
+
+def test_timer_state_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_timer_state_with_connection(
+            connection,
+            state=TIMER_STATE,
+            server="Server",
+            account="Account",
+            raw="timer payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert _timer_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "timer_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        observation = connection.execute(
+            "SELECT import_event_id FROM timer_state_observations WHERE id = ?",
+            (imported.timer_state_observation_id,),
+        ).fetchone()
+        assert observation["import_event_id"] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM timer_state_observations").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+
+
+def test_timer_state_helper_commit_persists_rows_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_timer_state_with_connection(
+            connection,
+            state=TIMER_STATE,
+            server="Server",
+            account="Account",
+            raw="timer payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            "SELECT id, observed_at, import_event_id, account_context_id FROM timer_state_observations WHERE id = ?",
+            (imported.timer_state_observation_id,),
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id FROM account_contexts WHERE normalized_name = ?",
+            ("account",),
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == ("timer_state", "discord", "timer payload", OBSERVED_AT.isoformat())
+        assert observation["id"] == imported.timer_state_observation_id
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        assert observation["account_context_id"] == account["id"]
+
+
+def test_timer_state_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_timer_state_with_connection(
+            connection,
+            state=TIMER_STATE,
+            server="Server",
+            account="Account",
+            raw="timer payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _timer_state_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "timer_state_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_timer_state_helper_reuses_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_timer_state(TIMER_STATE, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _timer_state_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_timer_state_with_connection(
+            connection,
+            state=TIMER_STATE,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="second payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert imported.import_event_id > 0
+        assert imported.timer_state_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _timer_state_counts(connection) == before_counts
