@@ -461,6 +461,14 @@ class _KakeralootSettingsImportConnectionResult:
     kakeraloot_settings_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _TimerStateImportConnectionResult:
+    """Rows created by one timer-state import on a caller-owned connection."""
+
+    import_event_id: int
+    timer_state_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2679,13 +2687,42 @@ class CatalogRepository:
         """Store one short-lived account action snapshot from `$tu`."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("timer_state", source, observed_at.isoformat(), raw_message),
+            imported = self._import_timer_state_with_connection(
+                connection,
+                state=state,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return TimerStateImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_timer_state_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: TimerStateSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _TimerStateImportConnectionResult:
+        """Store one timer-state snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("timer_state", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        timer_state_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO timer_state_observations (
@@ -2693,12 +2730,11 @@ class CatalogRepository:
                 ) VALUES (?, ?, ?, ?)
                 """,
                 (account_id, json.dumps(state.model_dump()), observed_at.isoformat(), import_event_id),
-            )
-        return TimerStateImportResult(
+            ).lastrowid
+        )
+        return _TimerStateImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            timer_state_observation_id=timer_state_observation_id,
         )
 
     def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None:
