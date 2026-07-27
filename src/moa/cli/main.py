@@ -36,6 +36,7 @@ from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
 from moa.utils.display import (
@@ -204,6 +205,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        timer_projection_coordinator = TimerProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -211,6 +216,7 @@ def discord_listen(
             claim_projection_coordinator=claim_projection_coordinator,
             settings_projection_coordinator=settings_projection_coordinator,
             infokl_projection_coordinator=infokl_projection_coordinator,
+            timer_projection_coordinator=timer_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
