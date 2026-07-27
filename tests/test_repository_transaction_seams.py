@@ -1,12 +1,15 @@
 import json
 import sqlite3
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 
 import pytest
 
 from moa.database.sqlite import connect
 from moa.models.character import (
+    BadgeLevel,
     ClaimConfirmation,
+    KakeraStateSnapshot,
     ProfileSnapshot,
     RollObservation,
     ServerSettingMetric,
@@ -98,6 +101,15 @@ TIMER_STATE = TimerStateSnapshot(
     rolls_per_hour_limit=17,
     rt_reset_minutes=612,
 )
+KAKERA_STATE = KakeraStateSnapshot(
+    kakera_balance=7_673,
+    badges=(
+        BadgeLevel(badge_name="bronze", level=4, max_reached=True),
+        BadgeLevel(badge_name="silver", level=3, max_reached=False),
+        BadgeLevel(badge_name="gold", level=2, max_reached=True),
+    ),
+)
+ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -195,6 +207,216 @@ def _timer_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         for table in tables
     }
+
+
+def _kakera_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "kakera_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def test_public_kakera_import_preserves_compatibility_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_kakera_state(
+        KAKERA_STATE,
+        "  Server  ",
+        "  Account  ",
+        "kakera payload",
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        assert _kakera_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "kakera_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, kakera_balance, badges_json, observed_at, import_event_id
+            FROM kakera_state_observations
+            WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == (
+            "kakera_state",
+            "discord",
+            result.observed_at.isoformat(),
+            "kakera payload",
+        )
+        assert observation["id"] > 0
+        assert observation["account_context_id"] > 0
+        assert observation["kakera_balance"] == 7_673
+        assert json.loads(observation["badges_json"]) == [badge.model_dump() for badge in KAKERA_STATE.badges]
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+
+
+def test_kakera_helper_uses_supplied_connection_and_returns_actual_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakera_state_with_connection(
+            connection,
+            state=KAKERA_STATE,
+            server=" Server ",
+            account=" Account ",
+            raw="raw kakera",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        assert is_dataclass(imported)
+        assert [field.name for field in fields(imported)] == [
+            "import_event_id",
+            "kakera_state_observation_id",
+        ]
+        assert imported.import_event_id > 0
+        assert imported.kakera_state_observation_id > 0
+        assert connection.in_transaction is True
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM kakera_state_observations").fetchone()[0] == 1
+        observation = connection.execute(
+            """
+            SELECT kakera_state_observations.*, account_contexts.normalized_name AS account_name
+            FROM kakera_state_observations
+            JOIN account_contexts ON account_contexts.id = kakera_state_observations.account_context_id
+            WHERE kakera_state_observations.id = ?
+            """,
+            (imported.kakera_state_observation_id,),
+        ).fetchone()
+        assert observation["account_name"] == "account"
+        assert observation["kakera_balance"] == 7_673
+        assert json.loads(observation["badges_json"]) == [badge.model_dump() for badge in KAKERA_STATE.badges]
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM kakera_state_observations").fetchone()[0] == 0
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == imported.import_event_id
+        assert connection.execute(
+            "SELECT id FROM kakera_state_observations WHERE id = ?",
+            (imported.kakera_state_observation_id,),
+        ).fetchone()[0] == imported.kakera_state_observation_id
+
+
+def test_kakera_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_kakera_state_with_connection(
+            connection,
+            state=ZERO_KAKERA_STATE,
+            server="Server",
+            account="Account",
+            raw="rollback kakera",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _kakera_state_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "kakera_state_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_kakera_helper_reuses_existing_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_kakera_state(ZERO_KAKERA_STATE, "Server", "Account", "existing", "discord")
+
+    with connect(database_path) as connection:
+        before = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _kakera_state_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakera_state_with_connection(
+            connection,
+            state=KAKERA_STATE,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="reused contexts",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert (current["server_id"], current["account_id"]) == (before["server_id"], before["account_id"])
+        assert (current["server_name"], current["account_name"]) == ("SERVER", "ACCOUNT")
+        assert _kakera_state_counts(connection)["server_contexts"] == 1
+        assert _kakera_state_counts(connection)["account_contexts"] == 1
+        assert imported.import_event_id > 0
+        assert imported.kakera_state_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(before)
+        assert _kakera_state_counts(connection) == before_counts
 
 
 def test_roll_helper_writes_all_projections_on_supplied_connection(tmp_path) -> None:
