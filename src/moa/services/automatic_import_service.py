@@ -9,6 +9,7 @@ from moa.parser.mudae import MudaeTextParser
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
+from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -74,6 +75,20 @@ class DurableTimerImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableKakeraImportContext:
+    """Durable lifecycle, scope, and payload metadata for one Kakera import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -88,6 +103,7 @@ class AutomaticImportService:
         settings_projection_coordinator: SettingsProjectionCoordinator | None = None,
         infokl_projection_coordinator: InfoklProjectionCoordinator | None = None,
         timer_projection_coordinator: TimerProjectionCoordinator | None = None,
+        kakera_state_projection_coordinator: KakeraStateProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -98,6 +114,7 @@ class AutomaticImportService:
         self._settings_projection_coordinator = settings_projection_coordinator
         self._infokl_projection_coordinator = infokl_projection_coordinator
         self._timer_projection_coordinator = timer_projection_coordinator
+        self._kakera_state_projection_coordinator = kakera_state_projection_coordinator
 
     def import_message(
         self,
@@ -115,6 +132,7 @@ class AutomaticImportService:
         durable_settings_context: DurableSettingsImportContext | None = None,
         durable_infokl_context: DurableInfoklImportContext | None = None,
         durable_timer_context: DurableTimerImportContext | None = None,
+        durable_kakera_context: DurableKakeraImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -143,7 +161,11 @@ class AutomaticImportService:
         server = (
             durable_timer_context.server
             if kind == "timers" and durable_timer_context is not None
-            else self._require(server_name, "server", kind)
+            else (
+                durable_kakera_context.server
+                if kind == "kakera" and durable_kakera_context is not None
+                else self._require(server_name, "server", kind)
+            )
         )
         transaction_commands = {
             "gift_kakera": "givek",
@@ -499,7 +521,11 @@ class AutomaticImportService:
         account = (
             durable_timer_context.account
             if kind == "timers" and durable_timer_context is not None
-            else self._require(account_name, "account", kind)
+            else (
+                durable_kakera_context.account
+                if kind == "kakera" and durable_kakera_context is not None
+                else self._require(account_name, "account", kind)
+            )
         )
         if kind == "bonus":
             bonus = self._parser.parse_player_bonus(raw_message)
@@ -523,8 +549,41 @@ class AutomaticImportService:
             )
         if kind == "kakera":
             state = self._parser.parse_kakera_state(raw_message)
-            self._catalog.import_kakera_state(state, server, account, raw_message, source)
-            return AutomaticImportResult(kind=kind, imported_count=len(state.badges), message="Imported Kakera state.")
+            if durable_kakera_context is None:
+                self._catalog.import_kakera_state(state, server, account, raw_message, source)
+                imported_count = len(state.badges)
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._kakera_state_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A KakeraStateProjectionCoordinator is required for a durable Kakera import."
+                    )
+                coordinated = coordinator.coordinate_kakera_state(
+                    source_event_id=durable_kakera_context.source_event_id,
+                    attempt_id=durable_kakera_context.attempt_id,
+                    state=state,
+                    server=durable_kakera_context.server,
+                    account=durable_kakera_context.account,
+                    raw=durable_kakera_context.raw,
+                    source=durable_kakera_context.source,
+                    observed_at=durable_kakera_context.observed_at,
+                    finished_at=durable_kakera_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported Kakera state.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
+            )
         if kind == "personalrare":
             self._catalog.import_personal_rare(
                 self._parser.parse_personal_rare(raw_message), server, account, raw_message, source
