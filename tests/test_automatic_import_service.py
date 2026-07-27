@@ -11,6 +11,7 @@ from moa.models.character import (
     RollObservation,
     ServerSettingMetric,
     ServerSettingsSnapshot,
+    TimerStateSnapshot,
 )
 from moa.models.catalog import AutomaticImportResult
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
@@ -24,6 +25,7 @@ from moa.services.automatic_import_service import (
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
+    DurableTimerImportContext,
 )
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import (
@@ -46,11 +48,16 @@ from moa.services.settings_projection_coordinator import (
     SettingsProjectionCoordinator,
     SettingsProjectionResult,
 )
+from moa.services.timer_projection_coordinator import (
+    TimerProjectionCoordinator,
+    TimerProjectionResult,
+)
 
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
 CLAIM_MESSAGE = "ernieuuu and Pakunoda are now married!"
+TIMER_MESSAGE = "You have **17** rolls left. Next rolls reset in **49** min."
 SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -80,6 +87,35 @@ INFOKL_SETTINGS = KakeralootSettingsSnapshot(
     loot_cost=500,
     quantity_quality_base_cost=1000,
     quantity_quality_level_increment=250,
+)
+
+TIMER_STATE = TimerStateSnapshot(
+    can_claim_now=None,
+    claim_reset_minutes=None,
+    rolls_left=17,
+    rolls_reset_minutes=49,
+    rolls_reset_stock=None,
+    vote_reset_minutes=None,
+    daily_reset_minutes=None,
+    daily_kakera_ready=None,
+    rt_available=None,
+    can_react_kakera_now=None,
+    reaction_power_percent=None,
+    kakera_button_power_cost_percent=None,
+    soulmate_button_power_cost_percent=None,
+    kakera_stock=None,
+    gold_key_stock_remaining=None,
+    gold_key_reset_minutes=None,
+    bku_reset_probability_percent=None,
+    oh_remaining=None,
+    oc_remaining=None,
+    oq_remaining=None,
+    oq_stored=None,
+    ot_remaining=None,
+    ouro_refill_minutes=None,
+    rolls_reset_status=None,
+    rolls_per_hour_limit=None,
+    rt_reset_minutes=None,
 )
 
 PROFILE = ProfileSnapshot(
@@ -327,6 +363,53 @@ def _durable_infokl_importer(tmp_path):
         infokl_projection_coordinator=coordinator,
     )
     return service, parser, received.source_event_id, attempt.attempt_id
+
+
+def _durable_timer_importer(tmp_path):
+    database_path = tmp_path / "durable-timer.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = TimerProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "timer-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "timer-payload-hash", "revision-1"
+        ),
+        event_key="timer-event",
+        event_kind="message_create",
+        raw_text=TIMER_MESSAGE,
+        payload_json='{"content":"timer payload"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    discord_repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        account_name="ernieuuu",
+        recorded_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        timer_projection_coordinator=coordinator,
+    )
+    return database_path, service, received.source_event_id, attempt.attempt_id
 
 
 def test_automatic_import_routes_top_pages_without_server_context(tmp_path) -> None:
@@ -586,6 +669,289 @@ def test_automatic_import_non_durable_roll_keeps_catalog_path_and_neutral_result
     assert result.import_event_id is None
     assert result.replay_skipped is False
     assert result.durable_success_recorded is False
+
+
+def test_automatic_import_non_durable_timer_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_timer_state.return_value = TIMER_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        timer_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        TIMER_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="timers",
+    )
+
+    parser.parse_timer_state.assert_called_once_with(TIMER_MESSAGE)
+    catalog.import_timer_state.assert_called_once_with(
+        TIMER_STATE,
+        "Lake",
+        "ernieuuu",
+        TIMER_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_timer_state.assert_not_called()
+    assert result.kind == "timers"
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_timer_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_timer_state.return_value = TIMER_STATE
+    coordinator = Mock()
+    coordinator.coordinate_timer_state.return_value = TimerProjectionResult(
+        imported_count=1,
+        import_event_id=82,
+        timer_state_observation_id=83,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("timer_state_observations", 83),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        timer_projection_coordinator=coordinator,
+    )
+    context = DurableTimerImportContext(
+        source_event_id=71,
+        attempt_id=73,
+        server="Lake",
+        account="ernieuuu",
+        raw="persisted timer payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        TIMER_MESSAGE,
+        "caller-source",
+        detected_kind="timers",
+        durable_timer_context=context,
+    )
+
+    parser.parse_timer_state.assert_called_once_with(TIMER_MESSAGE)
+    coordinator.coordinate_timer_state.assert_called_once_with(
+        source_event_id=71,
+        attempt_id=73,
+        state=TIMER_STATE,
+        server="Lake",
+        account="ernieuuu",
+        raw="persisted timer payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_timer_state.assert_not_called()
+    assert result.kind == "timers"
+    assert result.imported_count == 1
+    assert result.import_event_id == 82
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_timer_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_timer_state.return_value = TIMER_STATE
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+    context = DurableTimerImportContext(
+        source_event_id=71,
+        attempt_id=73,
+        server="Lake",
+        account="ernieuuu",
+        raw=TIMER_MESSAGE,
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    with pytest.raises(RuntimeError, match="TimerProjectionCoordinator"):
+        service.import_message(
+            TIMER_MESSAGE,
+            "caller-source",
+            detected_kind="timers",
+            durable_timer_context=context,
+        )
+
+    parser.parse_timer_state.assert_called_once_with(TIMER_MESSAGE)
+    catalog.import_timer_state.assert_not_called()
+
+
+def test_automatic_import_durable_timer_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_timer_state.return_value = TIMER_STATE
+    coordinator = Mock()
+    coordinator.coordinate_timer_state.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        timer_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            TIMER_MESSAGE,
+            "caller-source",
+            detected_kind="timers",
+            durable_timer_context=DurableTimerImportContext(
+                source_event_id=71,
+                attempt_id=73,
+                server="Lake",
+                account="ernieuuu",
+                raw=TIMER_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_timer_state.assert_called_once_with(TIMER_MESSAGE)
+    catalog.import_timer_state.assert_not_called()
+
+
+def test_automatic_import_durable_timer_parse_failure_precedes_any_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_timer_state.side_effect = ValueError("invalid timer response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        timer_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid timer response"):
+        service.import_message(
+            TIMER_MESSAGE,
+            "caller-source",
+            detected_kind="timers",
+            durable_timer_context=DurableTimerImportContext(
+                source_event_id=71,
+                attempt_id=73,
+                server="Lake",
+                account="ernieuuu",
+                raw=TIMER_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    coordinator.coordinate_timer_state.assert_not_called()
+    catalog.import_timer_state.assert_not_called()
+
+
+def test_automatic_import_real_durable_timer_first_processing_and_replay_are_atomic(tmp_path) -> None:
+    database_path, service, source_event_id, attempt_id = _durable_timer_importer(tmp_path)
+    context = DurableTimerImportContext(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        server="Lake",
+        account="ernieuuu",
+        raw=TIMER_MESSAGE,
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    first = service.import_message(
+        TIMER_MESSAGE,
+        "caller-source",
+        detected_kind="timers",
+        durable_timer_context=context,
+    )
+
+    assert first.kind == "timers"
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert first.replay_skipped is False
+    assert first.durable_success_recorded is True
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM timer_state_observations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        link = connection.execute(
+            "SELECT projection_table, projection_row_id, state "
+            "FROM discord_projection_links"
+        ).fetchone()
+        assert tuple(link) == (
+            "timer_state_observations",
+            connection.execute("SELECT id FROM timer_state_observations").fetchone()[0],
+            "completed",
+        )
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", first.import_event_id)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "succeeded"
+        before_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM timer_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts)"
+            ).fetchone()
+        )
+
+    replay = service.import_message(
+        TIMER_MESSAGE,
+        "caller-source",
+        detected_kind="timers",
+        durable_timer_context=DurableTimerImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=TIMER_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert replay.kind == "timers"
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+    with sqlite3.connect(database_path) as connection:
+        after_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM timer_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts)"
+            ).fetchone()
+        )
+    assert after_replay == before_replay
 
 
 def test_automatic_import_durable_settings_delegates_once_with_all_context() -> None:
