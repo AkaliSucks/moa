@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,11 +15,12 @@ from moa.core.config import ConfigAccount, ConfigService, MOAConfig
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
-from moa.services.discord_listener_service import DiscordListenerService
+from moa.services.discord_listener_service import DiscordCommandContext, DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 
 
 def test_extract_message_text_flattens_discord_embed_content() -> None:
@@ -1255,6 +1257,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            timer_projection_coordinator=TimerProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1303,6 +1309,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            timer_projection_coordinator=TimerProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1345,6 +1355,22 @@ def _durable_roll_message(
         content=content,
         embeds=(),
         edited_at=edited_at,
+    )
+
+
+def _durable_timer_message(message_id: int = 1210):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(
+            name="rolls", user=SimpleNamespace(id=456)
+        ),
+        # Sanitized real Mudae `$tu` response.
+        content="You have **17** rolls left. Next rolls reset in **49** min.",
+        embeds=(),
+        edited_at=None,
     )
 
 
@@ -1460,6 +1486,21 @@ def _account_attribution_rows(database_path):
             "FROM discord_source_event_account_attributions ORDER BY source_event_id"
         ).fetchall()
     return [tuple(row) for row in rows]
+
+
+def _durable_timer_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'timer_state'), "
+                "(SELECT COUNT(*) FROM timer_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
 
 
 def test_listener_records_unique_roll_account_before_seen_payloads(tmp_path) -> None:
@@ -1793,6 +1834,256 @@ def test_listener_receives_new_bot_message_before_importing(tmp_path) -> None:
     assert len(_receipt_rows(database_path, "roll_observations")) == 1
     assert len(_receipt_rows(database_path, "server_character_observations")) == 1
     assert len(_receipt_rows(database_path, "discord_projection_links")) == 2
+
+
+def test_listener_first_durable_timer_coordinates_with_exact_context(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_timer = Mock(wraps=listener._catalog.import_timer_state)
+    listener._catalog.import_timer_state = direct_timer
+    message = _durable_timer_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_timer_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1210"
+    assert context.observed_at.tzinfo is not None
+    assert context.observed_at.utcoffset() is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.finished_at.utcoffset() is not None
+    assert context.observed_at <= context.finished_at
+    importer.import_message.assert_called_once()
+    direct_timer.assert_not_called()
+
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM discord_source_events").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT status FROM discord_source_event_server_attributions"
+        ).fetchone()[0] == "resolved"
+        assert tuple(
+            connection.execute(
+                "SELECT status, server_name, account_name "
+                "FROM discord_source_event_account_attributions"
+            ).fetchone()
+        ) == ("resolved", "Test Server", "user_a")
+        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "succeeded"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'timer_state'"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM timer_state_observations").fetchone()[0] == 1
+        assert tuple(
+            connection.execute(
+                "SELECT projection_table, state FROM discord_projection_links"
+            ).fetchone()
+        ) == ("timer_state_observations", "completed")
+        source_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()
+        import_event_id = connection.execute(
+            "SELECT id FROM import_events WHERE kind = 'timer_state'"
+        ).fetchone()[0]
+        assert tuple(source_event) == ("succeeded", import_event_id)
+
+
+def test_listener_succeeded_durable_timer_replay_reuses_attribution_without_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_timer_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_timer_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+    first_server = _server_attribution_rows(database_path)
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_timer_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    assert _durable_timer_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert _server_attribution_rows(database_path) == first_server
+
+
+def test_listener_durable_timer_missing_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "timer-unresolved.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    message = _durable_timer_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert _durable_timer_counts(database_path) == (1, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_timer_ambiguous_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "timer-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    for user_id in (456, 789):
+        asyncio.run(
+            listener.handle_message(
+                SimpleNamespace(
+                    id=1300 + user_id,
+                    guild=SimpleNamespace(id=123),
+                    channel=SimpleNamespace(id=900),
+                    author=SimpleNamespace(bot=False, id=user_id),
+                    content="$tu",
+                )
+            )
+        )
+    message = _durable_timer_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _durable_timer_counts(database_path) == (1, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_timer_conflicting_persisted_account_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_timer_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_account = _account_attribution_rows(database_path)[0]
+
+    importer = Mock()
+    restarted_listener, _restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "timer-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="rolls", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0] == first_account
+    assert _durable_timer_counts(database_path) == (1, 1, 1, 1, 1, 1)
+
+
+def test_listener_durable_timer_does_not_use_active_account_or_channel_context(
+    tmp_path,
+) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "timer-weak-context.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    listener._contexts[900] = DiscordCommandContext(
+        server_id="123",
+        user_id="",
+        identity=ConfigAccount(
+            server="Test Server",
+            account="user_a",
+            discord_server_id="123",
+        ),
+        captured_at=time.monotonic(),
+        expected_kind="timers",
+        evidence_source="active_account",
+    )
+    message = _durable_timer_message()
+    message.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1] == "unresolved"
+    assert _durable_timer_counts(database_path) == (1, 0, 0, 0, 0, 0)
+
+
+def test_listener_durable_timer_dispatch_failure_does_not_fallback_to_direct_import(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    listener._importer._timer_projection_coordinator = None
+    direct_timer = Mock(wraps=listener._catalog.import_timer_state)
+    listener._catalog.import_timer_state = direct_timer
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+
+    asyncio.run(listener.handle_bot_response(_durable_timer_message()))
+
+    importer.import_message.assert_called_once()
+    direct_timer.assert_not_called()
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "failed"
+    assert attempt["retryable"] == 1
+    assert event["status"] == "failed"
+    assert _receipt_rows(database_path, "timer_state_observations") == []
+    assert _import_event_rows(database_path, "timer_state") == []
+
+
+def test_listener_non_durable_timer_keeps_direct_catalog_path(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_timer_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_timer_context" not in kwargs
+    assert catalog.timer_state("Test Server", "user_a") is not None
 
 
 def test_listener_first_durable_profile_coordinates_and_owns_success(tmp_path) -> None:
