@@ -14,6 +14,7 @@ from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinat
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
@@ -170,6 +171,12 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     database_path = tmp_path / "moa.db"
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
     captured: dict[str, object] = {}
+    timer_coordinators: list[TimerProjectionCoordinator] = []
+
+    class RecordingTimerProjectionCoordinator(TimerProjectionCoordinator):
+        def __init__(self, *repositories):
+            timer_coordinators.append(self)
+            super().__init__(*repositories)
 
     class FakeListener:
         def __init__(self, **kwargs):
@@ -180,6 +187,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             captured["mudae_user_id"] = mudae_user_id
 
     monkeypatch.setattr(main, "DiscordListenerService", FakeListener)
+    monkeypatch.setattr(main, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
 
     result = CliRunner().invoke(
         main.app,
@@ -195,6 +203,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     claim_coordinator = importer._claim_projection_coordinator
     settings_coordinator = importer._settings_projection_coordinator
     infokl_coordinator = importer._infokl_projection_coordinator
+    timer_coordinator = importer._timer_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -204,6 +213,8 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(claim_coordinator, ClaimProjectionCoordinator)
     assert isinstance(settings_coordinator, SettingsProjectionCoordinator)
     assert isinstance(infokl_coordinator, InfoklProjectionCoordinator)
+    assert isinstance(timer_coordinator, TimerProjectionCoordinator)
+    assert timer_coordinators == [timer_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -221,6 +232,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert infokl_coordinator._catalog is catalog_service._repository
     assert infokl_coordinator._discord is discord_repository
     assert infokl_coordinator._database_path == database_path
+    assert timer_coordinator._catalog is catalog_service._repository
+    assert timer_coordinator._discord is discord_repository
+    assert timer_coordinator._database_path == database_path
+    assert timer_coordinators[0]._catalog is catalog_service._repository
+    assert timer_coordinators[0]._discord is discord_repository
     assert captured["catalog_service"] is importer._catalog
     assert captured["token"] == "test-token"
     assert captured["mudae_user_id"] == 999
