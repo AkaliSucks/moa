@@ -12,6 +12,7 @@ from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinat
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,20 @@ class DurableInfoklImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableTimerImportContext:
+    """Durable lifecycle, scope, and payload metadata for one timer import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -72,6 +87,7 @@ class AutomaticImportService:
         claim_projection_coordinator: ClaimProjectionCoordinator | None = None,
         settings_projection_coordinator: SettingsProjectionCoordinator | None = None,
         infokl_projection_coordinator: InfoklProjectionCoordinator | None = None,
+        timer_projection_coordinator: TimerProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -81,6 +97,7 @@ class AutomaticImportService:
         self._claim_projection_coordinator = claim_projection_coordinator
         self._settings_projection_coordinator = settings_projection_coordinator
         self._infokl_projection_coordinator = infokl_projection_coordinator
+        self._timer_projection_coordinator = timer_projection_coordinator
 
     def import_message(
         self,
@@ -97,6 +114,7 @@ class AutomaticImportService:
         durable_claim_context: DurableClaimImportContext | None = None,
         durable_settings_context: DurableSettingsImportContext | None = None,
         durable_infokl_context: DurableInfoklImportContext | None = None,
+        durable_timer_context: DurableTimerImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -122,7 +140,11 @@ class AutomaticImportService:
                 message=f"Imported {result.characters_imported} ranked characters.",
             )
 
-        server = self._require(server_name, "server", kind)
+        server = (
+            durable_timer_context.server
+            if kind == "timers" and durable_timer_context is not None
+            else self._require(server_name, "server", kind)
+        )
         transaction_commands = {
             "gift_kakera": "givek",
             "gift_spheres": "givesp",
@@ -474,7 +496,11 @@ class AutomaticImportService:
                 ),
             )
 
-        account = self._require(account_name, "account", kind)
+        account = (
+            durable_timer_context.account
+            if kind == "timers" and durable_timer_context is not None
+            else self._require(account_name, "account", kind)
+        )
         if kind == "bonus":
             bonus = self._parser.parse_player_bonus(raw_message)
             self._catalog.import_player_bonus(bonus, server, account, raw_message, source)
@@ -505,10 +531,42 @@ class AutomaticImportService:
             )
             return AutomaticImportResult(kind=kind, imported_count=1, message="Imported personal rarity.")
         if kind == "timers":
-            self._catalog.import_timer_state(
-                self._parser.parse_timer_state(raw_message), server, account, raw_message, source
+            state = self._parser.parse_timer_state(raw_message)
+            if durable_timer_context is None:
+                self._catalog.import_timer_state(state, server, account, raw_message, source)
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._timer_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A TimerProjectionCoordinator is required for a durable timer import."
+                    )
+                coordinated = coordinator.coordinate_timer_state(
+                    source_event_id=durable_timer_context.source_event_id,
+                    attempt_id=durable_timer_context.attempt_id,
+                    state=state,
+                    server=durable_timer_context.server,
+                    account=durable_timer_context.account,
+                    raw=durable_timer_context.raw,
+                    source=durable_timer_context.source,
+                    observed_at=durable_timer_context.observed_at,
+                    finished_at=durable_timer_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported action-timer snapshot.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported action-timer snapshot.")
         if kind == "towerstate":
             self._catalog.import_tower_state(
                 self._parser.parse_tower_state(raw_message), server, account, raw_message, source
