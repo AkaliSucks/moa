@@ -5,7 +5,9 @@ from unittest.mock import Mock, call
 import pytest
 
 from moa.models.character import (
+    BadgeLevel,
     ClaimConfirmation,
+    KakeraStateSnapshot,
     KakeralootSettingsSnapshot,
     ProfileSnapshot,
     RollObservation,
@@ -22,6 +24,7 @@ from moa.services.automatic_import_service import (
     AutomaticImportService,
     DurableClaimImportContext,
     DurableInfoklImportContext,
+    DurableKakeraImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -35,6 +38,10 @@ from moa.services.claim_projection_coordinator import (
 from moa.services.infokl_projection_coordinator import (
     InfoklProjectionCoordinator,
     InfoklProjectionResult,
+)
+from moa.services.kakera_state_projection_coordinator import (
+    KakeraStateProjectionCoordinator,
+    KakeraStateProjectionResult,
 )
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
@@ -58,6 +65,12 @@ ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
 CLAIM_MESSAGE = "ernieuuu and Pakunoda are now married!"
 TIMER_MESSAGE = "You have **17** rolls left. Next rolls reset in **49** min."
+KAKERA_MESSAGE = (
+    "You have 7,673:kakera:!\n"
+    ":BronzeIV: Bronze IV · Max reached!\n"
+    "Silver III · Max reached!\n"
+    "Gold II · 10,000 kakera remaining"
+)
 SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -88,6 +101,16 @@ INFOKL_SETTINGS = KakeralootSettingsSnapshot(
     quantity_quality_base_cost=1000,
     quantity_quality_level_increment=250,
 )
+
+KAKERA_STATE = KakeraStateSnapshot(
+    kakera_balance=7_673,
+    badges=(
+        BadgeLevel(badge_name="bronze", level=4, max_reached=True),
+        BadgeLevel(badge_name="silver", level=3, max_reached=True),
+        BadgeLevel(badge_name="gold", level=2, max_reached=False),
+    ),
+)
+ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
 
 TIMER_STATE = TimerStateSnapshot(
     can_claim_now=None,
@@ -412,6 +435,53 @@ def _durable_timer_importer(tmp_path):
     return database_path, service, received.source_event_id, attempt.attempt_id
 
 
+def _durable_kakera_importer(tmp_path):
+    database_path = tmp_path / "durable-kakera.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = KakeraStateProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "kakera-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "kakera-payload-hash", "revision-1"
+        ),
+        event_key="kakera-event",
+        event_kind="message_create",
+        raw_text=KAKERA_MESSAGE,
+        payload_json='{"content":"kakera payload"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    discord_repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        account_name="ernieuuu",
+        recorded_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        kakera_state_projection_coordinator=coordinator,
+    )
+    return database_path, service, received.source_event_id, attempt.attempt_id
+
+
 def test_automatic_import_routes_top_pages_without_server_context(tmp_path) -> None:
     catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
     service = AutomaticImportService(catalog)
@@ -488,6 +558,338 @@ def test_automatic_import_persists_rankless_rolls_for_future_history(tmp_path) -
     assert result.imported_count == 1
     assert rolls[0].character.name == "Hips"
     assert rolls[0].claim_rank is None
+
+
+def test_automatic_import_non_durable_kakera_keeps_catalog_path_and_neutral_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakera_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERA_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="kakera",
+    )
+
+    parser.parse_kakera_state.assert_called_once_with(KAKERA_MESSAGE)
+    catalog.import_kakera_state.assert_called_once_with(
+        KAKERA_STATE,
+        "Lake",
+        "ernieuuu",
+        KAKERA_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_kakera_state.assert_not_called()
+    assert result.kind == "kakera"
+    assert result.imported_count == len(KAKERA_STATE.badges)
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_kakera_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    coordinator.coordinate_kakera_state.return_value = KakeraStateProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        kakera_state_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("kakera_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakera_state_projection_coordinator=coordinator,
+    )
+    context = DurableKakeraImportContext(
+        source_event_id=81,
+        attempt_id=83,
+        server="Lake",
+        account="ernieuuu",
+        raw="persisted kakera payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        KAKERA_MESSAGE,
+        "caller-source",
+        detected_kind="kakera",
+        durable_kakera_context=context,
+    )
+
+    parser.parse_kakera_state.assert_called_once_with(KAKERA_MESSAGE)
+    coordinator.coordinate_kakera_state.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=83,
+        state=KAKERA_STATE,
+        server="Lake",
+        account="ernieuuu",
+        raw="persisted kakera payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_kakera_state.assert_not_called()
+    assert result.kind == "kakera"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+@pytest.mark.parametrize("state", (KAKERA_STATE, ZERO_KAKERA_STATE))
+def test_automatic_import_durable_kakera_preserves_snapshot_values(state) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_kakera_state.return_value = KakeraStateProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        kakera_state_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("kakera_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakera_state_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        KAKERA_MESSAGE,
+        "discord",
+        detected_kind="kakera",
+        durable_kakera_context=DurableKakeraImportContext(
+            source_event_id=81,
+            attempt_id=83,
+            server="Lake",
+            account="ernieuuu",
+            raw=KAKERA_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert coordinator.coordinate_kakera_state.call_args.kwargs["state"] is state
+
+
+def test_automatic_import_durable_kakera_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="KakeraStateProjectionCoordinator"):
+        service.import_message(
+            KAKERA_MESSAGE,
+            "discord",
+            detected_kind="kakera",
+            durable_kakera_context=DurableKakeraImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=KAKERA_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_kakera_state.assert_called_once_with(KAKERA_MESSAGE)
+    catalog.import_kakera_state.assert_not_called()
+
+
+def test_automatic_import_durable_kakera_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    coordinator.coordinate_kakera_state.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakera_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            KAKERA_MESSAGE,
+            "discord",
+            detected_kind="kakera",
+            durable_kakera_context=DurableKakeraImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=KAKERA_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_kakera_state.assert_called_once_with(KAKERA_MESSAGE)
+    catalog.import_kakera_state.assert_not_called()
+
+
+def test_automatic_import_durable_kakera_parse_failure_precedes_any_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.side_effect = ValueError("invalid Kakera response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakera_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid Kakera response"):
+        service.import_message(
+            KAKERA_MESSAGE,
+            "discord",
+            detected_kind="kakera",
+            durable_kakera_context=DurableKakeraImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=KAKERA_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    coordinator.coordinate_kakera_state.assert_not_called()
+    catalog.import_kakera_state.assert_not_called()
+
+
+def test_automatic_import_real_durable_kakera_first_processing_and_replay_are_atomic(tmp_path) -> None:
+    database_path, service, source_event_id, attempt_id = _durable_kakera_importer(tmp_path)
+    context = DurableKakeraImportContext(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        server="Lake",
+        account="ernieuuu",
+        raw=KAKERA_MESSAGE,
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    first = service.import_message(
+        KAKERA_MESSAGE,
+        "caller-source",
+        detected_kind="kakera",
+        durable_kakera_context=context,
+    )
+
+    assert first.kind == "kakera"
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert first.replay_skipped is False
+    assert first.durable_success_recorded is True
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM kakera_state_observations").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_server_attributions"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 1
+        link = connection.execute(
+            "SELECT projection_table, projection_row_id, state "
+            "FROM discord_projection_links"
+        ).fetchone()
+        assert tuple(link) == (
+            "kakera_state_observations",
+            connection.execute("SELECT id FROM kakera_state_observations").fetchone()[0],
+            "completed",
+        )
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", first.import_event_id)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "succeeded"
+        before_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM kakera_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM discord_source_event_server_attributions), "
+                "(SELECT COUNT(*) FROM discord_source_event_account_attributions)"
+            ).fetchone()
+        )
+
+    replay = service.import_message(
+        KAKERA_MESSAGE,
+        "caller-source",
+        detected_kind="kakera",
+        durable_kakera_context=DurableKakeraImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=KAKERA_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert replay.kind == "kakera"
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+    with sqlite3.connect(database_path) as connection:
+        after_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM kakera_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM discord_source_event_server_attributions), "
+                "(SELECT COUNT(*) FROM discord_source_event_account_attributions)"
+            ).fetchone()
+        )
+    assert after_replay == before_replay
 
 
 def test_automatic_import_durable_roll_delegates_once_with_all_context(tmp_path) -> None:
