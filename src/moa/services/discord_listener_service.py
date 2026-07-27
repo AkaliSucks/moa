@@ -31,6 +31,7 @@ from moa.services.automatic_import_service import (
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
+    DurableTimerImportContext,
 )
 from moa.services.catalog_service import CatalogService
 
@@ -105,8 +106,8 @@ class DiscordListenerService:
         "hg",
         "husbandog",
     }
-    _DURABLE_IMPORT_KINDS = {"claim", "infokl", "profile", "roll", "settings"}
-    _DURABLE_ACCOUNT_KINDS = {"claim", "profile", "roll"}
+    _DURABLE_IMPORT_KINDS = {"claim", "infokl", "profile", "roll", "settings", "timers"}
+    _DURABLE_ACCOUNT_KINDS = {"claim", "profile", "roll", "timers"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -808,6 +809,7 @@ class DiscordListenerService:
                 "detected_kind": kind,
             }
             if self._is_durable_import_kind(kind) and received_event is not None:
+                observed_at = datetime.now(timezone.utc)
                 finished_at = datetime.now(timezone.utc)
                 context_kwargs = {
                     "source_event_id": received_event.source_event_id,
@@ -832,10 +834,25 @@ class DiscordListenerService:
                     import_kwargs["durable_infokl_context"] = DurableInfoklImportContext(
                         **context_kwargs
                     )
-                else:
+                elif kind == "settings":
                     import_kwargs["durable_settings_context"] = DurableSettingsImportContext(
                         **context_kwargs
                     )
+                elif kind == "timers":
+                    import_kwargs["durable_timer_context"] = DurableTimerImportContext(
+                        source_event_id=received_event.source_event_id,
+                        attempt_id=(
+                            processing_attempt.attempt_id if processing_attempt is not None else None
+                        ),
+                        server=import_identity.server,
+                        account=import_identity.account,
+                        raw=raw_message,
+                        source=source,
+                        observed_at=observed_at,
+                        finished_at=finished_at,
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported durable import kind: {kind}")
             result = self._importer.import_message(
                 raw_message,
                 source,
