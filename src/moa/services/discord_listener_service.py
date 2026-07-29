@@ -33,6 +33,7 @@ from moa.services.automatic_import_service import (
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
+    DurableSphereResultImportContext,
     DurableTimerImportContext,
     DurableTowerStateImportContext,
 )
@@ -117,6 +118,7 @@ class DiscordListenerService:
         "profile",
         "roll",
         "settings",
+        "sphere_result",
         "timers",
         "towerstate",
     }
@@ -125,6 +127,7 @@ class DiscordListenerService:
         "kakera",
         "mudapins",
         "profile",
+        "sphere_result",
         "roll",
         "timers",
         "towerstate",
@@ -592,6 +595,14 @@ class DiscordListenerService:
                     attribution.status,
                 )
                 return
+            if kind == "sphere_result":
+                self._logger.info(
+                    "Deferred sphere-result source event %s because server attribution is %s; "
+                    "no processing attempt was started",
+                    received_event.source_event_id,
+                    attribution.status,
+                )
+                return
             self._record_unresolved_attribution(
                 received_event,
                 message.id,
@@ -923,6 +934,23 @@ class DiscordListenerService:
                             finished_at=finished_at,
                         )
                     )
+                elif kind == "sphere_result":
+                    import_kwargs["durable_sphere_result_context"] = (
+                        DurableSphereResultImportContext(
+                            source_event_id=received_event.source_event_id,
+                            attempt_id=(
+                                processing_attempt.attempt_id
+                                if processing_attempt is not None
+                                else None
+                            ),
+                            server=import_identity.server,
+                            account=import_identity.account,
+                            raw=raw_message,
+                            source=source,
+                            observed_at=observed_at,
+                            finished_at=finished_at,
+                        )
+                    )
                 else:
                     raise RuntimeError(f"Unsupported durable import kind: {kind}")
             result = self._importer.import_message(
@@ -1115,6 +1143,10 @@ class DiscordListenerService:
             return _ServerAttributionDecision("resolved", next(iter(strong_names)), True)
 
         guild_names = self._server_names_for_guild(str(message.guild.id))
+        if kind == "sphere_result":
+            if len(guild_names) > 1:
+                return _ServerAttributionDecision("ambiguous", None)
+            return _ServerAttributionDecision("unresolved", None)
         if len(guild_names) == 1:
             return _ServerAttributionDecision("resolved", next(iter(guild_names)), True)
         if len(guild_names) > 1:
