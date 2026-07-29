@@ -17,6 +17,7 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.discord_listener_service import DiscordCommandContext, DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
+from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -1261,6 +1262,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            kakera_state_projection_coordinator=KakeraStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1310,6 +1315,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             timer_projection_coordinator=TimerProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            kakera_state_projection_coordinator=KakeraStateProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1369,6 +1378,31 @@ def _durable_timer_message(message_id: int = 1210):
         ),
         # Sanitized real Mudae `$tu` response.
         content="You have **17** rolls left. Next rolls reset in **49** min.",
+        embeds=(),
+        edited_at=None,
+    )
+
+
+def _durable_kakera_message(message_id: int = 1215, *, interaction=True):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="k", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$k` response.
+        content=(
+            "How to collect kakera in your server (change the options with $togglekakera):\n"
+            "Melt your kakera for rewards.\n"
+            "You have **7,673** :kakera: !\n"
+            ":BronzeIV: **Bronze IV** · Max reached!\n"
+            ":SilverIV: **Silver IV** · Max reached!\n"
+            ":GoldIV: **Gold IV** · Max reached!"
+        ),
         embeds=(),
         edited_at=None,
     )
@@ -1498,6 +1532,22 @@ def _durable_timer_counts(database_path):
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'timer_state'), "
                 "(SELECT COUNT(*) FROM timer_state_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_kakera_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'kakera_state'), "
+                "(SELECT COUNT(*) FROM kakera_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
             ).fetchone()
         )
@@ -2060,6 +2110,261 @@ def test_listener_durable_timer_dispatch_failure_does_not_fallback_to_direct_imp
     assert event["status"] == "failed"
     assert _receipt_rows(database_path, "timer_state_observations") == []
     assert _import_event_rows(database_path, "timer_state") == []
+
+
+def test_listener_first_durable_kakera_coordinates_with_exact_context(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_kakera = Mock(wraps=listener._catalog.import_kakera_state)
+    listener._catalog.import_kakera_state = direct_kakera
+
+    message = _durable_kakera_message()
+    asyncio.run(listener.handle_bot_response(message))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert set(kwargs) == {"harem_scan_id", "detected_kind", "durable_kakera_context"}
+    context = kwargs["durable_kakera_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1215"
+    assert context.observed_at.tzinfo is not None
+    assert context.observed_at.utcoffset() is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.finished_at.utcoffset() is not None
+    assert context.observed_at <= context.finished_at
+    assert importer.import_message.call_count == 1
+    direct_kakera.assert_not_called()
+
+    assert _durable_kakera_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", 1)
+        assert tuple(
+            connection.execute(
+                "SELECT status, server_name, account_name "
+                "FROM discord_source_event_account_attributions"
+            ).fetchone()
+        ) == ("resolved", "Test Server", "user_a")
+        assert tuple(
+            connection.execute(
+                "SELECT projection_kind, state FROM discord_projection_links"
+            ).fetchone()
+        ) == ("catalog.kakera_state", "completed")
+
+
+def test_listener_durable_kakera_unique_command_evidence_resolves_account(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(
+        listener.handle_message(
+            SimpleNamespace(
+                id=1301,
+                guild=SimpleNamespace(id=123),
+                channel=SimpleNamespace(id=900),
+                author=SimpleNamespace(bot=False, id=456),
+                content="$k",
+            )
+        )
+    )
+    message = _durable_kakera_message(interaction=False)
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert _durable_kakera_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+
+
+def test_listener_succeeded_durable_kakera_replay_reuses_attribution_without_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakera_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_kakera_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+    first_server = _server_attribution_rows(database_path)
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_kakera_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    assert _durable_kakera_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert _server_attribution_rows(database_path) == first_server
+
+
+def test_listener_durable_kakera_missing_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "kakera-unresolved.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_kakera_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert _durable_kakera_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_kakera_ambiguous_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "kakera-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    for user_id in (456, 789):
+        asyncio.run(
+            listener.handle_message(
+                SimpleNamespace(
+                    id=1400 + user_id,
+                    guild=SimpleNamespace(id=123),
+                    channel=SimpleNamespace(id=900),
+                    author=SimpleNamespace(bot=False, id=user_id),
+                    content="$k",
+                )
+            )
+        )
+
+    asyncio.run(listener.handle_bot_response(_durable_kakera_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _durable_kakera_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_kakera_conflicting_persisted_account_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakera_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_kakera_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+
+    importer = Mock()
+    restarted_listener, _restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "kakera-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(name="k", user=SimpleNamespace(id=789))
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _durable_kakera_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert restarted_listener._seen_payloads == set()
+
+
+def test_listener_durable_kakera_does_not_use_active_account_or_channel_context(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "kakera-weak-context.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    listener._contexts[900] = DiscordCommandContext(
+        server_id="123",
+        user_id="",
+        identity=ConfigAccount(
+            server="Test Server",
+            account="user_a",
+            discord_server_id="123",
+        ),
+        captured_at=time.monotonic(),
+        expected_kind="kakera",
+        evidence_source="active_account",
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_kakera_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1] == "unresolved"
+    assert _durable_kakera_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+
+
+def test_listener_durable_kakera_dispatch_failure_does_not_fallback_to_direct_import(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    listener._importer._kakera_state_projection_coordinator = None
+    direct_kakera = Mock(wraps=listener._catalog.import_kakera_state)
+    listener._catalog.import_kakera_state = direct_kakera
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+
+    asyncio.run(listener.handle_bot_response(_durable_kakera_message()))
+
+    importer.import_message.assert_called_once()
+    direct_kakera.assert_not_called()
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "failed"
+    assert attempt["retryable"] == 1
+    assert event["status"] == "failed"
+    assert _durable_kakera_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_non_durable_kakera_keeps_direct_catalog_path(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_kakera_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_kakera_context" not in kwargs
+    assert catalog.kakera_state("Test Server", "user_a") is not None
 
 
 def test_listener_non_durable_timer_keeps_direct_catalog_path(tmp_path) -> None:
@@ -3354,7 +3659,7 @@ def test_listener_cleanup_failure_after_durable_success_does_not_complete_failur
     assert "Best-effort cleanup failed after durable roll success" in caplog.text
 
 
-def test_listener_non_roll_keeps_listener_managed_success_without_durable_context(
+def test_listener_durable_kakera_keeps_coordinator_managed_success(
     tmp_path,
 ) -> None:
     listener, repository, database_path = _durable_listener(tmp_path)
@@ -3375,7 +3680,8 @@ def test_listener_non_roll_keeps_listener_managed_success_without_durable_contex
 
     assert "durable_roll_context" not in importer.import_message.call_args.kwargs
     assert "durable_claim_context" not in importer.import_message.call_args.kwargs
-    repository.mark_processing_success.assert_called_once()
+    assert "durable_kakera_context" in importer.import_message.call_args.kwargs
+    repository.mark_processing_success.assert_not_called()
     attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
     assert attempt["status"] == "succeeded"
 
