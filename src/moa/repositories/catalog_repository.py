@@ -501,6 +501,14 @@ class _SphereResultImportConnectionResult:
     sphere_result_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _PlayerBonusImportConnectionResult:
+    """Rows created by one player-bonus import on a caller-owned connection."""
+
+    import_event_id: int
+    player_bonus_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2033,13 +2041,42 @@ class CatalogRepository:
         """Store a complete, account-scoped `$bonus` snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("player_bonus", source, observed_at.isoformat(), raw_message),
+            imported = self._import_player_bonus_with_connection(
+                connection,
+                state=bonus,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return PlayerBonusImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_player_bonus_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: PlayerBonusSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _PlayerBonusImportConnectionResult:
+        """Store one player-bonus snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("player_bonus", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        player_bonus_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO player_bonus_observations (
@@ -2053,28 +2090,27 @@ class CatalogRepository:
                 """,
                 (
                     account_id,
-                    json.dumps([metric.model_dump() for metric in bonus.metrics]),
-                    bonus.rolls_per_hour_bonus,
-                    bonus.wishlist_slot_bonus,
-                    bonus.wish_spawn_bonus_percent,
-                    bonus.starwish_spawn_bonus_percent,
-                    bonus.starwish_total_spawn_bonus_percent,
-                    bonus.starwish_slot_bonus,
-                    bonus.additional_wish_key_chance_percent,
-                    bonus.kakera_max_power_percent,
-                    bonus.kakera_button_power_cost_percent,
-                    bonus.starwish_kakera_button_bonus_percent,
-                    bonus.light_kakera_minimum,
-                    bonus.light_kakera_maximum,
+                    json.dumps([metric.model_dump() for metric in state.metrics]),
+                    state.rolls_per_hour_bonus,
+                    state.wishlist_slot_bonus,
+                    state.wish_spawn_bonus_percent,
+                    state.starwish_spawn_bonus_percent,
+                    state.starwish_total_spawn_bonus_percent,
+                    state.starwish_slot_bonus,
+                    state.additional_wish_key_chance_percent,
+                    state.kakera_max_power_percent,
+                    state.kakera_button_power_cost_percent,
+                    state.starwish_kakera_button_bonus_percent,
+                    state.light_kakera_minimum,
+                    state.light_kakera_maximum,
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return PlayerBonusImportResult(
+            ).lastrowid
+        )
+        return _PlayerBonusImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            player_bonus_observation_id=player_bonus_observation_id,
         )
 
     def player_bonus(self, server_name: str, account_name: str) -> PlayerBonusObservation | None:
