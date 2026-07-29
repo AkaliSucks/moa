@@ -437,6 +437,14 @@ class _ProfileImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _MudapinImportConnectionResult:
+    """Rows created by one Mudapin import on a caller-owned connection."""
+
+    import_event_id: int
+    mudapin_observation_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class _ClaimImportConnectionResult:
     """Rows created by one claim import on a caller-owned connection."""
 
@@ -3134,13 +3142,42 @@ class CatalogRepository:
         """Store one account-scoped `$mp` Mudapin inventory."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("mudapins", source, observed_at.isoformat(), raw_message),
+            imported = self._import_mudapins_with_connection(
+                connection,
+                snapshot=snapshot,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return MudapinImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_mudapins_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        snapshot: MudapinSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _MudapinImportConnectionResult:
+        """Store one Mudapin inventory without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("mudapins", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        mudapin_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO mudapin_observations (
@@ -3154,12 +3191,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return MudapinImportResult(
+            ).lastrowid
+        )
+        return _MudapinImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            mudapin_observation_id=mudapin_observation_id,
         )
 
     def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None:

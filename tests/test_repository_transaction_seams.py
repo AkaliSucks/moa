@@ -15,6 +15,7 @@ from moa.models.character import (
     ServerSettingMetric,
     ServerSettingsSnapshot,
     KakeralootSettingsSnapshot,
+    MudapinSnapshot,
     TimerStateSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
@@ -110,6 +111,7 @@ KAKERA_STATE = KakeraStateSnapshot(
     ),
 )
 ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
+MUDAPINS = MudapinSnapshot(pin_markers=(":pin139:", ":pin182:", ":logopin6:"))
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -197,6 +199,24 @@ def _timer_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "timer_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _mudapins_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "mudapin_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -1528,3 +1548,289 @@ def test_timer_state_helper_reuses_contexts_and_rollback_preserves_them(tmp_path
         ).fetchone()
         assert tuple(current) == tuple(existing)
         assert _timer_state_counts(connection) == before_counts
+
+
+def test_public_mudapins_wrapper_preserves_compatibility_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "mudapins payload with exact source text"
+
+    result = catalog.import_mudapins(
+        MUDAPINS,
+        "  Server  ",
+        "  Account  ",
+        raw_message,
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        assert _mudapins_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "mudapin_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, pin_markers_json, pin_count, observed_at, import_event_id
+            FROM mudapin_observations WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        account = connection.execute("SELECT id, name, normalized_name FROM account_contexts").fetchone()
+        server = connection.execute("SELECT name, normalized_name FROM server_contexts").fetchone()
+        assert tuple(event) == ("mudapins", "discord", result.observed_at.isoformat(), raw_message)
+        assert observation["id"] > 0
+        assert observation["account_context_id"] == account["id"]
+        assert json.loads(observation["pin_markers_json"]) == list(MUDAPINS.pin_markers)
+        assert observation["pin_count"] == len(MUDAPINS.pin_markers)
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+        assert tuple(account) == (account["id"], "Account", "account")
+        assert tuple(server) == ("Server", "server")
+
+
+def test_mudapins_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_mudapins_with_connection(
+            connection,
+            snapshot=MUDAPINS,
+            server="Server",
+            account="Account",
+            raw="mudapins payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert _mudapins_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "mudapin_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        assert connection.execute(
+            "SELECT import_event_id FROM mudapin_observations WHERE id = ?",
+            (imported.mudapin_observation_id,),
+        ).fetchone()[0] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM mudapin_observations").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+
+
+def test_mudapins_helper_commit_persists_rows_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_mudapins_with_connection(
+            connection,
+            snapshot=MUDAPINS,
+            server="Server",
+            account="Account",
+            raw="mudapins payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, observed_at, import_event_id, account_context_id
+            FROM mudapin_observations WHERE id = ?
+            """,
+            (imported.mudapin_observation_id,),
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id FROM account_contexts WHERE normalized_name = ?", ("account",)
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == (
+            "mudapins",
+            "clipboard",
+            "mudapins payload",
+            OBSERVED_AT.isoformat(),
+        )
+        assert observation["id"] == imported.mudapin_observation_id
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        assert observation["account_context_id"] == account["id"]
+
+
+def test_mudapins_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_mudapins_with_connection(
+            connection,
+            snapshot=MUDAPINS,
+            server="Server",
+            account="Account",
+            raw="mudapins payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _mudapins_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "mudapin_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_mudapins_helper_reuses_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_mudapins(MUDAPINS, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _mudapins_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_mudapins_with_connection(
+            connection,
+            snapshot=MUDAPINS,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="second payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert imported.import_event_id > 0
+        assert imported.mudapin_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _mudapins_counts(connection) == before_counts
+
+
+def test_mudapins_marker_storage_preserves_order_duplicates_and_empty_inventory(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    snapshots = (
+        (MudapinSnapshot(pin_markers=(":pin1:", ":pin2:")), (":pin1:", ":pin2:")),
+        (MudapinSnapshot(pin_markers=(":pin3:", ":logopin4:")), (":pin3:", ":logopin4:")),
+        (
+            MudapinSnapshot(pin_markers=(":pin5:", ":pin5:", ":logopin6:")),
+            (":pin5:", ":pin5:", ":logopin6:"),
+        ),
+        (MudapinSnapshot(pin_markers=()), ()),
+    )
+
+    results = [
+        catalog.import_mudapins(snapshot, "Server", f"Account {index}", "payload", "discord")
+        for index, (snapshot, _expected) in enumerate(snapshots)
+    ]
+
+    with connect(database_path) as connection:
+        for result, (_snapshot, expected) in zip(results, snapshots):
+            observation = connection.execute(
+                "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE import_event_id = ?",
+                (result.import_event_id,),
+            ).fetchone()
+            assert json.loads(observation["pin_markers_json"]) == list(expected)
+            assert observation["pin_count"] == len(expected)
+
+
+def test_mudapins_helper_does_not_write_discord_or_legacy_state(tmp_path) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    with connect(database_path) as connection:
+        before_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        before_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()[0]
+        before_counts = _mudapins_counts(connection)
+        imported = catalog._import_mudapins_with_connection(
+            connection,
+            snapshot=MUDAPINS,
+            server="Server",
+            account="Account",
+            raw="mudapins payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        after_counts = _mudapins_counts(connection)
+        after_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        after_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()[0]
+
+    assert after_counts["import_events"] == before_counts["import_events"] + 1
+    assert after_counts["server_contexts"] == before_counts["server_contexts"] + 1
+    assert after_counts["account_contexts"] == before_counts["account_contexts"] + 1
+    assert after_counts["mudapin_observations"] == before_counts["mudapin_observations"] + 1
+    assert after_counts["discord_projection_links"] == before_counts["discord_projection_links"]
+    assert after_counts["discord_source_event_server_attributions"] == before_counts[
+        "discord_source_event_server_attributions"
+    ]
+    assert after_counts["discord_source_event_account_attributions"] == before_counts[
+        "discord_source_event_account_attributions"
+    ]
+    assert after_counts["discord_processing_attempts"] == before_counts["discord_processing_attempts"]
+    assert tuple(after_event) == tuple(before_event)
+    assert after_attempt == before_attempt
+    assert imported.import_event_id > 0
+    assert imported.mudapin_observation_id > 0
