@@ -14,6 +14,8 @@ from moa.models.character import (
     RollObservation,
     ServerSettingMetric,
     ServerSettingsSnapshot,
+    SphereGain,
+    SphereResultSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
 )
@@ -31,6 +33,7 @@ from moa.services.automatic_import_service import (
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
+    DurableSphereResultImportContext,
     DurableTimerImportContext,
     DurableTowerStateImportContext,
 )
@@ -63,6 +66,7 @@ from moa.services.settings_projection_coordinator import (
     SettingsProjectionCoordinator,
     SettingsProjectionResult,
 )
+from moa.services.sphere_result_projection_coordinator import SphereResultProjectionResult
 from moa.services.timer_projection_coordinator import (
     TimerProjectionCoordinator,
     TimerProjectionResult,
@@ -83,9 +87,23 @@ KAKERA_MESSAGE = (
 MUDAPINS_MESSAGE = ":pin139::pin139::logopin6::pin2157:"
 EMPTY_MUDAPINS_MESSAGE = "No mudapins found! Collect them with kakeraloots ($kl)"
 TOWER_MESSAGE = "tower payload"
+SPHERE_MESSAGE = ":sp: +158\n:spG: +43 (Stock: 3,655)"
 SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
+
+SPHERE_RESULT = SphereResultSnapshot(
+    clicks_available=2,
+    click_window_minutes=2,
+    purple_target=4,
+    purple_total=3,
+    gains=(
+        SphereGain(sphere_type="purple", amount=158),
+        SphereGain(sphere_type="green", amount=43),
+    ),
+    total_gained=201,
+    stock=3655,
+)
 
 SETTINGS = ServerSettingsSnapshot(
     server_premium=False,
@@ -2520,6 +2538,319 @@ def test_automatic_import_persists_sphere_result(tmp_path) -> None:
     assert observation is not None
     assert observation.snapshot.total_gained == 158
     assert observation.snapshot.stock == 3655
+
+
+def test_automatic_import_non_durable_sphere_keeps_catalog_path_and_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = SPHERE_RESULT
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        SPHERE_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="sphere_result",
+    )
+
+    parser.parse_sphere_result.assert_called_once_with(SPHERE_MESSAGE)
+    catalog.import_sphere_result.assert_called_once_with(
+        SPHERE_RESULT,
+        "Lake",
+        "ernieuuu",
+        SPHERE_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_sphere_result.assert_not_called()
+    assert result.kind == "sphere_result"
+    assert result.imported_count == 1
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_sphere_first_processing_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = SPHERE_RESULT
+    coordinator = Mock()
+    coordinator.coordinate_sphere_result.return_value = SphereResultProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        sphere_result_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("sphere_result_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+    context = DurableSphereResultImportContext(
+        source_event_id=81,
+        attempt_id=83,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted sphere payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        SPHERE_MESSAGE,
+        "caller-source",
+        "Caller Lake",
+        "caller-account",
+        detected_kind="sphere_result",
+        observed_at=datetime(2026, 7, 21, 11, 0, tzinfo=timezone.utc),
+        durable_sphere_result_context=context,
+    )
+
+    parser.parse_sphere_result.assert_called_once_with(SPHERE_MESSAGE)
+    coordinator.coordinate_sphere_result.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=83,
+        state=SPHERE_RESULT,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted sphere payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_sphere_result.assert_not_called()
+    assert result.kind == "sphere_result"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_sphere_maps_succeeded_replay() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = SPHERE_RESULT
+    coordinator = Mock()
+    coordinator.coordinate_sphere_result.return_value = SphereResultProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        sphere_result_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("sphere_result_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        SPHERE_MESSAGE,
+        "caller-source",
+        detected_kind="sphere_result",
+        durable_sphere_result_context=DurableSphereResultImportContext(
+            source_event_id=81,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=SPHERE_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    parser.parse_sphere_result.assert_called_once_with(SPHERE_MESSAGE)
+    coordinator.coordinate_sphere_result.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=None,
+        state=SPHERE_RESULT,
+        server="Lake",
+        account="ernieuuu",
+        raw=SPHERE_MESSAGE,
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_sphere_result.assert_not_called()
+    assert result.kind == "sphere_result"
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_sphere_requires_coordinator_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = SPHERE_RESULT
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="SphereResultProjectionCoordinator"):
+        service.import_message(
+            SPHERE_MESSAGE,
+            "discord",
+            detected_kind="sphere_result",
+            durable_sphere_result_context=DurableSphereResultImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=SPHERE_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_sphere_result.assert_called_once_with(SPHERE_MESSAGE)
+    catalog.import_sphere_result.assert_not_called()
+
+
+def test_automatic_import_durable_sphere_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = SPHERE_RESULT
+    coordinator = Mock()
+    coordinator.coordinate_sphere_result.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            SPHERE_MESSAGE,
+            "discord",
+            detected_kind="sphere_result",
+            durable_sphere_result_context=DurableSphereResultImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=SPHERE_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_sphere_result.assert_not_called()
+
+
+def test_automatic_import_durable_sphere_parse_failure_precedes_coordinator_or_catalog() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.side_effect = ValueError("invalid sphere response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid sphere response"):
+        service.import_message(
+            SPHERE_MESSAGE,
+            "discord",
+            detected_kind="sphere_result",
+            durable_sphere_result_context=DurableSphereResultImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=SPHERE_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    coordinator.coordinate_sphere_result.assert_not_called()
+    catalog.import_sphere_result.assert_not_called()
+
+
+def test_automatic_import_non_sphere_kind_does_not_call_sphere_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERA_MESSAGE,
+        "discord",
+        "Lake",
+        "ernieuuu",
+        detected_kind="kakera",
+    )
+
+    assert result.kind == "kakera"
+    coordinator.coordinate_sphere_result.assert_not_called()
+    parser.parse_sphere_result.assert_not_called()
+
+
+@pytest.mark.parametrize("stock", (None, 0, 321))
+def test_automatic_import_durable_sphere_preserves_total_and_stock(stock) -> None:
+    state = SPHERE_RESULT.model_copy(update={"stock": stock})
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_sphere_result.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_sphere_result.return_value = SphereResultProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        sphere_result_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("sphere_result_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        sphere_result_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        SPHERE_MESSAGE,
+        "discord",
+        detected_kind="sphere_result",
+        durable_sphere_result_context=DurableSphereResultImportContext(
+            source_event_id=81,
+            attempt_id=83,
+            server="Lake",
+            account="ernieuuu",
+            raw=SPHERE_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert coordinator.coordinate_sphere_result.call_args.kwargs["state"] is state
+    stock_note = f" Stock: {stock:,}." if stock is not None else ""
+    assert result.message == f"Imported +{state.total_gained:,} spheres.{stock_note}"
 
 
 def test_automatic_import_audits_transaction_steps_without_creating_characters(tmp_path) -> None:
