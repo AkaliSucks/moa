@@ -28,6 +28,7 @@ from moa.services.automatic_import_service import (
     AutomaticImportService,
     DurableClaimImportContext,
     DurableInfoklImportContext,
+    DurableKakeraImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -106,8 +107,16 @@ class DiscordListenerService:
         "hg",
         "husbandog",
     }
-    _DURABLE_IMPORT_KINDS = {"claim", "infokl", "profile", "roll", "settings", "timers"}
-    _DURABLE_ACCOUNT_KINDS = {"claim", "profile", "roll", "timers"}
+    _DURABLE_IMPORT_KINDS = {
+        "claim",
+        "infokl",
+        "kakera",
+        "profile",
+        "roll",
+        "settings",
+        "timers",
+    }
+    _DURABLE_ACCOUNT_KINDS = {"claim", "kakera", "profile", "roll", "timers"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -840,6 +849,19 @@ class DiscordListenerService:
                     )
                 elif kind == "timers":
                     import_kwargs["durable_timer_context"] = DurableTimerImportContext(
+                        source_event_id=received_event.source_event_id,
+                        attempt_id=(
+                            processing_attempt.attempt_id if processing_attempt is not None else None
+                        ),
+                        server=import_identity.server,
+                        account=import_identity.account,
+                        raw=raw_message,
+                        source=source,
+                        observed_at=observed_at,
+                        finished_at=finished_at,
+                    )
+                elif kind == "kakera":
+                    import_kwargs["durable_kakera_context"] = DurableKakeraImportContext(
                         source_event_id=received_event.source_event_id,
                         attempt_id=(
                             processing_attempt.attempt_id if processing_attempt is not None else None
