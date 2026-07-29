@@ -14,6 +14,7 @@ from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoord
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 
@@ -119,6 +120,20 @@ class DurableTowerStateImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableSphereResultImportContext:
+    """Durable lifecycle, scope, and payload metadata for one sphere-result import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -136,6 +151,7 @@ class AutomaticImportService:
         kakera_state_projection_coordinator: KakeraStateProjectionCoordinator | None = None,
         mudapins_projection_coordinator: MudapinsProjectionCoordinator | None = None,
         tower_state_projection_coordinator: TowerStateProjectionCoordinator | None = None,
+        sphere_result_projection_coordinator: SphereResultProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -149,6 +165,7 @@ class AutomaticImportService:
         self._kakera_state_projection_coordinator = kakera_state_projection_coordinator
         self._mudapins_projection_coordinator = mudapins_projection_coordinator
         self._tower_state_projection_coordinator = tower_state_projection_coordinator
+        self._sphere_result_projection_coordinator = sphere_result_projection_coordinator
 
     def import_message(
         self,
@@ -169,6 +186,7 @@ class AutomaticImportService:
         durable_kakera_context: DurableKakeraImportContext | None = None,
         durable_mudapins_context: DurableMudapinsImportContext | None = None,
         durable_tower_state_context: DurableTowerStateImportContext | None = None,
+        durable_sphere_result_context: DurableSphereResultImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -206,7 +224,11 @@ class AutomaticImportService:
                     else (
                         durable_tower_state_context.server
                         if kind == "towerstate" and durable_tower_state_context is not None
-                        else self._require(server_name, "server", kind)
+                        else (
+                            durable_sphere_result_context.server
+                            if kind == "sphere_result" and durable_sphere_result_context is not None
+                            else self._require(server_name, "server", kind)
+                        )
                     )
                 )
             )
@@ -600,7 +622,11 @@ class AutomaticImportService:
                 else (
                     durable_tower_state_context.account
                     if kind == "towerstate" and durable_tower_state_context is not None
-                    else self._require(account_name, "account", kind)
+                    else (
+                        durable_sphere_result_context.account
+                        if kind == "sphere_result" and durable_sphere_result_context is not None
+                        else self._require(account_name, "account", kind)
+                    )
                 )
             )
         )
@@ -747,12 +773,41 @@ class AutomaticImportService:
             return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakeraloot state.")
         if kind == "sphere_result":
             state = self._parser.parse_sphere_result(raw_message)
-            self._catalog.import_sphere_result(state, server, account, raw_message, source)
+            if durable_sphere_result_context is None:
+                self._catalog.import_sphere_result(state, server, account, raw_message, source)
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._sphere_result_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A SphereResultProjectionCoordinator is required for a durable sphere-result import."
+                    )
+                coordinated = coordinator.coordinate_sphere_result(
+                    source_event_id=durable_sphere_result_context.source_event_id,
+                    attempt_id=durable_sphere_result_context.attempt_id,
+                    state=state,
+                    server=durable_sphere_result_context.server,
+                    account=durable_sphere_result_context.account,
+                    raw=durable_sphere_result_context.raw,
+                    source=durable_sphere_result_context.source,
+                    observed_at=durable_sphere_result_context.observed_at,
+                    finished_at=durable_sphere_result_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
             stock_note = f" Stock: {state.stock:,}." if state.stock is not None else ""
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=1,
+                imported_count=imported_count,
                 message=f"Imported +{state.total_gained:,} spheres.{stock_note}",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
         raise ValueError(f"Automatic import is not implemented for {kind!r}.")
 
