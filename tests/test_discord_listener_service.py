@@ -24,6 +24,7 @@ from moa.services.profile_projection_coordinator import ProfileProjectionCoordin
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 
 
 def test_extract_message_text_flattens_discord_embed_content() -> None:
@@ -1272,6 +1273,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            tower_state_projection_coordinator=TowerStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1332,6 +1337,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            tower_state_projection_coordinator=TowerStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1388,6 +1397,32 @@ def _durable_timer_message(message_id: int = 1210):
         ),
         # Sanitized real Mudae `$tu` response.
         content="You have **17** rolls left. Next rolls reset in **49** min.",
+        embeds=(),
+        edited_at=None,
+    )
+
+
+def _durable_tower_message(message_id: int = 1217, *, interaction=True):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="kt", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$kt` response.
+        content=(
+            "Your current level is:tow2: (+ 1 tower)\n"
+            "The next level costs 75,000:kakera:\n"
+            "You have 7,673:kakera:\n"
+            "List of perks:\n"
+            "â˜‘ï¸ [5] Unveil 1 random button for the $oh command\n"
+            "[6] +30 spheres with $dk\n"
+            "â˜‘ï¸ [11] +1 roll per hour"
+        ),
         embeds=(),
         edited_at=None,
     )
@@ -1595,6 +1630,22 @@ def _durable_mudapins_counts(database_path):
                 "(SELECT COUNT(*) FROM discord_processing_attempts), "
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'mudapins'), "
                 "(SELECT COUNT(*) FROM mudapin_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_tower_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'tower_state'), "
+                "(SELECT COUNT(*) FROM tower_state_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
                 "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
@@ -2159,6 +2210,328 @@ def test_listener_durable_timer_dispatch_failure_does_not_fallback_to_direct_imp
     assert event["status"] == "failed"
     assert _receipt_rows(database_path, "timer_state_observations") == []
     assert _import_event_rows(database_path, "timer_state") == []
+
+
+def test_listener_first_durable_tower_coordinates_with_exact_context_and_attribution_order(
+    tmp_path,
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    original_begin = repository.begin_processing_attempt
+    attribution_seen_before_attempt = []
+
+    def begin_processing_attempt(*args, **kwargs):
+        attribution = repository.get_account_attribution(kwargs["source_event_id"])
+        attribution_seen_before_attempt.append(attribution)
+        return original_begin(*args, **kwargs)
+
+    repository.begin_processing_attempt = begin_processing_attempt
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_tower = Mock(wraps=listener._catalog.import_tower_state)
+    listener._catalog.import_tower_state = direct_tower
+    message = _durable_tower_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert set(kwargs) == {"harem_scan_id", "detected_kind", "durable_tower_state_context"}
+    context = kwargs["durable_tower_state_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1217"
+    assert context.observed_at.tzinfo is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.observed_at <= context.finished_at
+    assert [(item.status, item.server_name, item.account_name) for item in attribution_seen_before_attempt] == [
+        ("resolved", "Test Server", "user_a")
+    ]
+    importer.import_message.assert_called_once()
+    direct_tower.assert_not_called()
+    assert _durable_tower_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _import_event_rows(database_path, "tower_state") == [
+        ("discord:guild=123:channel=900:message=1217", message.content)
+    ]
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "succeeded"
+        assert connection.execute(
+            "SELECT legacy_import_event_id FROM discord_source_events"
+        ).fetchone()[0] == 1
+
+
+def test_listener_succeeded_durable_tower_replay_reuses_attribution_without_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_tower_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_tower_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+    first_server = _server_attribution_rows(database_path)
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_tower_state_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    importer.import_message.assert_called_once()
+    assert _durable_tower_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert _server_attribution_rows(database_path) == first_server
+
+
+def test_listener_durable_tower_attributes_two_users_sharing_one_channel(tmp_path) -> None:
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "tower-two-users.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+
+    for index, user_id in enumerate((456, 789), start=1):
+        asyncio.run(
+            listener.handle_message(
+                SimpleNamespace(
+                    id=1400 + index,
+                    guild=SimpleNamespace(id=123),
+                    channel=SimpleNamespace(id=900),
+                    author=SimpleNamespace(bot=False, id=user_id),
+                    content="$kt",
+                )
+            )
+        )
+        asyncio.run(
+            listener.handle_bot_response(
+                _durable_tower_message(1410 + index, interaction=False)
+            )
+        )
+
+    rows = _account_attribution_rows(database_path)
+    assert [(row[1], row[2], row[3]) for row in rows] == [
+        ("resolved", "Test Server", "user_a"),
+        ("resolved", "Test Server", "user_b"),
+    ]
+    assert _durable_tower_counts(database_path) == (2, 2, 2, 2, 2, 1, 2)
+
+
+def test_listener_durable_tower_missing_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "tower-unresolved.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_tower_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert _durable_tower_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_tower_ambiguous_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "tower-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    for user_id in (456, 789):
+        asyncio.run(
+            listener.handle_message(
+                SimpleNamespace(
+                    id=1500 + user_id,
+                    guild=SimpleNamespace(id=123),
+                    channel=SimpleNamespace(id=900),
+                    author=SimpleNamespace(bot=False, id=user_id),
+                    content="$kt",
+                )
+            )
+        )
+
+    asyncio.run(listener.handle_bot_response(_durable_tower_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _durable_tower_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_tower_conflicting_persisted_account_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_tower_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_account = _account_attribution_rows(database_path)[0]
+
+    importer = Mock()
+    conflict_listener, _conflict_repository, _ = _attribution_listener(
+        tmp_path,
+        "tower-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="kt", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(conflict_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0] == first_account
+    assert _durable_tower_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+
+
+def test_listener_active_durable_tower_does_not_start_or_import_again(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_tower_message()
+    listener._receive_message(message, message.content)
+    active = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+    importer.import_message.assert_not_called()
+
+
+def test_listener_retryable_tower_coordinator_failure_retries_without_direct_fallback(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._tower_state_projection_coordinator
+    coordinator.coordinate_tower_state = Mock(side_effect=RuntimeError("temporary tower failure"))
+    direct_tower = Mock(wraps=listener._catalog.import_tower_state)
+    listener._catalog.import_tower_state = direct_tower
+    message = _durable_tower_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    failed_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert failed_attempt["status"] == "failed"
+    assert failed_attempt["retryable"] == 1
+    direct_tower.assert_not_called()
+    assert _import_event_rows(database_path, "tower_state") == []
+
+    second_listener, _second_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
+    assert _durable_tower_counts(database_path) == (1, 2, 1, 1, 1, 1, 1)
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_listener_terminal_durable_tower_does_not_import_or_fallback(
+    tmp_path, terminal_status
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_tower_message()
+    listener._receive_message(message, message.content)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=1,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=1,
+        attempt_id=attempt.attempt_id,
+        status=terminal_status,
+        retryable=False,
+        failure_code="terminal_tower_test_failure",
+        failure_detail="terminal tower test failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["status"] == terminal_status
+    assert _durable_tower_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_same_process_durable_tower_duplicate_is_suppressed(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_tower_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _durable_tower_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+
+
+def test_listener_non_durable_tower_keeps_direct_catalog_path(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+        discord_message_repository=None,
+    )
+    listener._mudae_user_id = 999
+    direct_tower = Mock(wraps=catalog.import_tower_state)
+    catalog.import_tower_state = direct_tower
+
+    asyncio.run(listener.handle_bot_response(_durable_tower_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_tower_state_context" not in kwargs
+    direct_tower.assert_called_once()
+    assert _import_event_rows(database_path, "tower_state")
 
 
 def test_listener_first_durable_kakera_coordinates_with_exact_context(tmp_path) -> None:
