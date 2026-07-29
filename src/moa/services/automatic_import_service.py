@@ -10,6 +10,7 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -89,6 +90,20 @@ class DurableKakeraImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableMudapinsImportContext:
+    """Durable lifecycle, scope, and payload metadata for one Mudapin import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -104,6 +119,7 @@ class AutomaticImportService:
         infokl_projection_coordinator: InfoklProjectionCoordinator | None = None,
         timer_projection_coordinator: TimerProjectionCoordinator | None = None,
         kakera_state_projection_coordinator: KakeraStateProjectionCoordinator | None = None,
+        mudapins_projection_coordinator: MudapinsProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -115,6 +131,7 @@ class AutomaticImportService:
         self._infokl_projection_coordinator = infokl_projection_coordinator
         self._timer_projection_coordinator = timer_projection_coordinator
         self._kakera_state_projection_coordinator = kakera_state_projection_coordinator
+        self._mudapins_projection_coordinator = mudapins_projection_coordinator
 
     def import_message(
         self,
@@ -133,6 +150,7 @@ class AutomaticImportService:
         durable_infokl_context: DurableInfoklImportContext | None = None,
         durable_timer_context: DurableTimerImportContext | None = None,
         durable_kakera_context: DurableKakeraImportContext | None = None,
+        durable_mudapins_context: DurableMudapinsImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -164,7 +182,11 @@ class AutomaticImportService:
             else (
                 durable_kakera_context.server
                 if kind == "kakera" and durable_kakera_context is not None
-                else self._require(server_name, "server", kind)
+                else (
+                    durable_mudapins_context.server
+                    if kind == "mudapins" and durable_mudapins_context is not None
+                    else self._require(server_name, "server", kind)
+                )
             )
         )
         transaction_commands = {
@@ -504,18 +526,47 @@ class AutomaticImportService:
                 durable_success_recorded=durable_success_recorded,
             )
         if kind == "mudapins":
-            account = self._require(account_name, "account", kind)
             snapshot = self._parser.parse_mudapins(raw_message)
-            self._catalog.import_mudapins(snapshot, server, account, raw_message, source)
+            if durable_mudapins_context is None:
+                account = self._require(account_name, "account", kind)
+                self._catalog.import_mudapins(snapshot, server, account, raw_message, source)
+                imported_count = len(snapshot.pin_markers)
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._mudapins_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A MudapinsProjectionCoordinator is required for a durable Mudapins import."
+                    )
+                coordinated = coordinator.coordinate_mudapins(
+                    source_event_id=durable_mudapins_context.source_event_id,
+                    attempt_id=durable_mudapins_context.attempt_id,
+                    snapshot=snapshot,
+                    server=durable_mudapins_context.server,
+                    account=durable_mudapins_context.account,
+                    raw=durable_mudapins_context.raw,
+                    source=durable_mudapins_context.source,
+                    observed_at=durable_mudapins_context.observed_at,
+                    finished_at=durable_mudapins_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
             count = len(snapshot.pin_markers)
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=count,
+                imported_count=imported_count,
                 message=(
                     "Imported no Mudapins."
                     if count == 0
                     else f"Imported {count} Mudapin markers."
                 ),
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
 
         account = (
