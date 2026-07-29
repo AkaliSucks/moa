@@ -16,6 +16,7 @@ from moa.services.profile_projection_coordinator import ProfileProjectionCoordin
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
@@ -174,6 +175,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     captured: dict[str, object] = {}
     kakera_coordinators: list[KakeraStateProjectionCoordinator] = []
     timer_coordinators: list[TimerProjectionCoordinator] = []
+    tower_coordinators: list[TowerStateProjectionCoordinator] = []
 
     class RecordingKakeraStateProjectionCoordinator(KakeraStateProjectionCoordinator):
         def __init__(self, *repositories):
@@ -183,6 +185,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     class RecordingTimerProjectionCoordinator(TimerProjectionCoordinator):
         def __init__(self, *repositories):
             timer_coordinators.append(self)
+            super().__init__(*repositories)
+
+    class RecordingTowerStateProjectionCoordinator(TowerStateProjectionCoordinator):
+        def __init__(self, *repositories):
+            tower_coordinators.append(self)
             super().__init__(*repositories)
 
     class FakeListener:
@@ -200,6 +207,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         RecordingKakeraStateProjectionCoordinator,
     )
     monkeypatch.setattr(main, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
+    monkeypatch.setattr(
+        main,
+        "TowerStateProjectionCoordinator",
+        RecordingTowerStateProjectionCoordinator,
+    )
 
     result = CliRunner().invoke(
         main.app,
@@ -217,6 +229,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     infokl_coordinator = importer._infokl_projection_coordinator
     timer_coordinator = importer._timer_projection_coordinator
     kakera_coordinator = importer._kakera_state_projection_coordinator
+    tower_coordinator = importer._tower_state_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -228,8 +241,10 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(infokl_coordinator, InfoklProjectionCoordinator)
     assert isinstance(timer_coordinator, TimerProjectionCoordinator)
     assert isinstance(kakera_coordinator, KakeraStateProjectionCoordinator)
+    assert isinstance(tower_coordinator, TowerStateProjectionCoordinator)
     assert kakera_coordinators == [kakera_coordinator]
     assert timer_coordinators == [timer_coordinator]
+    assert tower_coordinators == [tower_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -253,11 +268,52 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert kakera_coordinator._catalog is catalog_service._repository
     assert kakera_coordinator._discord is discord_repository
     assert kakera_coordinator._database_path == database_path
+    assert tower_coordinator._catalog is catalog_service._repository
+    assert tower_coordinator._discord is discord_repository
+    assert tower_coordinator._database_path == database_path
     assert timer_coordinators[0]._catalog is catalog_service._repository
     assert timer_coordinators[0]._discord is discord_repository
     assert captured["catalog_service"] is importer._catalog
     assert captured["token"] == "test-token"
     assert captured["mudae_user_id"] == 999
+
+
+def test_import_auto_keeps_direct_automatic_import_without_tower_coordinator(
+    monkeypatch,
+) -> None:
+    constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class RecordingImporter:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args, kwargs))
+
+        def import_message(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                kind="towerstate",
+                imported_count=1,
+                message="Imported Kakera Tower state.",
+            )
+
+    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(
+        main,
+        "_read_message_source",
+        lambda path, clipboard: "tower response",
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "auto", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert constructed == [((), {})]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("tower response", "clipboard", "Lake", "ernieuuu")
+    assert kwargs == {"harem_scan_id": None}
 
 
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:

@@ -40,6 +40,7 @@ from moa.services.settings_projection_coordinator import SettingsProjectionCoord
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
+from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.utils.display import (
     format_mudae_gender,
     format_mudae_kakera,
@@ -214,6 +215,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        tower_state_projection_coordinator = TowerStateProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -223,6 +228,7 @@ def discord_listen(
             infokl_projection_coordinator=infokl_projection_coordinator,
             timer_projection_coordinator=timer_projection_coordinator,
             kakera_state_projection_coordinator=kakera_state_projection_coordinator,
+            tower_state_projection_coordinator=tower_state_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
