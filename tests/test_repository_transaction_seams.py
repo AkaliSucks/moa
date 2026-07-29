@@ -10,6 +10,8 @@ from moa.models.character import (
     BadgeLevel,
     ClaimConfirmation,
     KakeraStateSnapshot,
+    PlayerBonusMetric,
+    PlayerBonusSnapshot,
     ProfileSnapshot,
     RollObservation,
     ServerSettingMetric,
@@ -22,7 +24,7 @@ from moa.models.character import (
     TimerStateSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
-from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.catalog_repository import CatalogRepository, _PlayerBonusImportConnectionResult
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 
 
@@ -114,6 +116,39 @@ KAKERA_STATE = KakeraStateSnapshot(
     ),
 )
 ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
+PLAYER_BONUS = PlayerBonusSnapshot(
+    metrics=(
+        PlayerBonusMetric(label="Rolls per hour", detail="+9"),
+        PlayerBonusMetric(label="Spawn bonus", detail="+210% ($k + $bw + slash)"),
+    ),
+    rolls_per_hour_bonus=9,
+    wishlist_slot_bonus=8,
+    wish_spawn_bonus_percent=210,
+    starwish_spawn_bonus_percent=180,
+    starwish_total_spawn_bonus_percent=390,
+    starwish_slot_bonus=1,
+    additional_wish_key_chance_percent=10,
+    kakera_max_power_percent=25,
+    kakera_button_power_cost_percent=12,
+    starwish_kakera_button_bonus_percent=20,
+    light_kakera_minimum=4,
+    light_kakera_maximum=5,
+)
+BOUNDARY_PLAYER_BONUS = PlayerBonusSnapshot(
+    metrics=(PlayerBonusMetric(label="", detail=""),),
+    rolls_per_hour_bonus=0,
+    wishlist_slot_bonus=None,
+    wish_spawn_bonus_percent=-1,
+    starwish_spawn_bonus_percent=0,
+    starwish_total_spawn_bonus_percent=None,
+    starwish_slot_bonus=0,
+    additional_wish_key_chance_percent=None,
+    kakera_max_power_percent=0,
+    kakera_button_power_cost_percent=-2,
+    starwish_kakera_button_bonus_percent=None,
+    light_kakera_minimum=0,
+    light_kakera_maximum=None,
+)
 TOWER_STATE = TowerStateSnapshot(
     current_level=2,
     completed_towers=3,
@@ -258,6 +293,24 @@ def _sphere_result_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "sphere_result_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _player_bonus_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "player_bonus_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -1819,6 +1872,321 @@ def test_timer_state_helper_reuses_contexts_and_rollback_preserves_them(tmp_path
         ).fetchone()
         assert tuple(current) == tuple(existing)
         assert _timer_state_counts(connection) == before_counts
+
+
+def test_player_bonus_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_PlayerBonusImportConnectionResult)
+    assert _PlayerBonusImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_PlayerBonusImportConnectionResult)] == [
+        "import_event_id",
+        "player_bonus_observation_id",
+    ]
+    assert not hasattr(_PlayerBonusImportConnectionResult(1, 2), "__dict__")
+
+
+def test_public_player_bonus_wrapper_preserves_result_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "player bonus payload with exact source text"
+
+    result = catalog.import_player_bonus(
+        PLAYER_BONUS,
+        "  Server  ",
+        "  Account  ",
+        raw_message,
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        assert _player_bonus_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "player_bonus_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT account_context_id, metrics_json, rolls_per_hour_bonus, wishlist_slot_bonus,
+                   wish_spawn_bonus_percent, starwish_spawn_bonus_percent,
+                   starwish_total_spawn_bonus_percent, starwish_slot_bonus,
+                   additional_wish_key_chance_percent, kakera_max_power_percent,
+                   kakera_button_power_cost_percent, starwish_kakera_button_bonus_percent,
+                   light_kakera_minimum, light_kakera_maximum, observed_at, import_event_id
+            FROM player_bonus_observations WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("player_bonus", "discord", result.observed_at.isoformat(), raw_message)
+        assert observation["metrics_json"] == json.dumps(
+            [metric.model_dump() for metric in PLAYER_BONUS.metrics]
+        )
+        assert tuple(observation)[2:] == (
+            PLAYER_BONUS.rolls_per_hour_bonus,
+            PLAYER_BONUS.wishlist_slot_bonus,
+            PLAYER_BONUS.wish_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_total_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_slot_bonus,
+            PLAYER_BONUS.additional_wish_key_chance_percent,
+            PLAYER_BONUS.kakera_max_power_percent,
+            PLAYER_BONUS.kakera_button_power_cost_percent,
+            PLAYER_BONUS.starwish_kakera_button_bonus_percent,
+            PLAYER_BONUS.light_kakera_minimum,
+            PLAYER_BONUS.light_kakera_maximum,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        )
+
+
+def test_player_bonus_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_player_bonus_with_connection(
+            connection,
+            state=PLAYER_BONUS,
+            server="Server",
+            account="Account",
+            raw="player bonus payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert _player_bonus_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "player_bonus_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        observation = connection.execute(
+            "SELECT id, import_event_id FROM player_bonus_observations WHERE id = ?",
+            (imported.player_bonus_observation_id,),
+        ).fetchone()
+        assert observation["id"] == imported.player_bonus_observation_id
+        assert observation["import_event_id"] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert _player_bonus_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "player_bonus_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.rollback()
+
+
+def test_player_bonus_helper_commit_persists_values_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_player_bonus_with_connection(
+            connection,
+            state=PLAYER_BONUS,
+            server="Server",
+            account="Account",
+            raw="player bonus payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, metrics_json, rolls_per_hour_bonus, wishlist_slot_bonus,
+                   wish_spawn_bonus_percent, starwish_spawn_bonus_percent,
+                   starwish_total_spawn_bonus_percent, starwish_slot_bonus,
+                   additional_wish_key_chance_percent, kakera_max_power_percent,
+                   kakera_button_power_cost_percent, starwish_kakera_button_bonus_percent,
+                   light_kakera_minimum, light_kakera_maximum, observed_at, import_event_id
+            FROM player_bonus_observations WHERE id = ?
+            """,
+            (imported.player_bonus_observation_id,),
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id, name, normalized_name, server_context_id FROM account_contexts"
+        ).fetchone()
+        server = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == ("player_bonus", "discord", "player bonus payload", OBSERVED_AT.isoformat())
+        assert observation["id"] == imported.player_bonus_observation_id
+        assert observation["account_context_id"] == account["id"]
+        assert observation["metrics_json"] == json.dumps(
+            [metric.model_dump() for metric in PLAYER_BONUS.metrics]
+        )
+        assert tuple(observation)[3:] == (
+            PLAYER_BONUS.rolls_per_hour_bonus,
+            PLAYER_BONUS.wishlist_slot_bonus,
+            PLAYER_BONUS.wish_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_total_spawn_bonus_percent,
+            PLAYER_BONUS.starwish_slot_bonus,
+            PLAYER_BONUS.additional_wish_key_chance_percent,
+            PLAYER_BONUS.kakera_max_power_percent,
+            PLAYER_BONUS.kakera_button_power_cost_percent,
+            PLAYER_BONUS.starwish_kakera_button_bonus_percent,
+            PLAYER_BONUS.light_kakera_minimum,
+            PLAYER_BONUS.light_kakera_maximum,
+            OBSERVED_AT.isoformat(),
+            imported.import_event_id,
+        )
+        assert tuple(server) == (server["id"], "Server", "server")
+        assert tuple(account) == (account["id"], "Account", "account", server["id"])
+        assert _player_bonus_counts(connection)["player_bonus_observations"] == 1
+
+
+def test_player_bonus_helper_rollback_removes_new_rows_and_contexts(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_player_bonus_with_connection(
+            connection,
+            state=PLAYER_BONUS,
+            server="Server",
+            account="Account",
+            raw="player bonus payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _player_bonus_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "player_bonus_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_player_bonus_helper_reuses_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_player_bonus(PLAYER_BONUS, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _player_bonus_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_player_bonus_with_connection(
+            connection,
+            state=PLAYER_BONUS,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="second payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert imported.import_event_id > 0
+        assert imported.player_bonus_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _player_bonus_counts(connection) == before_counts
+
+
+def test_player_bonus_helper_preserves_null_zero_negative_and_empty_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_player_bonus_with_connection(
+            connection,
+            state=BOUNDARY_PLAYER_BONUS,
+            server="Server",
+            account="Account",
+            raw="boundary player bonus payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        observation = connection.execute(
+            """
+            SELECT metrics_json, rolls_per_hour_bonus, wishlist_slot_bonus,
+                   wish_spawn_bonus_percent, starwish_spawn_bonus_percent,
+                   starwish_total_spawn_bonus_percent, starwish_slot_bonus,
+                   additional_wish_key_chance_percent, kakera_max_power_percent,
+                   kakera_button_power_cost_percent, starwish_kakera_button_bonus_percent,
+                   light_kakera_minimum, light_kakera_maximum, import_event_id
+            FROM player_bonus_observations WHERE id = ?
+            """,
+            (imported.player_bonus_observation_id,),
+        ).fetchone()
+        assert json.loads(observation["metrics_json"]) == [
+            {"label": "", "detail": ""}
+        ]
+        assert tuple(observation)[1:] == (
+            0,
+            None,
+            -1,
+            0,
+            None,
+            0,
+            None,
+            0,
+            -2,
+            None,
+            0,
+            None,
+            imported.import_event_id,
+        )
 
 
 def test_public_sphere_result_wrapper_preserves_compatibility_and_stored_values(tmp_path) -> None:
