@@ -16,6 +16,7 @@ from moa.models.character import (
     ServerSettingsSnapshot,
     KakeralootSettingsSnapshot,
     MudapinSnapshot,
+    TowerStateSnapshot,
     TimerStateSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
@@ -111,6 +112,14 @@ KAKERA_STATE = KakeraStateSnapshot(
     ),
 )
 ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
+TOWER_STATE = TowerStateSnapshot(
+    current_level=2,
+    completed_towers=3,
+    next_level_cost=75_000,
+    kakera_balance=7_673,
+    built_perk_ids=(2, 7),
+)
+TOWER_STATE_WITHOUT_COMPLETED_TOWERS = TOWER_STATE.model_copy(update={"completed_towers": None})
 MUDAPINS = MudapinSnapshot(pin_markers=(":pin139:", ":pin182:", ":logopin6:"))
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -235,6 +244,24 @@ def _kakera_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "kakera_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _tower_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "tower_state_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -437,6 +464,218 @@ def test_kakera_helper_reuses_existing_contexts_and_rollback_preserves_them(tmp_
         ).fetchone()
         assert tuple(current) == tuple(before)
         assert _kakera_state_counts(connection) == before_counts
+
+
+def test_public_tower_import_preserves_compatibility_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_tower_state(
+        TOWER_STATE,
+        "  Server  ",
+        "  Account  ",
+        "tower payload",
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    with connect(database_path) as connection:
+        assert _tower_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "tower_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, current_level, completed_towers, next_level_cost,
+                   kakera_balance, built_perk_ids_json, observed_at, import_event_id
+            FROM tower_state_observations
+            WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == ("tower_state", "discord", result.observed_at.isoformat(), "tower payload")
+        assert observation["id"] > 0
+        assert observation["account_context_id"] > 0
+        assert observation["current_level"] == TOWER_STATE.current_level
+        assert observation["completed_towers"] == TOWER_STATE.completed_towers
+        assert observation["next_level_cost"] == TOWER_STATE.next_level_cost
+        assert observation["kakera_balance"] == TOWER_STATE.kakera_balance
+        assert json.loads(observation["built_perk_ids_json"]) == list(TOWER_STATE.built_perk_ids)
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+
+
+def test_tower_helper_uses_supplied_connection_returns_actual_ids_and_commits(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_tower_state_with_connection(
+            connection,
+            state=TOWER_STATE,
+            server=" Server ",
+            account=" Account ",
+            raw="raw tower",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        assert is_dataclass(imported)
+        assert [field.name for field in fields(imported)] == [
+            "import_event_id",
+            "tower_state_observation_id",
+        ]
+        assert imported.import_event_id > 0
+        assert imported.tower_state_observation_id > 0
+        assert connection.in_transaction is True
+        assert connection.execute(
+            "SELECT id FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == imported.import_event_id
+        assert connection.execute(
+            "SELECT id FROM tower_state_observations WHERE id = ?",
+            (imported.tower_state_observation_id,),
+        ).fetchone()[0] == imported.tower_state_observation_id
+        assert _tower_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "tower_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        observation = connection.execute(
+            "SELECT observed_at, import_event_id FROM tower_state_observations WHERE id = ?",
+            (imported.tower_state_observation_id,),
+        ).fetchone()
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert observer.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+            assert observer.execute("SELECT COUNT(*) FROM tower_state_observations").fetchone()[0] == 0
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert _tower_state_counts(connection)["tower_state_observations"] == 1
+
+
+def test_tower_helper_rollback_removes_new_rows_and_contexts(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_tower_state_with_connection(
+            connection,
+            state=TOWER_STATE,
+            server="Server",
+            account="Account",
+            raw="rollback tower",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _tower_state_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "tower_state_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_tower_helper_reuses_existing_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_tower_state(TOWER_STATE, "Server", "Account", "existing", "discord")
+
+    with connect(database_path) as connection:
+        before = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _tower_state_counts(connection)
+
+    with connect(database_path) as connection:
+        catalog._import_tower_state_with_connection(
+            connection,
+            state=TOWER_STATE,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="reused contexts",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert (current["server_id"], current["account_id"]) == (before["server_id"], before["account_id"])
+        assert (current["server_name"], current["account_name"]) == ("SERVER", "ACCOUNT")
+        assert _tower_state_counts(connection)["server_contexts"] == 1
+        assert _tower_state_counts(connection)["account_contexts"] == 1
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, server_contexts.name AS server_name,
+                   account_contexts.id AS account_id, account_contexts.name AS account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(before)
+        assert _tower_state_counts(connection) == before_counts
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_completed_towers"),
+    [
+        (TOWER_STATE, 3),
+        (TOWER_STATE_WITHOUT_COMPLETED_TOWERS, 0),
+    ],
+)
+def test_tower_helper_preserves_completed_tower_values(tmp_path, state, expected_completed_towers) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_tower_state_with_connection(
+            connection,
+            state=state,
+            server="Server",
+            account=f"Account {expected_completed_towers}",
+            raw="completed towers",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.execute(
+            "SELECT completed_towers FROM tower_state_observations WHERE id = ?",
+            (imported.tower_state_observation_id,),
+        ).fetchone()[0] == expected_completed_towers
 
 
 def test_roll_helper_writes_all_projections_on_supplied_connection(tmp_path) -> None:

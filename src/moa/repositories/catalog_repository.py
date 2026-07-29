@@ -485,6 +485,14 @@ class _KakeraStateImportConnectionResult:
     kakera_state_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _TowerStateImportConnectionResult:
+    """Rows created by one Tower-state import on a caller-owned connection."""
+
+    import_event_id: int
+    tower_state_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2656,13 +2664,42 @@ class CatalogRepository:
         """Store a complete account-scoped `$kt` snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("tower_state", source, observed_at.isoformat(), raw_message),
+            imported = self._import_tower_state_with_connection(
+                connection,
+                state=state,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return TowerStateImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_tower_state_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: TowerStateSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _TowerStateImportConnectionResult:
+        """Store one Tower-state snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("tower_state", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        tower_state_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO tower_state_observations (
@@ -2680,12 +2717,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return TowerStateImportResult(
+            ).lastrowid
+        )
+        return _TowerStateImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            tower_state_observation_id=tower_state_observation_id,
         )
 
     def tower_state(self, server_name: str, account_name: str) -> TowerStateObservation | None:
