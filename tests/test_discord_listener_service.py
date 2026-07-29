@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import time
+from dataclasses import fields
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -18,6 +19,7 @@ from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.discord_listener_service import DiscordCommandContext, DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -1266,6 +1268,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            mudapins_projection_coordinator=MudapinsProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1319,6 +1325,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             kakera_state_projection_coordinator=KakeraStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            mudapins_projection_coordinator=MudapinsProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1499,6 +1509,29 @@ def _durable_infokl_message(message_id: int = 1214, *, interaction=True):
     )
 
 
+def _durable_mudapins_message(
+    message_id: int = 1216,
+    *,
+    interaction: bool = True,
+    content: str = ":pin139::pin139::logopin6::pin2157:",
+):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="mp", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$mp` response with duplicate and mixed markers.
+        content=content,
+        embeds=(),
+        edited_at=None,
+    )
+
+
 def _receipt_rows(database_path, table: str):
     with connect(database_path) as connection:
         return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
@@ -1546,6 +1579,22 @@ def _durable_kakera_counts(database_path):
                 "(SELECT COUNT(*) FROM discord_processing_attempts), "
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'kakera_state'), "
                 "(SELECT COUNT(*) FROM kakera_state_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_mudapins_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'mudapins'), "
+                "(SELECT COUNT(*) FROM mudapin_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
                 "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
@@ -2341,6 +2390,340 @@ def test_listener_durable_kakera_dispatch_failure_does_not_fallback_to_direct_im
     assert attempt["retryable"] == 1
     assert event["status"] == "failed"
     assert _durable_kakera_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_first_durable_mudapins_coordinates_with_exact_context(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_mudapins = Mock(wraps=listener._catalog.import_mudapins)
+    listener._catalog.import_mudapins = direct_mudapins
+    message = _durable_mudapins_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert set(kwargs) == {"harem_scan_id", "detected_kind", "durable_mudapins_context"}
+    assert kwargs["harem_scan_id"] is None
+    assert kwargs["detected_kind"] == "mudapins"
+    context = kwargs["durable_mudapins_context"]
+    assert {field.name for field in fields(context)} == {
+        "source_event_id",
+        "attempt_id",
+        "server",
+        "account",
+        "raw",
+        "source",
+        "observed_at",
+        "finished_at",
+    }
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1216"
+    assert context.observed_at.tzinfo is not None
+    assert context.observed_at.utcoffset() is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.finished_at.utcoffset() is not None
+    assert context.observed_at <= context.finished_at
+    assert importer.import_message.call_count == 1
+    direct_mudapins.assert_not_called()
+    repository.mark_processing_success = Mock(wraps=repository.mark_processing_success)
+    assert _durable_mudapins_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", 1)
+        assert tuple(
+            connection.execute(
+                "SELECT status, server_name, account_name "
+                "FROM discord_source_event_account_attributions"
+            ).fetchone()
+        ) == ("resolved", "Test Server", "user_a")
+        assert tuple(
+            connection.execute(
+                "SELECT pin_markers_json, pin_count FROM mudapin_observations"
+            ).fetchone()
+        ) == ('[":pin139:", ":pin139:", ":logopin6:", ":pin2157:"]', 4)
+        assert tuple(
+            connection.execute(
+                "SELECT projection_kind, state FROM discord_projection_links"
+            ).fetchone()
+        ) == ("catalog.mudapins", "completed")
+    repository.mark_processing_success.assert_not_called()
+
+
+def test_listener_durable_mudapins_unique_command_evidence_resolves_account(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "mudapins-command.json",
+        (("Test Server", "user_a", "primary", "456"),),
+        importer=importer,
+    )
+    asyncio.run(
+        listener.handle_message(
+            SimpleNamespace(
+                id=1301,
+                guild=SimpleNamespace(id=123),
+                channel=SimpleNamespace(id=900),
+                author=SimpleNamespace(bot=False, id=456),
+                content="$mp",
+            )
+        )
+    )
+    message = _durable_mudapins_message(interaction=False)
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    assert _durable_mudapins_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_json", "expected_count"),
+    [
+        (
+            ":pin139::pin139::logopin6::pin2157:",
+            '[":pin139:", ":pin139:", ":logopin6:", ":pin2157:"]',
+            4,
+        ),
+        (
+            "No mudapins found! Collect them with kakeraloots ($kl)",
+            "[]",
+            0,
+        ),
+    ],
+)
+def test_listener_durable_mudapins_preserves_marker_snapshot_and_empty_inventory(
+    tmp_path,
+    content,
+    expected_json,
+    expected_count,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(
+        listener.handle_bot_response(
+            _durable_mudapins_message(content=content)
+        )
+    )
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT pin_markers_json, pin_count FROM mudapin_observations"
+            ).fetchone()
+        ) == (expected_json, expected_count)
+
+
+def test_listener_succeeded_durable_mudapins_replay_reuses_attribution_without_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_mudapins_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_mudapins_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+    first_server = _server_attribution_rows(database_path)
+
+    restarted_listener, _restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_mudapins_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    assert _durable_mudapins_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert _server_attribution_rows(database_path) == first_server
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert len(_import_event_rows(database_path, "mudapins")) == 1
+    assert len(_receipt_rows(database_path, "mudapin_observations")) == 1
+    assert len(_receipt_rows(database_path, "discord_projection_links")) == 1
+
+
+def test_listener_durable_mudapins_missing_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "mudapins-unresolved.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    message = _durable_mudapins_message(interaction=False)
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "unresolved",
+        None,
+        None,
+    )
+    assert _durable_mudapins_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_mudapins_ambiguous_account_evidence_fails_closed(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "mudapins-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    for user_id in (456, 789):
+        asyncio.run(
+            listener.handle_message(
+                SimpleNamespace(
+                    id=1400 + user_id,
+                    guild=SimpleNamespace(id=123),
+                    channel=SimpleNamespace(id=900),
+                    author=SimpleNamespace(bot=False, id=user_id),
+                    content="$mp",
+                )
+            )
+        )
+
+    asyncio.run(
+        listener.handle_bot_response(_durable_mudapins_message(interaction=False))
+    )
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _durable_mudapins_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_mudapins_conflicting_account_evidence_fails_closed(tmp_path) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_mudapins_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_mudapins_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+
+    importer = Mock()
+    restarted_listener, _restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "mudapins-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="mp", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _durable_mudapins_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert restarted_listener._seen_payloads == set()
+
+
+def test_listener_durable_mudapins_ignores_active_and_channel_only_fallbacks(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "mudapins-weak-context.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+    listener._contexts[900] = DiscordCommandContext(
+        server_id="123",
+        user_id="",
+        identity=ConfigAccount(
+            server="Test Server",
+            account="user_a",
+            discord_server_id="123",
+        ),
+        captured_at=time.monotonic(),
+        expected_kind="mudapins",
+        evidence_source="active_account",
+    )
+    message = _durable_mudapins_message(interaction=False)
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _account_attribution_rows(database_path)[0][1] == "unresolved"
+    assert _durable_mudapins_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+
+
+def test_listener_durable_mudapins_dispatch_failure_does_not_fallback_to_direct_import(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    listener._importer._mudapins_projection_coordinator = None
+    direct_mudapins = Mock(wraps=listener._catalog.import_mudapins)
+    listener._catalog.import_mudapins = direct_mudapins
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+
+    asyncio.run(listener.handle_bot_response(_durable_mudapins_message()))
+
+    importer.import_message.assert_called_once()
+    direct_mudapins.assert_not_called()
+    attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    event = _receipt_rows(database_path, "discord_source_events")[0]
+    assert attempt["status"] == "failed"
+    assert attempt["retryable"] == 1
+    assert event["status"] == "failed"
+    assert _durable_mudapins_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_non_durable_mudapins_keeps_direct_catalog_path(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_mudapins_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_mudapins_context" not in kwargs
+    assert catalog.mudapins("Test Server", "user_a").snapshot.pin_markers == (
+        ":pin139:",
+        ":pin139:",
+        ":logopin6:",
+        ":pin2157:",
+    )
 
 
 def test_listener_non_durable_kakera_keeps_direct_catalog_path(tmp_path) -> None:
