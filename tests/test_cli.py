@@ -11,6 +11,7 @@ from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
+from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
@@ -171,7 +172,13 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     database_path = tmp_path / "moa.db"
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
     captured: dict[str, object] = {}
+    kakera_coordinators: list[KakeraStateProjectionCoordinator] = []
     timer_coordinators: list[TimerProjectionCoordinator] = []
+
+    class RecordingKakeraStateProjectionCoordinator(KakeraStateProjectionCoordinator):
+        def __init__(self, *repositories):
+            kakera_coordinators.append(self)
+            super().__init__(*repositories)
 
     class RecordingTimerProjectionCoordinator(TimerProjectionCoordinator):
         def __init__(self, *repositories):
@@ -187,6 +194,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             captured["mudae_user_id"] = mudae_user_id
 
     monkeypatch.setattr(main, "DiscordListenerService", FakeListener)
+    monkeypatch.setattr(
+        main,
+        "KakeraStateProjectionCoordinator",
+        RecordingKakeraStateProjectionCoordinator,
+    )
     monkeypatch.setattr(main, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
 
     result = CliRunner().invoke(
@@ -204,6 +216,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     settings_coordinator = importer._settings_projection_coordinator
     infokl_coordinator = importer._infokl_projection_coordinator
     timer_coordinator = importer._timer_projection_coordinator
+    kakera_coordinator = importer._kakera_state_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -214,6 +227,8 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(settings_coordinator, SettingsProjectionCoordinator)
     assert isinstance(infokl_coordinator, InfoklProjectionCoordinator)
     assert isinstance(timer_coordinator, TimerProjectionCoordinator)
+    assert isinstance(kakera_coordinator, KakeraStateProjectionCoordinator)
+    assert kakera_coordinators == [kakera_coordinator]
     assert timer_coordinators == [timer_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
@@ -235,6 +250,9 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert timer_coordinator._catalog is catalog_service._repository
     assert timer_coordinator._discord is discord_repository
     assert timer_coordinator._database_path == database_path
+    assert kakera_coordinator._catalog is catalog_service._repository
+    assert kakera_coordinator._discord is discord_repository
+    assert kakera_coordinator._database_path == database_path
     assert timer_coordinators[0]._catalog is catalog_service._repository
     assert timer_coordinators[0]._discord is discord_repository
     assert captured["catalog_service"] is importer._catalog
