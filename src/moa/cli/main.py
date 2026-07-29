@@ -37,6 +37,7 @@ from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
+from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.top_search_service import TopSearchService
 from moa.services.tower_service import TowerService
@@ -219,6 +220,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        sphere_result_projection_coordinator = SphereResultProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -229,6 +234,7 @@ def discord_listen(
             timer_projection_coordinator=timer_projection_coordinator,
             kakera_state_projection_coordinator=kakera_state_projection_coordinator,
             tower_state_projection_coordinator=tower_state_projection_coordinator,
+            sphere_result_projection_coordinator=sphere_result_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
