@@ -29,6 +29,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableInfoklImportContext,
     DurableKakeraImportContext,
+    DurableMudapinsImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -111,12 +112,13 @@ class DiscordListenerService:
         "claim",
         "infokl",
         "kakera",
+        "mudapins",
         "profile",
         "roll",
         "settings",
         "timers",
     }
-    _DURABLE_ACCOUNT_KINDS = {"claim", "kakera", "profile", "roll", "timers"}
+    _DURABLE_ACCOUNT_KINDS = {"claim", "kakera", "mudapins", "profile", "roll", "timers"}
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
     def __init__(
@@ -572,6 +574,14 @@ class DiscordListenerService:
                     attribution.status,
                 )
                 return
+            if kind == "mudapins":
+                self._logger.info(
+                    "Deferred mudapins source event %s because server attribution is %s; "
+                    "no processing attempt was started",
+                    received_event.source_event_id,
+                    attribution.status,
+                )
+                return
             self._record_unresolved_attribution(
                 received_event,
                 message.id,
@@ -862,6 +872,19 @@ class DiscordListenerService:
                     )
                 elif kind == "kakera":
                     import_kwargs["durable_kakera_context"] = DurableKakeraImportContext(
+                        source_event_id=received_event.source_event_id,
+                        attempt_id=(
+                            processing_attempt.attempt_id if processing_attempt is not None else None
+                        ),
+                        server=import_identity.server,
+                        account=import_identity.account,
+                        raw=raw_message,
+                        source=source,
+                        observed_at=observed_at,
+                        finished_at=finished_at,
+                    )
+                elif kind == "mudapins":
+                    import_kwargs["durable_mudapins_context"] = DurableMudapinsImportContext(
                         source_event_id=received_event.source_event_id,
                         attempt_id=(
                             processing_attempt.attempt_id if processing_attempt is not None else None
