@@ -9,6 +9,7 @@ from moa.models.character import (
     ClaimConfirmation,
     KakeraStateSnapshot,
     KakeralootSettingsSnapshot,
+    MudapinSnapshot,
     ProfileSnapshot,
     RollObservation,
     ServerSettingMetric,
@@ -25,6 +26,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableInfoklImportContext,
     DurableKakeraImportContext,
+    DurableMudapinsImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -42,6 +44,10 @@ from moa.services.infokl_projection_coordinator import (
 from moa.services.kakera_state_projection_coordinator import (
     KakeraStateProjectionCoordinator,
     KakeraStateProjectionResult,
+)
+from moa.services.mudapins_projection_coordinator import (
+    MudapinsProjectionCoordinator,
+    MudapinsProjectionResult,
 )
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
@@ -71,6 +77,8 @@ KAKERA_MESSAGE = (
     "Silver III · Max reached!\n"
     "Gold II · 10,000 kakera remaining"
 )
+MUDAPINS_MESSAGE = ":pin139::pin139::logopin6::pin2157:"
+EMPTY_MUDAPINS_MESSAGE = "No mudapins found! Collect them with kakeraloots ($kl)"
 SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -159,6 +167,11 @@ PROFILE = ProfileSnapshot(
     spheres={},
     displayed_badges=(),
 )
+
+MUDAPINS = MudapinSnapshot(
+    pin_markers=(":pin139:", ":pin139:", ":logopin6:", ":pin2157:")
+)
+EMPTY_MUDAPINS = MudapinSnapshot(pin_markers=())
 
 
 def _durable_roll_importer(tmp_path):
@@ -478,6 +491,53 @@ def _durable_kakera_importer(tmp_path):
     service = AutomaticImportService(
         CatalogService(catalog_repository),
         kakera_state_projection_coordinator=coordinator,
+    )
+    return database_path, service, received.source_event_id, attempt.attempt_id
+
+
+def _durable_mudapins_importer(tmp_path):
+    database_path = tmp_path / "durable-mudapins.db"
+    catalog_repository = CatalogRepository(database_path)
+    discord_repository = DiscordMessageRepository(database_path)
+    coordinator = MudapinsProjectionCoordinator(catalog_repository, discord_repository)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "mudapins-message"
+    )
+    received = discord_repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "mudapins-payload-hash", "revision-1"
+        ),
+        event_key="mudapins-event",
+        event_kind="message_create",
+        raw_text=MUDAPINS_MESSAGE,
+        payload_json='{"content":"mudapins payload"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    discord_repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        recorded_at=OBSERVED_AT,
+    )
+    discord_repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Lake",
+        account_name="ernieuuu",
+        recorded_at=OBSERVED_AT,
+    )
+    attempt = discord_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=OBSERVED_AT,
+    )
+    service = AutomaticImportService(
+        CatalogService(catalog_repository),
+        mudapins_projection_coordinator=coordinator,
     )
     return database_path, service, received.source_event_id, attempt.attempt_id
 
@@ -2518,6 +2578,393 @@ def test_automatic_import_persists_empty_profile_without_optional_sections(tmp_p
     assert observation.snapshot.collection_size == 0
     assert observation.snapshot.kakera_balance is None
     assert observation.snapshot.pokedex_count is None
+
+
+def test_automatic_import_non_durable_mudapins_keeps_catalog_path_and_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = MUDAPINS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        MUDAPINS_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="mudapins",
+    )
+
+    parser.parse_mudapins.assert_called_once_with(MUDAPINS_MESSAGE)
+    catalog.import_mudapins.assert_called_once_with(
+        MUDAPINS,
+        "Lake",
+        "ernieuuu",
+        MUDAPINS_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_mudapins.assert_not_called()
+    assert result.kind == "mudapins"
+    assert result.imported_count == 4
+    assert result.message == "Imported 4 Mudapin markers."
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_mudapins_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = MUDAPINS
+    coordinator = Mock()
+    coordinator.coordinate_mudapins.return_value = MudapinsProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        mudapin_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("mudapin_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+    context = DurableMudapinsImportContext(
+        source_event_id=81,
+        attempt_id=83,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted mudapins payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        MUDAPINS_MESSAGE,
+        "caller-source",
+        detected_kind="mudapins",
+        durable_mudapins_context=context,
+    )
+
+    parser.parse_mudapins.assert_called_once_with(MUDAPINS_MESSAGE)
+    coordinator.coordinate_mudapins.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=83,
+        snapshot=MUDAPINS,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted mudapins payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_mudapins.assert_not_called()
+    assert result.kind == "mudapins"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_mudapins_maps_completed_replay() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = MUDAPINS
+    coordinator = Mock()
+    coordinator.coordinate_mudapins.return_value = MudapinsProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        mudapin_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("mudapin_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        MUDAPINS_MESSAGE,
+        "caller-source",
+        detected_kind="mudapins",
+        durable_mudapins_context=DurableMudapinsImportContext(
+            source_event_id=81,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=MUDAPINS_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert result.kind == "mudapins"
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+@pytest.mark.parametrize(
+    ("message", "snapshot", "expected_message"),
+    (
+        (MUDAPINS_MESSAGE, MUDAPINS, "Imported 4 Mudapin markers."),
+        (EMPTY_MUDAPINS_MESSAGE, EMPTY_MUDAPINS, "Imported no Mudapins."),
+    ),
+)
+def test_automatic_import_durable_mudapins_preserves_snapshot_values(
+    message, snapshot, expected_message
+) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = snapshot
+    coordinator = Mock()
+    coordinator.coordinate_mudapins.return_value = MudapinsProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        mudapin_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("mudapin_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        message,
+        "caller-source",
+        detected_kind="mudapins",
+        durable_mudapins_context=DurableMudapinsImportContext(
+            source_event_id=81,
+            attempt_id=83,
+            server="Lake",
+            account="ernieuuu",
+            raw=message,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert coordinator.coordinate_mudapins.call_args.kwargs["snapshot"] is snapshot
+    assert result.message == expected_message
+
+
+def test_automatic_import_durable_mudapins_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = MUDAPINS
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="MudapinsProjectionCoordinator"):
+        service.import_message(
+            MUDAPINS_MESSAGE,
+            "discord",
+            detected_kind="mudapins",
+            durable_mudapins_context=DurableMudapinsImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=MUDAPINS_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_mudapins.assert_called_once_with(MUDAPINS_MESSAGE)
+    catalog.import_mudapins.assert_not_called()
+
+
+def test_automatic_import_durable_mudapins_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.return_value = MUDAPINS
+    coordinator = Mock()
+    coordinator.coordinate_mudapins.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            MUDAPINS_MESSAGE,
+            "discord",
+            detected_kind="mudapins",
+            durable_mudapins_context=DurableMudapinsImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=MUDAPINS_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_mudapins.assert_not_called()
+
+
+def test_automatic_import_durable_mudapins_parse_failure_precedes_any_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_mudapins.side_effect = ValueError("invalid Mudapin response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        mudapins_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid Mudapin response"):
+        service.import_message(
+            MUDAPINS_MESSAGE,
+            "discord",
+            detected_kind="mudapins",
+            durable_mudapins_context=DurableMudapinsImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=MUDAPINS_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_mudapins.assert_called_once_with(MUDAPINS_MESSAGE)
+    coordinator.coordinate_mudapins.assert_not_called()
+    catalog.import_mudapins.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_markers"),
+    (
+        (MUDAPINS_MESSAGE, MUDAPINS.pin_markers),
+        (EMPTY_MUDAPINS_MESSAGE, ()),
+    ),
+)
+def test_automatic_import_real_durable_mudapins_first_processing_and_replay_are_atomic(
+    tmp_path, message, expected_markers
+) -> None:
+    database_path, service, source_event_id, attempt_id = _durable_mudapins_importer(tmp_path)
+    context = DurableMudapinsImportContext(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        server="Lake",
+        account="ernieuuu",
+        raw=message,
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    first = service.import_message(
+        message,
+        "caller-source",
+        detected_kind="mudapins",
+        durable_mudapins_context=context,
+    )
+
+    assert first.kind == "mudapins"
+    assert first.imported_count == 1
+    assert first.import_event_id is not None
+    assert first.replay_skipped is False
+    assert first.durable_success_recorded is True
+    observation = service._catalog.mudapins("Lake", "ernieuuu")
+    assert observation is not None
+    assert observation.snapshot.pin_markers == expected_markers
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'mudapins'"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM mudapin_observations").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links "
+            "WHERE projection_kind = 'catalog.mudapins' AND state = 'completed'"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", first.import_event_id)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "succeeded"
+        before_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM mudapin_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_source_event_server_attributions), "
+                "(SELECT COUNT(*) FROM discord_source_event_account_attributions), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts)"
+            ).fetchone()
+        )
+
+    replay = service.import_message(
+        message,
+        "caller-source",
+        detected_kind="mudapins",
+        durable_mudapins_context=DurableMudapinsImportContext(
+            source_event_id=source_event_id,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=message,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    assert replay.kind == "mudapins"
+    assert replay.imported_count == 0
+    assert replay.import_event_id == first.import_event_id
+    assert replay.replay_skipped is True
+    assert replay.durable_success_recorded is True
+    with sqlite3.connect(database_path) as connection:
+        after_replay = tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM import_events), "
+                "(SELECT COUNT(*) FROM mudapin_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts), "
+                "(SELECT COUNT(*) FROM discord_source_event_server_attributions), "
+                "(SELECT COUNT(*) FROM discord_source_event_account_attributions), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts)"
+            ).fetchone()
+        )
+    assert after_replay == before_replay
 
 
 def test_automatic_import_persists_mudapin_inventory(tmp_path) -> None:
