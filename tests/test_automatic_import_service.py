@@ -14,6 +14,7 @@ from moa.models.character import (
     RollObservation,
     ServerSettingMetric,
     ServerSettingsSnapshot,
+    TowerStateSnapshot,
     TimerStateSnapshot,
 )
 from moa.models.catalog import AutomaticImportResult
@@ -31,6 +32,7 @@ from moa.services.automatic_import_service import (
     DurableRollImportContext,
     DurableSettingsImportContext,
     DurableTimerImportContext,
+    DurableTowerStateImportContext,
 )
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import (
@@ -65,6 +67,7 @@ from moa.services.timer_projection_coordinator import (
     TimerProjectionCoordinator,
     TimerProjectionResult,
 )
+from moa.services.tower_state_projection_coordinator import TowerStateProjectionResult
 
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
@@ -79,6 +82,7 @@ KAKERA_MESSAGE = (
 )
 MUDAPINS_MESSAGE = ":pin139::pin139::logopin6::pin2157:"
 EMPTY_MUDAPINS_MESSAGE = "No mudapins found! Collect them with kakeraloots ($kl)"
+TOWER_MESSAGE = "tower payload"
 SETTINGS_MESSAGE = "settings payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
@@ -119,6 +123,13 @@ KAKERA_STATE = KakeraStateSnapshot(
     ),
 )
 ZERO_KAKERA_STATE = KakeraStateSnapshot(kakera_balance=0, badges=())
+TOWER_STATE = TowerStateSnapshot(
+    current_level=2,
+    completed_towers=3,
+    next_level_cost=75_000,
+    kakera_balance=7_673,
+    built_perk_ids=(2, 7),
+)
 
 TIMER_STATE = TimerStateSnapshot(
     can_claim_now=None,
@@ -3123,3 +3134,287 @@ def test_automatic_import_routes_ranked_harem_pages(tmp_path) -> None:
     assert [(entry.character_name, entry.claim_rank, entry.kakera_value) for entry in entries] == [
         ("Zero Two", 2, 1440)
     ]
+
+
+def test_automatic_import_non_durable_tower_keeps_catalog_path_and_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        TOWER_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="towerstate",
+    )
+
+    parser.parse_tower_state.assert_called_once_with(TOWER_MESSAGE)
+    catalog.import_tower_state.assert_called_once_with(
+        TOWER_STATE,
+        "Lake",
+        "ernieuuu",
+        TOWER_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_tower_state.assert_not_called()
+    assert result.kind == "towerstate"
+    assert result.imported_count == 1
+    assert result.message == "Imported Kakera Tower state."
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_tower_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    coordinator = Mock()
+    coordinator.coordinate_tower_state.return_value = TowerStateProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        tower_state_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("tower_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+    context = DurableTowerStateImportContext(
+        source_event_id=81,
+        attempt_id=83,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted tower payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    result = service.import_message(
+        TOWER_MESSAGE,
+        "caller-source",
+        detected_kind="towerstate",
+        durable_tower_state_context=context,
+    )
+
+    parser.parse_tower_state.assert_called_once_with(TOWER_MESSAGE)
+    coordinator.coordinate_tower_state.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=83,
+        state=TOWER_STATE,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted tower payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_tower_state.assert_not_called()
+    assert result.kind == "towerstate"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_tower_maps_succeeded_replay() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    coordinator = Mock()
+    coordinator.coordinate_tower_state.return_value = TowerStateProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        tower_state_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("tower_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        TOWER_MESSAGE,
+        "caller-source",
+        detected_kind="towerstate",
+        durable_tower_state_context=DurableTowerStateImportContext(
+            source_event_id=81,
+            attempt_id=None,
+            server="Lake",
+            account="ernieuuu",
+            raw=TOWER_MESSAGE,
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        ),
+    )
+
+    coordinator.coordinate_tower_state.assert_called_once()
+    assert coordinator.coordinate_tower_state.call_args.kwargs["attempt_id"] is None
+    catalog.import_tower_state.assert_not_called()
+    assert result.kind == "towerstate"
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_tower_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="TowerStateProjectionCoordinator"):
+        service.import_message(
+            TOWER_MESSAGE,
+            "discord",
+            detected_kind="towerstate",
+            durable_tower_state_context=DurableTowerStateImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=TOWER_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_tower_state.assert_called_once_with(TOWER_MESSAGE)
+    catalog.import_tower_state.assert_not_called()
+
+
+def test_automatic_import_durable_tower_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    coordinator = Mock()
+    coordinator.coordinate_tower_state.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            TOWER_MESSAGE,
+            "discord",
+            detected_kind="towerstate",
+            durable_tower_state_context=DurableTowerStateImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=TOWER_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    catalog.import_tower_state.assert_not_called()
+
+
+def test_automatic_import_tower_parse_failure_precedes_coordinator_or_catalog() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.side_effect = ValueError("invalid Tower response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid Tower response"):
+        service.import_message(
+            TOWER_MESSAGE,
+            "discord",
+            detected_kind="towerstate",
+            durable_tower_state_context=DurableTowerStateImportContext(
+                source_event_id=81,
+                attempt_id=83,
+                server="Lake",
+                account="ernieuuu",
+                raw=TOWER_MESSAGE,
+                source="discord",
+                observed_at=OBSERVED_AT,
+                finished_at=FINISHED_AT,
+            ),
+        )
+
+    parser.parse_tower_state.assert_called_once_with(TOWER_MESSAGE)
+    coordinator.coordinate_tower_state.assert_not_called()
+    catalog.import_tower_state.assert_not_called()
+
+
+def test_automatic_import_non_tower_kind_does_not_call_tower_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERA_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="kakera",
+    )
+
+    assert result.kind == "kakera"
+    coordinator.coordinate_tower_state.assert_not_called()
+    parser.parse_tower_state.assert_not_called()
+
+
+def test_automatic_import_non_durable_tower_does_not_require_context_metadata() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_tower_state.return_value = TOWER_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        tower_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        TOWER_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="towerstate",
+    )
+
+    assert result.imported_count == 1
+    coordinator.coordinate_tower_state.assert_not_called()
+    catalog.import_tower_state.assert_called_once()

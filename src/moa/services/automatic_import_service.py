@@ -15,6 +15,7 @@ from moa.services.profile_projection_coordinator import ProfileProjectionCoordin
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,20 @@ class DurableMudapinsImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableTowerStateImportContext:
+    """Durable lifecycle, scope, and payload metadata for one Tower-state import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -120,6 +135,7 @@ class AutomaticImportService:
         timer_projection_coordinator: TimerProjectionCoordinator | None = None,
         kakera_state_projection_coordinator: KakeraStateProjectionCoordinator | None = None,
         mudapins_projection_coordinator: MudapinsProjectionCoordinator | None = None,
+        tower_state_projection_coordinator: TowerStateProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -132,6 +148,7 @@ class AutomaticImportService:
         self._timer_projection_coordinator = timer_projection_coordinator
         self._kakera_state_projection_coordinator = kakera_state_projection_coordinator
         self._mudapins_projection_coordinator = mudapins_projection_coordinator
+        self._tower_state_projection_coordinator = tower_state_projection_coordinator
 
     def import_message(
         self,
@@ -151,6 +168,7 @@ class AutomaticImportService:
         durable_timer_context: DurableTimerImportContext | None = None,
         durable_kakera_context: DurableKakeraImportContext | None = None,
         durable_mudapins_context: DurableMudapinsImportContext | None = None,
+        durable_tower_state_context: DurableTowerStateImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -185,7 +203,11 @@ class AutomaticImportService:
                 else (
                     durable_mudapins_context.server
                     if kind == "mudapins" and durable_mudapins_context is not None
-                    else self._require(server_name, "server", kind)
+                    else (
+                        durable_tower_state_context.server
+                        if kind == "towerstate" and durable_tower_state_context is not None
+                        else self._require(server_name, "server", kind)
+                    )
                 )
             )
         )
@@ -575,7 +597,11 @@ class AutomaticImportService:
             else (
                 durable_kakera_context.account
                 if kind == "kakera" and durable_kakera_context is not None
-                else self._require(account_name, "account", kind)
+                else (
+                    durable_tower_state_context.account
+                    if kind == "towerstate" and durable_tower_state_context is not None
+                    else self._require(account_name, "account", kind)
+                )
             )
         )
         if kind == "bonus":
@@ -678,10 +704,42 @@ class AutomaticImportService:
                 durable_success_recorded=durable_success_recorded,
             )
         if kind == "towerstate":
-            self._catalog.import_tower_state(
-                self._parser.parse_tower_state(raw_message), server, account, raw_message, source
+            state = self._parser.parse_tower_state(raw_message)
+            if durable_tower_state_context is None:
+                self._catalog.import_tower_state(state, server, account, raw_message, source)
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._tower_state_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A TowerStateProjectionCoordinator is required for a durable Tower-state import."
+                    )
+                coordinated = coordinator.coordinate_tower_state(
+                    source_event_id=durable_tower_state_context.source_event_id,
+                    attempt_id=durable_tower_state_context.attempt_id,
+                    state=state,
+                    server=durable_tower_state_context.server,
+                    account=durable_tower_state_context.account,
+                    raw=durable_tower_state_context.raw,
+                    source=durable_tower_state_context.source,
+                    observed_at=durable_tower_state_context.observed_at,
+                    finished_at=durable_tower_state_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported Kakera Tower state.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakera Tower state.")
         if kind == "lootstate":
             self._catalog.import_kakeraloot_state(
                 self._parser.parse_kakeraloot_state(raw_message), server, account, raw_message, source
