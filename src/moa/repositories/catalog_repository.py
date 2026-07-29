@@ -493,6 +493,14 @@ class _TowerStateImportConnectionResult:
     tower_state_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _SphereResultImportConnectionResult:
+    """Rows created by one sphere-result import on a caller-owned connection."""
+
+    import_event_id: int
+    sphere_result_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -531,13 +539,42 @@ class CatalogRepository:
         """Store one account-scoped `$oq` sphere payout."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("sphere_result", source, observed_at.isoformat(), raw_message),
+            imported = self._import_sphere_result_with_connection(
+                connection,
+                state=state,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return SphereResultImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_sphere_result_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: SphereResultSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _SphereResultImportConnectionResult:
+        """Store one sphere-result snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("sphere_result", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        sphere_result_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO sphere_result_observations (
@@ -553,12 +590,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return SphereResultImportResult(
+            ).lastrowid
+        )
+        return _SphereResultImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            sphere_result_observation_id=sphere_result_observation_id,
         )
 
     def sphere_result(self, server_name: str, account_name: str) -> SphereResultObservation | None:
