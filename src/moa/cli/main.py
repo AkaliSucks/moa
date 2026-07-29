@@ -23,6 +23,7 @@ from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.command_service import CommandService
 from moa.services.discord_listener_service import DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
+from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
@@ -209,6 +210,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        kakera_state_projection_coordinator = KakeraStateProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -217,6 +222,7 @@ def discord_listen(
             settings_projection_coordinator=settings_projection_coordinator,
             infokl_projection_coordinator=infokl_projection_coordinator,
             timer_projection_coordinator=timer_projection_coordinator,
+            kakera_state_projection_coordinator=kakera_state_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
