@@ -10,6 +10,7 @@ from moa.models.character import (
     BadgeLevel,
     ClaimConfirmation,
     KakeraStateSnapshot,
+    KakeralootStateSnapshot,
     PlayerBonusMetric,
     PlayerBonusSnapshot,
     ProfileSnapshot,
@@ -24,7 +25,11 @@ from moa.models.character import (
     TimerStateSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
-from moa.repositories.catalog_repository import CatalogRepository, _PlayerBonusImportConnectionResult
+from moa.repositories.catalog_repository import (
+    CatalogRepository,
+    _KakeralootStateImportConnectionResult,
+    _PlayerBonusImportConnectionResult,
+)
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 
 
@@ -106,6 +111,61 @@ TIMER_STATE = TimerStateSnapshot(
     rolls_reset_status="limited_timer",
     rolls_per_hour_limit=17,
     rt_reset_minutes=612,
+)
+KAKERALOOT_STATE = KakeralootStateSnapshot(
+    status_note="guarded state",
+    rolls_stacked=17,
+    disable_wa_ha_reduction=102,
+    disable_wg_hg_reduction=68,
+    protected_wish_level=42,
+    protected_wish_denominator=4_642,
+    mudapins=22,
+    rt_cooldown_reduction_hours=2,
+    permanent_roll_bonus=1,
+    star_branches=3,
+    starwish_slots_from_branches=4,
+    quantity_level=5,
+    quality_level=6,
+    usage_count=1_234,
+    kakera_balance=7_673,
+)
+ZERO_KAKERALOOT_STATE = KakeralootStateSnapshot(
+    status_note="",
+    rolls_stacked=0,
+    disable_wa_ha_reduction=0,
+    disable_wg_hg_reduction=0,
+    protected_wish_level=0,
+    protected_wish_denominator=0,
+    mudapins=0,
+    rt_cooldown_reduction_hours=0,
+    permanent_roll_bonus=0,
+    star_branches=0,
+    starwish_slots_from_branches=0,
+    quantity_level=0,
+    quality_level=0,
+    usage_count=0,
+    kakera_balance=0,
+)
+NULL_KAKERALOOT_STATE = KakeralootStateSnapshot(
+    status_note=None,
+    rolls_stacked=None,
+    disable_wa_ha_reduction=None,
+    disable_wg_hg_reduction=None,
+    protected_wish_level=None,
+    protected_wish_denominator=None,
+    mudapins=None,
+    rt_cooldown_reduction_hours=None,
+    permanent_roll_bonus=None,
+    star_branches=None,
+    starwish_slots_from_branches=None,
+    quantity_level=None,
+    quality_level=None,
+    usage_count=None,
+    kakera_balance=None,
+)
+NO_KAKERALOOT_STATE = KakeralootStateSnapshot(
+    has_kakeraloots=False,
+    status_note="No Kakeraloots bought; Mudae did not report loot statistics.",
 )
 KAKERA_STATE = KakeraStateSnapshot(
     kakera_balance=7_673,
@@ -257,6 +317,24 @@ def _timer_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "timer_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _kakeraloot_state_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "kakeraloot_state_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -1872,6 +1950,395 @@ def test_timer_state_helper_reuses_contexts_and_rollback_preserves_them(tmp_path
         ).fetchone()
         assert tuple(current) == tuple(existing)
         assert _timer_state_counts(connection) == before_counts
+
+
+def test_kakeraloot_state_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_KakeralootStateImportConnectionResult)
+    assert _KakeralootStateImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_KakeralootStateImportConnectionResult)] == [
+        "import_event_id",
+        "kakeraloot_state_observation_id",
+    ]
+    assert not hasattr(_KakeralootStateImportConnectionResult(1, 2), "__dict__")
+
+
+def test_public_kakeraloot_state_wrapper_preserves_result_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "kakeraloot state payload with exact source text"
+
+    result = catalog.import_kakeraloot_state(
+        KAKERALOOT_STATE,
+        "  Server  ",
+        "  Account  ",
+        raw_message,
+        "discord",
+    )
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    observation = catalog.kakeraloot_state("Server", "Account")
+    assert observation is not None
+    assert observation.server_name == "Server"
+    assert observation.account_name == "Account"
+    assert observation.has_kakeraloots is True
+    assert observation.status_note == KAKERALOOT_STATE.status_note
+    for field in (
+        "rolls_stacked",
+        "disable_wa_ha_reduction",
+        "disable_wg_hg_reduction",
+        "protected_wish_level",
+        "protected_wish_denominator",
+        "mudapins",
+        "rt_cooldown_reduction_hours",
+        "permanent_roll_bonus",
+        "star_branches",
+        "starwish_slots_from_branches",
+        "quantity_level",
+        "quality_level",
+        "usage_count",
+        "kakera_balance",
+    ):
+        assert getattr(observation, field) == getattr(KAKERALOOT_STATE, field)
+    assert observation.observed_at == result.observed_at
+
+    with connect(database_path) as connection:
+        assert _kakeraloot_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "kakeraloot_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        assert tuple(event) == (
+            "kakeraloot_state",
+            "discord",
+            raw_message,
+            result.observed_at.isoformat(),
+        )
+        stored = connection.execute(
+            """
+            SELECT has_kakeraloots, status_note, rolls_stacked, disable_wa_ha_reduction,
+                   disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
+                   mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
+                   star_branches, starwish_slots_from_branches, quantity_level, quality_level,
+                   usage_count, kakera_balance, observed_at, import_event_id
+            FROM kakeraloot_state_observations
+            """
+        ).fetchone()
+        assert tuple(stored) == (
+            1,
+            "guarded state",
+            17,
+            102,
+            68,
+            42,
+            4_642,
+            22,
+            2,
+            1,
+            3,
+            4,
+            5,
+            6,
+            1_234,
+            7_673,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        )
+
+
+def test_kakeraloot_state_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=KAKERALOOT_STATE,
+            server="Server",
+            account="Account",
+            raw="kakeraloot payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert imported.import_event_id > 0
+        assert imported.kakeraloot_state_observation_id > 0
+        assert _kakeraloot_state_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "kakeraloot_state_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        observation = connection.execute(
+            "SELECT import_event_id FROM kakeraloot_state_observations WHERE id = ?",
+            (imported.kakeraloot_state_observation_id,),
+        ).fetchone()
+        assert observation["import_event_id"] == imported.import_event_id
+        with connect(database_path) as observer:
+            assert _kakeraloot_state_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "kakeraloot_state_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+
+
+def test_kakeraloot_state_helper_commit_persists_rows_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=KAKERALOOT_STATE,
+            server="Server",
+            account="Account",
+            raw="kakeraloot payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, observed_at, import_event_id
+            FROM kakeraloot_state_observations
+            WHERE id = ?
+            """,
+            (imported.kakeraloot_state_observation_id,),
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == (
+            "kakeraloot_state",
+            "clipboard",
+            "kakeraloot payload",
+            OBSERVED_AT.isoformat(),
+        )
+        assert observation["id"] == imported.kakeraloot_state_observation_id
+        assert observation["account_context_id"] == connection.execute(
+            "SELECT id FROM account_contexts WHERE normalized_name = ?",
+            ("account",),
+        ).fetchone()[0]
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+
+
+def test_kakeraloot_state_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=KAKERALOOT_STATE,
+            server="Server",
+            account="Account",
+            raw="kakeraloot payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _kakeraloot_state_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "kakeraloot_state_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_kakeraloot_state_helper_reuses_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_kakeraloot_state(KAKERALOOT_STATE, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _kakeraloot_state_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=KAKERALOOT_STATE,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="second payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert imported.import_event_id > 0
+        assert imported.kakeraloot_state_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _kakeraloot_state_counts(connection) == before_counts
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_has_kakeraloots", "expected_status_note"),
+    [
+        (ZERO_KAKERALOOT_STATE, 1, ""),
+        (NULL_KAKERALOOT_STATE, 1, None),
+        (NO_KAKERALOOT_STATE, 0, "No Kakeraloots bought; Mudae did not report loot statistics."),
+    ],
+)
+def test_kakeraloot_state_helper_preserves_boundary_values(tmp_path, state, expected_has_kakeraloots, expected_status_note) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=state,
+            server="Server",
+            account="Account",
+            raw="boundary kakeraloot payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT has_kakeraloots, status_note, rolls_stacked, disable_wa_ha_reduction,
+                   disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
+                   mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
+                   star_branches, starwish_slots_from_branches, quantity_level, quality_level,
+                   usage_count, kakera_balance, observed_at, import_event_id
+            FROM kakeraloot_state_observations
+            WHERE id = ?
+            """,
+            (imported.kakeraloot_state_observation_id,),
+        ).fetchone()
+        assert tuple(row) == (
+            expected_has_kakeraloots,
+            expected_status_note,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            OBSERVED_AT.isoformat(),
+            imported.import_event_id,
+        )
+        observation = catalog.kakeraloot_state("Server", "Account")
+        assert observation is not None
+        assert observation.has_kakeraloots is bool(expected_has_kakeraloots)
+        assert observation.status_note == expected_status_note
+        if expected_has_kakeraloots:
+            assert observation.rolls_stacked == 0
+            assert observation.kakera_balance == 0
+        else:
+            assert observation.rolls_stacked is None
+            assert observation.kakera_balance is None
+
+
+def test_kakeraloot_state_helper_does_not_write_projection_or_discord_state(tmp_path) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    with connect(database_path) as connection:
+        before_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        before_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()[0]
+        before_counts = _kakeraloot_state_counts(connection)
+        catalog._import_kakeraloot_state_with_connection(
+            connection,
+            state=KAKERALOOT_STATE,
+            server="Server",
+            account="Account",
+            raw="kakeraloot payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        after_counts = _kakeraloot_state_counts(connection)
+        after_event = connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()
+        after_attempt = connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+        ).fetchone()[0]
+
+    assert after_counts["import_events"] == before_counts["import_events"] + 1
+    assert after_counts["server_contexts"] == before_counts["server_contexts"] + 1
+    assert after_counts["account_contexts"] == before_counts["account_contexts"] + 1
+    assert after_counts["kakeraloot_state_observations"] == before_counts["kakeraloot_state_observations"] + 1
+    assert after_counts["discord_projection_links"] == before_counts["discord_projection_links"]
+    assert after_counts["discord_source_events"] == before_counts["discord_source_events"]
+    assert after_counts["discord_source_event_server_attributions"] == before_counts[
+        "discord_source_event_server_attributions"
+    ]
+    assert after_counts["discord_source_event_account_attributions"] == before_counts[
+        "discord_source_event_account_attributions"
+    ]
+    assert after_counts["discord_processing_attempts"] == before_counts["discord_processing_attempts"]
+    assert tuple(after_event) == tuple(before_event)
+    assert after_attempt == before_attempt
 
 
 def test_player_bonus_connection_result_is_frozen_slotted_with_exact_fields() -> None:
