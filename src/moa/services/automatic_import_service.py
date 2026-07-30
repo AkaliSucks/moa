@@ -21,6 +21,7 @@ from moa.services.settings_projection_coordinator import SettingsProjectionCoord
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
+from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +167,20 @@ class DurablePlayerBonusImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableWishlistImportContext:
+    """Durable lifecycle, scope, and payload metadata for one wishlist import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -186,6 +201,7 @@ class AutomaticImportService:
         kakeraloot_state_projection_coordinator: KakeralootStateProjectionCoordinator | None = None,
         sphere_result_projection_coordinator: SphereResultProjectionCoordinator | None = None,
         player_bonus_projection_coordinator: PlayerBonusProjectionCoordinator | None = None,
+        wishlist_projection_coordinator: WishlistProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -202,6 +218,7 @@ class AutomaticImportService:
         self._kakeraloot_state_projection_coordinator = kakeraloot_state_projection_coordinator
         self._sphere_result_projection_coordinator = sphere_result_projection_coordinator
         self._player_bonus_projection_coordinator = player_bonus_projection_coordinator
+        self._wishlist_projection_coordinator = wishlist_projection_coordinator
 
     def import_message(
         self,
@@ -225,6 +242,7 @@ class AutomaticImportService:
         durable_kakeraloot_state_context: DurableKakeralootStateImportContext | None = None,
         durable_sphere_result_context: DurableSphereResultImportContext | None = None,
         durable_player_bonus_context: DurablePlayerBonusImportContext | None = None,
+        durable_wishlist_context: DurableWishlistImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -271,7 +289,11 @@ class AutomaticImportService:
                                 else (
                                     durable_player_bonus_context.server
                                     if kind == "bonus" and durable_player_bonus_context is not None
-                                    else self._require(server_name, "server", kind)
+                                    else (
+                                        durable_wishlist_context.server
+                                        if kind == "wishlist" and durable_wishlist_context is not None
+                                        else self._require(server_name, "server", kind)
+                                    )
                                 )
                             )
                         )
@@ -677,7 +699,11 @@ class AutomaticImportService:
                             else (
                                 durable_player_bonus_context.account
                                 if kind == "bonus" and durable_player_bonus_context is not None
-                                else self._require(account_name, "account", kind)
+                                else (
+                                    durable_wishlist_context.account
+                                    if kind == "wishlist" and durable_wishlist_context is not None
+                                    else self._require(account_name, "account", kind)
+                                )
                             )
                         )
                     )
@@ -723,8 +749,41 @@ class AutomaticImportService:
             )
         if kind == "wishlist":
             wishlist = self._parser.parse_wishlist(raw_message)
-            self._catalog.import_wishlist(wishlist, server, account, raw_message, source)
-            return AutomaticImportResult(kind=kind, imported_count=len(wishlist.entries), message="Imported wishlist.")
+            if durable_wishlist_context is None:
+                self._catalog.import_wishlist(wishlist, server, account, raw_message, source)
+                imported_count = len(wishlist.entries)
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._wishlist_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A WishlistProjectionCoordinator is required for a durable wishlist import."
+                    )
+                coordinated = coordinator.coordinate_wishlist(
+                    source_event_id=durable_wishlist_context.source_event_id,
+                    attempt_id=durable_wishlist_context.attempt_id,
+                    state=wishlist,
+                    server=durable_wishlist_context.server,
+                    account=durable_wishlist_context.account,
+                    raw=durable_wishlist_context.raw,
+                    source=durable_wishlist_context.source,
+                    observed_at=durable_wishlist_context.observed_at,
+                    finished_at=durable_wishlist_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported wishlist.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
+            )
         if kind == "disablelist":
             disablelist = self._parser.parse_disablelist(raw_message)
             self._catalog.import_disablelist(disablelist, server, account, raw_message, source)
