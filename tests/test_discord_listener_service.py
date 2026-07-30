@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sqlite3
 import time
@@ -30,6 +31,7 @@ from moa.services.settings_projection_coordinator import SettingsProjectionCoord
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
+from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
 def test_extract_message_text_flattens_discord_embed_content() -> None:
@@ -180,6 +182,10 @@ def _listener_with_two_configured_users(tmp_path):
             discord_repository,
         ),
         player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
+        wishlist_projection_coordinator=WishlistProjectionCoordinator(
             catalog_repository,
             discord_repository,
         ),
@@ -1306,6 +1312,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            wishlist_projection_coordinator=WishlistProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1379,6 +1389,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            wishlist_projection_coordinator=WishlistProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1688,6 +1702,29 @@ def _durable_bonus_message(message_id: int = 1222, *, interaction=True):
     )
 
 
+def _durable_wishlist_message(message_id: int = 1226, *, interaction=True):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="wl", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$wl` response with duplicate entries and markers.
+        content=(
+            "**ernieuuu's Wishlist - 3/13 $wl, 2/2 $sw**\n"
+            "**Saber** ✅:kakera:\n"
+            "**Emilia** ✅ ⭐\n"
+            "**Saber** ✅:kakera:"
+        ),
+        embeds=(),
+        edited_at=None,
+    )
+
+
 def _receipt_rows(database_path, table: str):
     with connect(database_path) as connection:
         return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
@@ -1799,6 +1836,22 @@ def _durable_bonus_counts(database_path):
                 "(SELECT COUNT(*) FROM discord_processing_attempts), "
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'player_bonus'), "
                 "(SELECT COUNT(*) FROM player_bonus_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_wishlist_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'wishlist'), "
+                "(SELECT COUNT(*) FROM wishlist_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
                 "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
@@ -6530,4 +6583,463 @@ def test_listener_non_durable_player_bonus_keeps_direct_catalog_path(tmp_path) -
     observation = catalog.player_bonus("Test Server", "user_a")
     assert observation is not None
     assert len(observation.metrics) == 10
+    assert _receipt_rows(database_path, "discord_source_events") == []
+
+
+def test_listener_first_durable_wishlist_uses_coordinator_owned_success(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_wishlist = Mock(wraps=listener._catalog.import_wishlist)
+    listener._catalog.import_wishlist = direct_wishlist
+    message = _durable_wishlist_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_wishlist_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1226"
+    assert context.observed_at.tzinfo is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.observed_at <= context.finished_at
+    importer.import_message.assert_called_once()
+    direct_wishlist.assert_not_called()
+    assert _durable_wishlist_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_processing_attempts")[0]["status"] == "succeeded"
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+    with connect(database_path) as connection:
+        observation = connection.execute(
+            "SELECT id, wishlist_count, wishlist_capacity, starwish_count, "
+            "starwish_capacity, entries_json, import_event_id "
+            "FROM wishlist_observations"
+        ).fetchone()
+        link = connection.execute(
+            "SELECT projection_kind, projection_slot, projection_table, projection_row_id "
+            "FROM discord_projection_links"
+        ).fetchone()
+    assert observation[1:] == (
+        3,
+        13,
+        2,
+        2,
+        json.dumps(
+            [
+                {
+                    "name": "Saber",
+                    "is_starwish": False,
+                    "is_owned_marker_present": True,
+                    "kakera_marker_present": True,
+                },
+                {
+                    "name": "Emilia",
+                    "is_starwish": True,
+                    "is_owned_marker_present": True,
+                    "kakera_marker_present": False,
+                },
+                {
+                    "name": "Saber",
+                    "is_starwish": False,
+                    "is_owned_marker_present": True,
+                    "kakera_marker_present": True,
+                },
+            ]
+        ),
+        1,
+    )
+    assert tuple(link) == (
+        "catalog.wishlist",
+        '{"account":"user_a","server":"test server"}',
+        "wishlist_observations",
+        observation[0],
+    )
+
+
+def test_listener_wishlist_attribution_is_persisted_before_attempt_creation(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    order = []
+    for name in (
+        "record_server_attribution",
+        "record_account_attribution",
+        "begin_processing_attempt",
+    ):
+        original = getattr(repository, name)
+
+        def record_call(*args, _name=name, _original=original, **kwargs):
+            order.append(_name)
+            return _original(*args, **kwargs)
+
+        setattr(repository, name, record_call)
+
+    asyncio.run(listener.handle_bot_response(_durable_wishlist_message()))
+
+    assert order == [
+        "record_server_attribution",
+        "record_account_attribution",
+        "begin_processing_attempt",
+    ]
+
+
+def test_listener_succeeded_wishlist_restart_replay_uses_no_attempt_and_no_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_wishlist_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    restarted_repository.begin_processing_attempt = Mock(
+        wraps=restarted_repository.begin_processing_attempt
+    )
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_wishlist_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    importer.import_message.assert_called_once()
+    restarted_repository.begin_processing_attempt.assert_not_called()
+    assert _durable_wishlist_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+    with connect(database_path) as connection:
+        observation_id = connection.execute(
+            "SELECT id FROM wishlist_observations"
+        ).fetchone()[0]
+        link = connection.execute(
+            "SELECT projection_row_id FROM discord_projection_links"
+        ).fetchone()[0]
+    assert link == observation_id
+
+
+def test_listener_wishlists_for_two_users_sharing_one_channel_stay_attributed(tmp_path) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    message_a = _durable_wishlist_message(1227)
+    message_b = _durable_wishlist_message(1228)
+    message_b.interaction_metadata = SimpleNamespace(
+        name="wl", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(listener.handle_bot_response(message_a))
+    asyncio.run(listener.handle_bot_response(message_b))
+
+    assert catalog.wishlist("Test Server", "user_a") is not None
+    assert catalog.wishlist("Test Server", "user_b") is not None
+    assert _durable_wishlist_counts(tmp_path / "catalog.db") == (2, 2, 2, 2, 2, 1, 2)
+
+
+def test_listener_wishlist_missing_identity_evidence_blocks_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "wishlist-missing.json",
+        (("Test Server", "user_a", "primary", "456"),),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_wishlist_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    assert _account_attribution_rows(database_path) == []
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert listener._seen_payloads == set()
+
+
+def test_listener_wishlist_ambiguous_identity_evidence_blocks_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "wishlist-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "456"),
+        ),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_wishlist_message()))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert listener._seen_payloads == set()
+
+
+def test_listener_wishlist_resolved_attribution_conflict_fails_closed(tmp_path) -> None:
+    listener, _catalog = _listener_with_two_configured_users(tmp_path)
+    message = _durable_wishlist_message()
+    asyncio.run(listener.handle_bot_response(message))
+
+    database_path = tmp_path / "catalog.db"
+    replay_importer = Mock()
+    replay_listener = DiscordListenerService(
+        config_service=listener._config,
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=replay_importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    replay_listener._mudae_user_id = 999
+    message.interaction_metadata = SimpleNamespace(
+        name="wl", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    replay_importer.import_message.assert_not_called()
+    assert _durable_wishlist_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+
+
+def test_listener_active_wishlist_processing_does_not_redispatch(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_wishlist_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        account_name="user_a",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(
+        tmp_path,
+        importer=importer,
+    )
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+
+
+def test_listener_retryable_wishlist_coordinator_failure_allows_later_retry(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._wishlist_projection_coordinator
+    coordinator.coordinate_wishlist = Mock(
+        side_effect=RuntimeError("wishlist coordinator failed")
+    )
+    direct_wishlist = Mock(wraps=listener._catalog.import_wishlist)
+    listener._catalog.import_wishlist = direct_wishlist
+    message = _durable_wishlist_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    first_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (first_attempt["status"], first_attempt["retryable"]) == ("failed", 1)
+    assert _durable_wishlist_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+    direct_wishlist.assert_not_called()
+
+    retry_listener, _retry_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(retry_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["status"], row["retryable"]) for row in attempts] == [
+        ("failed", 1),
+        ("succeeded", 0),
+    ]
+    assert _durable_wishlist_counts(database_path) == (1, 2, 1, 1, 1, 1, 1)
+
+
+@pytest.mark.parametrize("retryable", (False,))
+def test_listener_terminal_wishlist_lifecycle_never_falls_back_to_direct_importing(
+    tmp_path, retryable
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_wishlist_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        account_name="user_a",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=active.source_event_id,
+        attempt_id=active.attempt_id,
+        status="failed",
+        retryable=retryable,
+        failure_code="terminal_test_failure",
+        failure_detail="terminal wishlist failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(
+        tmp_path,
+        importer=importer,
+    )
+    direct_wishlist = Mock(wraps=replay_listener._catalog.import_wishlist)
+    replay_listener._catalog.import_wishlist = direct_wishlist
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    direct_wishlist.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _durable_wishlist_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_same_process_durable_wishlist_duplicate_is_suppressed(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_wishlist_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert _durable_wishlist_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        "not a wishlist response",
+        "**ernieuuu's Wishlist - 0/13 $wl, 0/2 $sw**",
+    ),
+)
+def test_listener_malformed_or_empty_wishlist_does_not_import(tmp_path, content) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "wishlist-invalid.json",
+        (("Test Server", "user_a", "primary", "456"),),
+        importer=importer,
+    )
+    message = _durable_wishlist_message()
+    message.content = content
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _receipt_rows(database_path, "import_events") == []
+
+
+@pytest.mark.parametrize(
+    ("message_id", "content", "expected"),
+    (
+        (
+            1229,
+            "**ernieuuu's Wishlist - 0/13 $wl, 0/2 $sw**\n**Zero**",
+            (0, 13, 0, 2, (("Zero", False, False, False),)),
+        ),
+        (
+            1230,
+            "**ernieuuu's Wishlist - 0/0 $wl, 0/0 $sw**\n**Default**",
+            (0, 0, 0, 0, (("Default", False, False, False),)),
+        ),
+    ),
+)
+def test_listener_durable_wishlist_preserves_zero_and_default_boundaries(
+    tmp_path, message_id, content, expected
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_wishlist_message(message_id)
+    message.content = content
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT wishlist_count, wishlist_capacity, starwish_count, "
+            "starwish_capacity, entries_json FROM wishlist_observations"
+        ).fetchone()
+    assert tuple(row[:4]) == expected[:4]
+    assert json.loads(row[4]) == [
+        {
+            "name": name,
+            "is_starwish": is_starwish,
+            "is_owned_marker_present": is_owned,
+            "kakera_marker_present": has_kakera,
+        }
+        for name, is_starwish, is_owned, has_kakera in expected[4]
+    ]
+
+
+def test_listener_non_durable_wishlist_keeps_direct_catalog_path(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+        discord_message_repository=None,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_wishlist_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_wishlist_context" not in kwargs
+    observation = catalog.wishlist("Test Server", "user_a")
+    assert observation is not None
+    assert observation.wishlist_count == 3
+    assert [entry.name for entry in observation.entries] == [
+        "Saber",
+        "Emilia",
+        "Saber",
+    ]
     assert _receipt_rows(database_path, "discord_source_events") == []

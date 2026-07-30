@@ -38,6 +38,7 @@ from moa.services.automatic_import_service import (
     DurableSphereResultImportContext,
     DurableTimerImportContext,
     DurableTowerStateImportContext,
+    DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
 
@@ -125,6 +126,7 @@ class DiscordListenerService:
         "timers",
         "towerstate",
         "lootstate",
+        "wishlist",
     }
     _DURABLE_ACCOUNT_KINDS = {
         "bonus",
@@ -137,6 +139,7 @@ class DiscordListenerService:
         "timers",
         "towerstate",
         "lootstate",
+        "wishlist",
     }
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
@@ -601,7 +604,7 @@ class DiscordListenerService:
                     attribution.status,
                 )
                 return
-            if kind in {"bonus", "sphere_result", "lootstate"}:
+            if kind in {"bonus", "sphere_result", "lootstate", "wishlist"}:
                 self._logger.info(
                     "Deferred %s source event %s because server attribution is %s; "
                     "no processing attempt was started",
@@ -992,6 +995,21 @@ class DiscordListenerService:
                             finished_at=finished_at,
                         )
                     )
+                elif kind == "wishlist":
+                    import_kwargs["durable_wishlist_context"] = DurableWishlistImportContext(
+                        source_event_id=received_event.source_event_id,
+                        attempt_id=(
+                            processing_attempt.attempt_id
+                            if processing_attempt is not None
+                            else None
+                        ),
+                        server=import_identity.server,
+                        account=import_identity.account,
+                        raw=raw_message,
+                        source=source,
+                        observed_at=observed_at,
+                        finished_at=finished_at,
+                    )
                 else:
                     raise RuntimeError(f"Unsupported durable import kind: {kind}")
             result = self._importer.import_message(
@@ -1184,7 +1202,7 @@ class DiscordListenerService:
             return _ServerAttributionDecision("resolved", next(iter(strong_names)), True)
 
         guild_names = self._server_names_for_guild(str(message.guild.id))
-        if kind in {"bonus", "sphere_result", "lootstate"}:
+        if kind in {"bonus", "sphere_result", "lootstate", "wishlist"}:
             if len(guild_names) > 1:
                 return _ServerAttributionDecision("ambiguous", None)
             return _ServerAttributionDecision("unresolved", None)
