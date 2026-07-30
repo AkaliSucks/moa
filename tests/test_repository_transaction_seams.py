@@ -23,12 +23,15 @@ from moa.models.character import (
     SphereResultSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
+    WishlistEntry,
+    WishlistSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import (
     CatalogRepository,
     _KakeralootStateImportConnectionResult,
     _PlayerBonusImportConnectionResult,
+    _WishlistImportConnectionResult,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 
@@ -230,6 +233,39 @@ SPHERE_RESULT = SphereResultSnapshot(
     total_gained=7,
     stock=None,
 )
+WISHLIST = WishlistSnapshot(
+    wishlist_count=3,
+    wishlist_capacity=13,
+    starwish_count=2,
+    starwish_capacity=2,
+    entries=(
+        WishlistEntry(
+            name="Saber",
+            is_starwish=False,
+            is_owned_marker_present=True,
+            kakera_marker_present=True,
+        ),
+        WishlistEntry(
+            name="Emilia",
+            is_starwish=True,
+            is_owned_marker_present=False,
+            kakera_marker_present=False,
+        ),
+        WishlistEntry(
+            name="Saber",
+            is_starwish=False,
+            is_owned_marker_present=True,
+            kakera_marker_present=True,
+        ),
+    ),
+)
+EMPTY_WISHLIST = WishlistSnapshot(
+    wishlist_count=0,
+    wishlist_capacity=0,
+    starwish_count=0,
+    starwish_capacity=0,
+    entries=(),
+)
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -389,6 +425,24 @@ def _player_bonus_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "player_bonus_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _wishlist_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "wishlist_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -2884,6 +2938,290 @@ def test_sphere_result_helper_reuses_contexts_and_rollback_preserves_them(tmp_pa
         ).fetchone()
         assert tuple(current) == tuple(existing)
         assert _sphere_result_counts(connection) == before_counts
+
+
+def test_wishlist_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_WishlistImportConnectionResult)
+    assert _WishlistImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_WishlistImportConnectionResult)] == [
+        "import_event_id",
+        "wishlist_observation_id",
+    ]
+    assert not hasattr(_WishlistImportConnectionResult(1, 2), "__dict__")
+
+
+def test_public_wishlist_wrapper_preserves_result_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "wishlist payload with exact source text"
+
+    result = catalog.import_wishlist(
+        WISHLIST,
+        "  Server  ",
+        "  Account  ",
+        raw_message,
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "wishlist_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT account_context_id, wishlist_count, wishlist_capacity, starwish_count,
+                   starwish_capacity, entries_json, observed_at, import_event_id
+            FROM wishlist_observations WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id, name, normalized_name FROM account_contexts"
+        ).fetchone()
+        server = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        assert tuple(event) == ("wishlist", "discord", result.observed_at.isoformat(), raw_message)
+        assert observation["account_context_id"] == account["id"]
+        assert tuple(observation)[1:5] == (
+            WISHLIST.wishlist_count,
+            WISHLIST.wishlist_capacity,
+            WISHLIST.starwish_count,
+            WISHLIST.starwish_capacity,
+        )
+        assert observation["entries_json"] == json.dumps(
+            [entry.model_dump() for entry in WISHLIST.entries]
+        )
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+        assert tuple(server) == (server["id"], "Server", "server")
+        assert tuple(account) == (account["id"], "Account", "account")
+
+
+def test_wishlist_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_wishlist_with_connection(
+            connection,
+            state=WISHLIST,
+            server="Server",
+            account="Account",
+            raw="wishlist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert isinstance(imported, _WishlistImportConnectionResult)
+        assert connection.in_transaction is True
+        assert _wishlist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "wishlist_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT id, kind FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()
+        observation = connection.execute(
+            "SELECT id, import_event_id FROM wishlist_observations WHERE id = ?",
+            (imported.wishlist_observation_id,),
+        ).fetchone()
+        assert tuple(event) == (imported.import_event_id, "wishlist")
+        assert tuple(observation) == (
+            imported.wishlist_observation_id,
+            imported.import_event_id,
+        )
+        with connect(database_path) as observer:
+            assert _wishlist_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "wishlist_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.rollback()
+
+
+def test_wishlist_helper_commit_persists_values_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_wishlist_with_connection(
+            connection,
+            state=WISHLIST,
+            server="Server",
+            account="Account",
+            raw="wishlist payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, account_context_id, wishlist_count, wishlist_capacity, starwish_count,
+                   starwish_capacity, entries_json, observed_at, import_event_id
+            FROM wishlist_observations WHERE id = ?
+            """,
+            (imported.wishlist_observation_id,),
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == ("wishlist", "clipboard", "wishlist payload", OBSERVED_AT.isoformat())
+        assert observation["id"] == imported.wishlist_observation_id
+        assert observation["wishlist_count"] == WISHLIST.wishlist_count
+        assert observation["wishlist_capacity"] == WISHLIST.wishlist_capacity
+        assert observation["starwish_count"] == WISHLIST.starwish_count
+        assert observation["starwish_capacity"] == WISHLIST.starwish_capacity
+        assert observation["entries_json"] == json.dumps(
+            [entry.model_dump() for entry in WISHLIST.entries]
+        )
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        wishlist = catalog.wishlist("Server", "Account")
+        assert wishlist is not None
+        assert wishlist.entries == WISHLIST.entries
+
+
+def test_wishlist_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_wishlist_with_connection(
+            connection,
+            state=WISHLIST,
+            server="Server",
+            account="Account",
+            raw="wishlist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "wishlist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_wishlist_helper_reuses_contexts_and_rollback_preserves_them(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_wishlist(WISHLIST, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _wishlist_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_wishlist_with_connection(
+            connection,
+            state=EMPTY_WISHLIST,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="second payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert imported.import_event_id > 0
+        assert imported.wishlist_observation_id > 0
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _wishlist_counts(connection) == before_counts
+
+
+@pytest.mark.parametrize("state", [EMPTY_WISHLIST])
+def test_wishlist_helper_preserves_empty_zero_and_duplicate_boundaries(tmp_path, state) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_wishlist_with_connection(
+            connection,
+            state=state,
+            server="Server",
+            account="Account",
+            raw="boundary wishlist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT wishlist_count, wishlist_capacity, starwish_count, starwish_capacity, entries_json
+            FROM wishlist_observations WHERE id = ?
+            """,
+            (imported.wishlist_observation_id,),
+        ).fetchone()
+        assert tuple(row) == (0, 0, 0, 0, "[]")
+        assert json.loads(row["entries_json"]) == []
+
+        duplicate_row = connection.execute(
+            "SELECT entries_json FROM wishlist_observations WHERE import_event_id = ?",
+            (catalog.import_wishlist(WISHLIST, "Server", "Account", "duplicate payload", "discord").import_event_id,),
+        ).fetchone()
+        assert json.loads(duplicate_row["entries_json"]) == [entry.model_dump() for entry in WISHLIST.entries]
 
 
 def test_public_mudapins_wrapper_preserves_compatibility_and_stored_values(tmp_path) -> None:
