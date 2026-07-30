@@ -31,6 +31,7 @@ from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
 from moa.services.harem_search_service import HaremSearchService
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
+from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
 from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
@@ -224,6 +225,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        player_bonus_projection_coordinator = PlayerBonusProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -235,6 +240,7 @@ def discord_listen(
             kakera_state_projection_coordinator=kakera_state_projection_coordinator,
             tower_state_projection_coordinator=tower_state_projection_coordinator,
             sphere_result_projection_coordinator=sphere_result_projection_coordinator,
+            player_bonus_projection_coordinator=player_bonus_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,
