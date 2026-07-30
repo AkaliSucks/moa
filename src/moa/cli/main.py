@@ -24,6 +24,7 @@ from moa.services.command_service import CommandService
 from moa.services.discord_listener_service import DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
@@ -217,6 +218,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        kakeraloot_state_projection_coordinator = KakeralootStateProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         tower_state_projection_coordinator = TowerStateProjectionCoordinator(
             catalog_repository,
             discord_message_repository,
@@ -238,6 +243,7 @@ def discord_listen(
             infokl_projection_coordinator=infokl_projection_coordinator,
             timer_projection_coordinator=timer_projection_coordinator,
             kakera_state_projection_coordinator=kakera_state_projection_coordinator,
+            kakeraloot_state_projection_coordinator=kakeraloot_state_projection_coordinator,
             tower_state_projection_coordinator=tower_state_projection_coordinator,
             sphere_result_projection_coordinator=sphere_result_projection_coordinator,
             player_bonus_projection_coordinator=player_bonus_projection_coordinator,
