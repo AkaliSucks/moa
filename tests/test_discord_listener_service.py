@@ -19,6 +19,9 @@ from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.discord_listener_service import DiscordCommandContext, DiscordListenerService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.kakeraloot_state_projection_coordinator import (
+    KakeralootStateProjectionCoordinator,
+)
 from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
@@ -177,6 +180,10 @@ def _listener_with_two_configured_users(tmp_path):
             discord_repository,
         ),
         player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
+        kakeraloot_state_projection_coordinator=KakeralootStateProjectionCoordinator(
             catalog_repository,
             discord_repository,
         ),
@@ -1287,6 +1294,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            kakeraloot_state_projection_coordinator=KakeralootStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
             sphere_result_projection_coordinator=SphereResultProjectionCoordinator(
                 catalog_repository,
                 repository,
@@ -1356,6 +1367,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             tower_state_projection_coordinator=TowerStateProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            kakeraloot_state_projection_coordinator=KakeralootStateProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1448,6 +1463,38 @@ def _durable_tower_message(message_id: int = 1217, *, interaction=True):
             "â˜‘ï¸ [5] Unveil 1 random button for the $oh command\n"
             "[6] +30 spheres with $dk\n"
             "â˜‘ï¸ [11] +1 roll per hour"
+        ),
+        embeds=(),
+        edited_at=None,
+    )
+
+
+def _durable_kakeraloot_message(message_id: int = 1219, *, interaction=True, content=None):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="lk", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$lk` response covering every populated state field.
+        content=content
+        or (
+            "user_a - Kakeraloots\n"
+            "Rolls stacked: 1 ($us)\n"
+            "$disable limits: -102 $wa/$ha, -68 $wg/$hg\n"
+            "Protected wish: LVL 42 (spawn probability: 1/4,642)\n"
+            "Mudapins: 22 ($mp)\n"
+            "$rt: -2h cooldown\n"
+            "+1 permanent roll\n"
+            "1 star branch (+0 $sw)\n\n"
+            "Quantity LVL 23\n"
+            "Quality LVL 6\n"
+            "$kl usage: 256 (:kakeraC:+1)\n"
+            "9,210:kakera:"
         ),
         embeds=(),
         edited_at=None,
@@ -1752,6 +1799,22 @@ def _durable_bonus_counts(database_path):
                 "(SELECT COUNT(*) FROM discord_processing_attempts), "
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'player_bonus'), "
                 "(SELECT COUNT(*) FROM player_bonus_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_kakeraloot_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'kakeraloot_state'), "
+                "(SELECT COUNT(*) FROM kakeraloot_state_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
                 "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
@@ -2975,6 +3038,438 @@ def test_listener_non_durable_tower_keeps_direct_catalog_path(tmp_path) -> None:
     assert "durable_tower_state_context" not in kwargs
     direct_tower.assert_called_once()
     assert _import_event_rows(database_path, "tower_state")
+
+
+def test_listener_first_durable_kakeraloot_coordinates_with_exact_context_and_attribution_order(
+    tmp_path,
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_kakeraloot = Mock(wraps=listener._catalog.import_kakeraloot_state)
+    listener._catalog.import_kakeraloot_state = direct_kakeraloot
+    order = []
+    record_server = repository.record_server_attribution
+    record_account = repository.record_account_attribution
+    begin_attempt = repository.begin_processing_attempt
+
+    def record_server_in_order(*args, **kwargs):
+        order.append("server")
+        return record_server(*args, **kwargs)
+
+    def record_account_in_order(*args, **kwargs):
+        order.append("account")
+        return record_account(*args, **kwargs)
+
+    def begin_attempt_in_order(*args, **kwargs):
+        order.append("attempt")
+        return begin_attempt(*args, **kwargs)
+
+    repository.record_server_attribution = record_server_in_order
+    repository.record_account_attribution = record_account_in_order
+    repository.begin_processing_attempt = begin_attempt_in_order
+    message = _durable_kakeraloot_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert set(kwargs) == {
+        "harem_scan_id",
+        "detected_kind",
+        "durable_kakeraloot_state_context",
+    }
+    assert kwargs["detected_kind"] == "lootstate"
+    context = kwargs["durable_kakeraloot_state_context"]
+    assert {field.name for field in fields(context)} == {
+        "source_event_id",
+        "attempt_id",
+        "server",
+        "account",
+        "raw",
+        "source",
+        "observed_at",
+        "finished_at",
+    }
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1219"
+    assert context.observed_at.tzinfo is not None
+    assert context.observed_at.utcoffset() is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.finished_at.utcoffset() is not None
+    assert context.observed_at <= context.finished_at
+    assert order[:3] == ["server", "account", "attempt"]
+    assert importer.import_message.call_count == 1
+    direct_kakeraloot.assert_not_called()
+
+    assert _durable_kakeraloot_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT has_kakeraloots, status_note, rolls_stacked, "
+                "disable_wa_ha_reduction, disable_wg_hg_reduction, "
+                "protected_wish_level, protected_wish_denominator, mudapins, "
+                "rt_cooldown_reduction_hours, permanent_roll_bonus, star_branches, "
+                "starwish_slots_from_branches, quantity_level, quality_level, "
+                "usage_count, kakera_balance FROM kakeraloot_state_observations"
+            ).fetchone()
+        ) == (1, None, 1, 102, 68, 42, 4642, 22, 2, 1, 1, 0, 23, 6, 256, 9210)
+        assert tuple(
+            connection.execute(
+                "SELECT projection_kind, state FROM discord_projection_links"
+            ).fetchone()
+        ) == ("catalog.kakeraloot_state", "completed")
+
+
+def test_listener_succeeded_durable_kakeraloot_restart_replay_uses_persisted_attribution(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakeraloot_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_kakeraloot_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+    first_server = _server_attribution_rows(database_path)
+
+    restarted_listener, restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    restarted_repository.begin_processing_attempt = Mock(
+        wraps=restarted_repository.begin_processing_attempt
+    )
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_kakeraloot_state_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    assert restarted_repository.begin_processing_attempt.call_count == 0
+    assert _durable_kakeraloot_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert _server_attribution_rows(database_path) == first_server
+
+
+def test_listener_durable_kakeraloot_for_two_users_sharing_one_channel_stays_attributed(
+    tmp_path,
+) -> None:
+    listener, _catalog = _listener_with_two_configured_users(tmp_path)
+    message_a = _durable_kakeraloot_message(1220)
+    message_b = _durable_kakeraloot_message(
+        1221,
+        content=_durable_kakeraloot_message().content.replace("user_a", "user_b"),
+    )
+    message_b.interaction_metadata = SimpleNamespace(
+        name="lk", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(listener.handle_bot_response(message_a))
+    asyncio.run(listener.handle_bot_response(message_b))
+
+    assert listener._catalog.kakeraloot_state("Test Server", "user_a") is not None
+    assert listener._catalog.kakeraloot_state("Test Server", "user_b") is not None
+    assert len(_import_event_rows(tmp_path / "catalog.db", "kakeraloot_state")) == 2
+    assert [row[3] for row in _account_attribution_rows(tmp_path / "catalog.db")] == [
+        "user_a",
+        "user_b",
+    ]
+
+
+def test_listener_durable_kakeraloot_missing_identity_blocks_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "kakeraloot-missing.json",
+        (("Test Server", "user_a", "primary", None),),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_kakeraloot_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    assert _durable_kakeraloot_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+    assert listener._seen_payloads == set()
+
+
+def test_listener_durable_kakeraloot_ambiguous_identity_blocks_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "kakeraloot-ambiguous.json",
+        (
+            ("Server A", "user_a", "primary", "456"),
+            ("Server B", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_kakeraloot_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert _server_attribution_rows(database_path) == [(1, "ambiguous", None)]
+    assert _durable_kakeraloot_counts(database_path) == (1, 0, 0, 0, 0, 0, 0)
+
+
+def test_listener_durable_kakeraloot_conflicting_persisted_attribution_fails_closed(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakeraloot_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+    first_counts = _durable_kakeraloot_counts(database_path)
+    first_account = _account_attribution_rows(database_path)
+
+    importer = Mock()
+    restarted_listener, _restarted_repository, _ = _attribution_listener(
+        tmp_path,
+        "kakeraloot-conflict.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+        importer=importer,
+    )
+    message.interaction_metadata = SimpleNamespace(
+        name="lk", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert _durable_kakeraloot_counts(database_path) == first_counts
+    assert _account_attribution_rows(database_path) == first_account
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert restarted_listener._seen_payloads == set()
+
+
+def test_listener_active_durable_kakeraloot_does_not_redispatch(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakeraloot_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    server_attribution = listener._resolve_and_record_server_attribution(
+        message,
+        message.content,
+        "lootstate",
+        listener._context_from_interaction(message, message.content),
+        None,
+        received,
+    )
+    assert server_attribution is not None and server_attribution.status == "resolved"
+    account_attribution = listener._resolve_and_record_account_attribution(
+        message,
+        message.content,
+        "lootstate",
+        server_attribution,
+        None,
+        received,
+    )
+    assert account_attribution is not None and account_attribution.status == "resolved"
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+
+
+def test_listener_retryable_kakeraloot_coordinator_failure_allows_later_retry_without_fallback(
+    tmp_path,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._kakeraloot_state_projection_coordinator
+    coordinator.coordinate_kakeraloot_state = Mock(
+        side_effect=RuntimeError("temporary Kakeraloot failure")
+    )
+    direct_kakeraloot = Mock(wraps=listener._catalog.import_kakeraloot_state)
+    listener._catalog.import_kakeraloot_state = direct_kakeraloot
+    message = _durable_kakeraloot_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    failed_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert failed_attempt["status"] == "failed"
+    assert failed_attempt["retryable"] == 1
+    direct_kakeraloot.assert_not_called()
+    assert _import_event_rows(database_path, "kakeraloot_state") == []
+
+    second_listener, _second_repository, _ = _durable_listener(tmp_path)
+    message.interaction_metadata = None
+    asyncio.run(second_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["status"] for attempt in attempts] == ["failed", "succeeded"]
+    assert _durable_kakeraloot_counts(database_path) == (1, 2, 1, 1, 1, 1, 1)
+
+
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_listener_terminal_durable_kakeraloot_does_not_import_or_fallback(
+    tmp_path, terminal_status
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_kakeraloot_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        account_name="user_a",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status=terminal_status,
+        retryable=False,
+        failure_code="terminal_kakeraloot_test_failure",
+        failure_detail="terminal Kakeraloot test failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(tmp_path, importer=importer)
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _durable_kakeraloot_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_same_process_durable_kakeraloot_duplicate_is_suppressed(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_kakeraloot_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert _durable_kakeraloot_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+
+
+def test_listener_non_durable_kakeraloot_keeps_direct_catalog_path(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+        discord_message_repository=None,
+    )
+    listener._mudae_user_id = 999
+    direct_kakeraloot = Mock(wraps=catalog.import_kakeraloot_state)
+    catalog.import_kakeraloot_state = direct_kakeraloot
+
+    asyncio.run(listener.handle_bot_response(_durable_kakeraloot_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_kakeraloot_state_context" not in kwargs
+    direct_kakeraloot.assert_called_once()
+    assert _import_event_rows(database_path, "kakeraloot_state")
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_has_kakeraloots", "expected_status_note", "expected_quality"),
+    (
+        (
+            "No kakeraloots bought! ($kl)\n"
+            "Type $infokl to get more infos about kakeraloots.",
+            0,
+            "No Kakeraloots bought; Mudae did not report loot statistics.",
+            0,
+        ),
+        (
+            "You need to buy kakeraloots before using this command ($kl)\n"
+            "Type $infokl to get more infos about kakeraloots.",
+            0,
+            "No Kakeraloots bought; Mudae did not report loot statistics.",
+            0,
+        ),
+        (
+            "Prerequisites: Sapphire I + Ruby I + Emerald I ($infokl)",
+            0,
+            "No Kakeraloots bought; Mudae did not report loot statistics.",
+            0,
+        ),
+        (
+            "user_a - Kakeraloots\n"
+            "Quantity LVL 5\n"
+            "Quality LVL 0\n"
+            "$kl usage: 1\n"
+            "31,271:kakera:",
+            1,
+            None,
+            0,
+        ),
+    ),
+)
+def test_listener_durable_kakeraloot_preserves_boundary_snapshots(
+    tmp_path,
+    content,
+    expected_has_kakeraloots,
+    expected_status_note,
+    expected_quality,
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(
+        listener.handle_bot_response(
+            _durable_kakeraloot_message(message_id=1300, content=content)
+        )
+    )
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT has_kakeraloots, status_note, quality_level "
+            "FROM kakeraloot_state_observations"
+        ).fetchone()
+    assert tuple(row) == (
+        expected_has_kakeraloots,
+        expected_status_note,
+        expected_quality,
+    )
 
 
 def test_listener_first_durable_kakera_coordinates_with_exact_context(tmp_path) -> None:

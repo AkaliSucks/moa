@@ -29,6 +29,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableInfoklImportContext,
     DurableKakeraImportContext,
+    DurableKakeralootStateImportContext,
     DurableMudapinsImportContext,
     DurablePlayerBonusImportContext,
     DurableProfileImportContext,
@@ -123,6 +124,7 @@ class DiscordListenerService:
         "sphere_result",
         "timers",
         "towerstate",
+        "lootstate",
     }
     _DURABLE_ACCOUNT_KINDS = {
         "bonus",
@@ -134,6 +136,7 @@ class DiscordListenerService:
         "roll",
         "timers",
         "towerstate",
+        "lootstate",
     }
     _SERVER_INDEPENDENT_KINDS = {"help", "tutorial"}
 
@@ -598,7 +601,7 @@ class DiscordListenerService:
                     attribution.status,
                 )
                 return
-            if kind in {"bonus", "sphere_result"}:
+            if kind in {"bonus", "sphere_result", "lootstate"}:
                 self._logger.info(
                     "Deferred %s source event %s because server attribution is %s; "
                     "no processing attempt was started",
@@ -938,6 +941,23 @@ class DiscordListenerService:
                             finished_at=finished_at,
                         )
                     )
+                elif kind == "lootstate":
+                    import_kwargs["durable_kakeraloot_state_context"] = (
+                        DurableKakeralootStateImportContext(
+                            source_event_id=received_event.source_event_id,
+                            attempt_id=(
+                                processing_attempt.attempt_id
+                                if processing_attempt is not None
+                                else None
+                            ),
+                            server=import_identity.server,
+                            account=import_identity.account,
+                            raw=raw_message,
+                            source=source,
+                            observed_at=observed_at,
+                            finished_at=finished_at,
+                        )
+                    )
                 elif kind == "sphere_result":
                     import_kwargs["durable_sphere_result_context"] = (
                         DurableSphereResultImportContext(
@@ -1164,7 +1184,7 @@ class DiscordListenerService:
             return _ServerAttributionDecision("resolved", next(iter(strong_names)), True)
 
         guild_names = self._server_names_for_guild(str(message.guild.id))
-        if kind in {"bonus", "sphere_result"}:
+        if kind in {"bonus", "sphere_result", "lootstate"}:
             if len(guild_names) > 1:
                 return _ServerAttributionDecision("ambiguous", None)
             return _ServerAttributionDecision("unresolved", None)
