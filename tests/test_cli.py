@@ -13,6 +13,7 @@ from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
+from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
@@ -182,6 +183,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     timer_coordinators: list[TimerProjectionCoordinator] = []
     tower_coordinators: list[TowerStateProjectionCoordinator] = []
     sphere_coordinators: list[SphereResultProjectionCoordinator] = []
+    player_bonus_coordinators: list[PlayerBonusProjectionCoordinator] = []
 
     class RecordingCatalogRepository(CatalogRepository):
         def __init__(self, *args, **kwargs):
@@ -218,6 +220,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             sphere_coordinators.append(self)
             super().__init__(*repositories)
 
+    class RecordingPlayerBonusProjectionCoordinator(PlayerBonusProjectionCoordinator):
+        def __init__(self, *repositories):
+            player_bonus_coordinators.append(self)
+            super().__init__(*repositories)
+
     class FakeListener:
         def __init__(self, **kwargs):
             listeners.append(self)
@@ -248,6 +255,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         "SphereResultProjectionCoordinator",
         RecordingSphereResultProjectionCoordinator,
     )
+    monkeypatch.setattr(
+        main,
+        "PlayerBonusProjectionCoordinator",
+        RecordingPlayerBonusProjectionCoordinator,
+    )
 
     result = CliRunner().invoke(
         main.app,
@@ -267,6 +279,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     kakera_coordinator = importer._kakera_state_projection_coordinator
     tower_coordinator = importer._tower_state_projection_coordinator
     sphere_coordinator = importer._sphere_result_projection_coordinator
+    player_bonus_coordinator = importer._player_bonus_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -284,10 +297,12 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(kakera_coordinator, KakeraStateProjectionCoordinator)
     assert isinstance(tower_coordinator, TowerStateProjectionCoordinator)
     assert isinstance(sphere_coordinator, SphereResultProjectionCoordinator)
+    assert isinstance(player_bonus_coordinator, PlayerBonusProjectionCoordinator)
     assert kakera_coordinators == [kakera_coordinator]
     assert timer_coordinators == [timer_coordinator]
     assert tower_coordinators == [tower_coordinator]
     assert sphere_coordinators == [sphere_coordinator]
+    assert player_bonus_coordinators == [player_bonus_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -318,6 +333,10 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert sphere_coordinator._discord is discord_repository
     assert sphere_coordinator._database_path == database_path
     assert importer._sphere_result_projection_coordinator is sphere_coordinator
+    assert importer._player_bonus_projection_coordinator is player_bonus_coordinator
+    assert player_bonus_coordinator._catalog is catalog_service._repository
+    assert player_bonus_coordinator._discord is discord_repository
+    assert player_bonus_coordinator._database_path == database_path
     assert timer_coordinators[0]._catalog is catalog_service._repository
     assert timer_coordinators[0]._discord is discord_repository
     assert captured["catalog_service"] is importer._catalog
@@ -399,6 +418,49 @@ def test_import_auto_keeps_direct_sphere_import_without_durable_coordinator(
     args, kwargs = calls[0]
     assert args == (
         ":sp: +158\\n:spG: +43 (Stock: 3,655)",
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+    )
+    assert kwargs == {"harem_scan_id": None}
+
+
+def test_import_auto_keeps_direct_player_bonus_import_without_durable_coordinator(
+    monkeypatch,
+) -> None:
+    constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class RecordingImporter:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args, kwargs))
+
+        def import_message(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                kind="bonus",
+                imported_count=10,
+                message="Imported player bonuses.",
+            )
+
+    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(
+        main,
+        "_read_message_source",
+        lambda path, clipboard: "Player Bonuses\nbonus response",
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "auto", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert constructed == [((), {})]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (
+        "Player Bonuses\nbonus response",
         "clipboard",
         "Lake",
         "ernieuuu",
