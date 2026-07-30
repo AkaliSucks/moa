@@ -20,6 +20,7 @@ from moa.services.settings_projection_coordinator import SettingsProjectionCoord
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
+from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
@@ -186,6 +187,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     tower_coordinators: list[TowerStateProjectionCoordinator] = []
     sphere_coordinators: list[SphereResultProjectionCoordinator] = []
     player_bonus_coordinators: list[PlayerBonusProjectionCoordinator] = []
+    wishlist_coordinators: list[WishlistProjectionCoordinator] = []
 
     class RecordingCatalogRepository(CatalogRepository):
         def __init__(self, *args, **kwargs):
@@ -234,6 +236,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             player_bonus_coordinators.append(self)
             super().__init__(*repositories)
 
+    class RecordingWishlistProjectionCoordinator(WishlistProjectionCoordinator):
+        def __init__(self, *repositories):
+            wishlist_coordinators.append(self)
+            super().__init__(*repositories)
+
     class FakeListener:
         def __init__(self, **kwargs):
             listeners.append(self)
@@ -274,6 +281,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         "PlayerBonusProjectionCoordinator",
         RecordingPlayerBonusProjectionCoordinator,
     )
+    monkeypatch.setattr(
+        main,
+        "WishlistProjectionCoordinator",
+        RecordingWishlistProjectionCoordinator,
+    )
 
     result = CliRunner().invoke(
         main.app,
@@ -295,6 +307,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     tower_coordinator = importer._tower_state_projection_coordinator
     sphere_coordinator = importer._sphere_result_projection_coordinator
     player_bonus_coordinator = importer._player_bonus_projection_coordinator
+    wishlist_coordinator = importer._wishlist_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -314,12 +327,14 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(tower_coordinator, TowerStateProjectionCoordinator)
     assert isinstance(sphere_coordinator, SphereResultProjectionCoordinator)
     assert isinstance(player_bonus_coordinator, PlayerBonusProjectionCoordinator)
+    assert isinstance(wishlist_coordinator, WishlistProjectionCoordinator)
     assert kakera_coordinators == [kakera_coordinator]
     assert kakeraloot_coordinators == [kakeraloot_coordinator]
     assert timer_coordinators == [timer_coordinator]
     assert tower_coordinators == [tower_coordinator]
     assert sphere_coordinators == [sphere_coordinator]
     assert player_bonus_coordinators == [player_bonus_coordinator]
+    assert wishlist_coordinators == [wishlist_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -354,6 +369,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert sphere_coordinator._database_path == database_path
     assert importer._sphere_result_projection_coordinator is sphere_coordinator
     assert importer._player_bonus_projection_coordinator is player_bonus_coordinator
+    assert importer._wishlist_projection_coordinator is wishlist_coordinator
     assert player_bonus_coordinator._catalog is catalog_service._repository
     assert player_bonus_coordinator._discord is discord_repository
     assert player_bonus_coordinator._database_path == database_path
@@ -526,6 +542,53 @@ def test_import_auto_keeps_direct_player_bonus_import_without_durable_coordinato
         "ernieuuu",
     )
     assert kwargs == {"harem_scan_id": None}
+
+
+def test_import_auto_keeps_direct_wishlist_import_without_durable_coordinator(
+    monkeypatch,
+) -> None:
+    constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    coordinators: list[object] = []
+
+    class RecordingImporter:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args, kwargs))
+
+        def import_message(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                kind="wishlist",
+                imported_count=3,
+                message="Imported wishlist.",
+            )
+
+    class RecordingWishlistProjectionCoordinator:
+        def __init__(self, *args, **kwargs):
+            coordinators.append((args, kwargs))
+
+    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(main, "WishlistProjectionCoordinator", RecordingWishlistProjectionCoordinator)
+    monkeypatch.setattr(
+        main,
+        "_read_message_source",
+        lambda path, clipboard: "wishlist response",
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "auto", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert constructed == [((), {})]
+    assert coordinators == []
+    assert calls == [
+        (
+            ("wishlist response", "clipboard", "Lake", "ernieuuu"),
+            {"harem_scan_id": None},
+        )
+    ]
 
 
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
