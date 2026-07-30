@@ -21,6 +21,8 @@ from moa.models.character import (
     SphereResultSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
+    WishlistEntry,
+    WishlistSnapshot,
 )
 from moa.models.catalog import AutomaticImportResult
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
@@ -41,6 +43,7 @@ from moa.services.automatic_import_service import (
     DurableSphereResultImportContext,
     DurableTimerImportContext,
     DurableTowerStateImportContext,
+    DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import (
@@ -81,6 +84,7 @@ from moa.services.timer_projection_coordinator import (
     TimerProjectionResult,
 )
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionResult
+from moa.services.wishlist_projection_coordinator import WishlistProjectionResult
 
 
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
@@ -99,8 +103,57 @@ TOWER_MESSAGE = "tower payload"
 SPHERE_MESSAGE = ":sp: +158\n:spG: +43 (Stock: 3,655)"
 SETTINGS_MESSAGE = "settings payload"
 BONUS_MESSAGE = "bonus payload"
+WISHLIST_MESSAGE = "wishlist payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
+
+WISHLIST = WishlistSnapshot(
+    wishlist_count=3,
+    wishlist_capacity=13,
+    starwish_count=2,
+    starwish_capacity=2,
+    entries=(
+        WishlistEntry(
+            name="Saber",
+            is_starwish=False,
+            is_owned_marker_present=True,
+            kakera_marker_present=True,
+        ),
+        WishlistEntry(
+            name="Emilia",
+            is_starwish=True,
+            is_owned_marker_present=False,
+            kakera_marker_present=False,
+        ),
+        WishlistEntry(
+            name="Saber",
+            is_starwish=False,
+            is_owned_marker_present=True,
+            kakera_marker_present=True,
+        ),
+    ),
+)
+EMPTY_WISHLIST = WishlistSnapshot(
+    wishlist_count=0,
+    wishlist_capacity=0,
+    starwish_count=0,
+    starwish_capacity=0,
+    entries=(),
+)
+ZERO_WISHLIST = WishlistSnapshot(
+    wishlist_count=0,
+    wishlist_capacity=13,
+    starwish_count=0,
+    starwish_capacity=2,
+    entries=(
+        WishlistEntry(
+            name="Zero Boundary",
+            is_starwish=False,
+            is_owned_marker_present=False,
+            kakera_marker_present=False,
+        ),
+    ),
+)
 
 SPHERE_RESULT = SphereResultSnapshot(
     clicks_available=2,
@@ -4348,6 +4401,281 @@ def test_automatic_import_durable_bonus_forwards_every_snapshot_value(state) -> 
 
     assert coordinator.coordinate_player_bonus.call_args.kwargs["state"] is state
     catalog.import_player_bonus.assert_not_called()
+
+
+def _wishlist_context(attempt_id: int | None = 83) -> DurableWishlistImportContext:
+    return DurableWishlistImportContext(
+        source_event_id=81,
+        attempt_id=attempt_id,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted wishlist payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def test_automatic_import_non_durable_wishlist_keeps_catalog_path_with_configured_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = WISHLIST
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        WISHLIST_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="wishlist",
+    )
+
+    parser.parse_wishlist.assert_called_once_with(WISHLIST_MESSAGE)
+    catalog.import_wishlist.assert_called_once_with(
+        WISHLIST, "Lake", "ernieuuu", WISHLIST_MESSAGE, "clipboard"
+    )
+    coordinator.coordinate_wishlist.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="wishlist",
+        imported_count=len(WISHLIST.entries),
+        message="Imported wishlist.",
+    )
+
+
+def test_automatic_import_durable_wishlist_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = WISHLIST
+    coordinator = Mock()
+    coordinator.coordinate_wishlist.return_value = WishlistProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        wishlist_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("wishlist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+    context = _wishlist_context()
+
+    result = service.import_message(
+        WISHLIST_MESSAGE,
+        "caller-source",
+        "caller-server",
+        "caller-account",
+        detected_kind="wishlist",
+        observed_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc),
+        durable_wishlist_context=context,
+    )
+
+    parser.parse_wishlist.assert_called_once_with(WISHLIST_MESSAGE)
+    coordinator.coordinate_wishlist.assert_called_once_with(
+        source_event_id=context.source_event_id,
+        attempt_id=context.attempt_id,
+        state=WISHLIST,
+        server=context.server,
+        account=context.account,
+        raw=context.raw,
+        source=context.source,
+        observed_at=context.observed_at,
+        finished_at=context.finished_at,
+    )
+    catalog.import_wishlist.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="wishlist",
+        imported_count=1,
+        message="Imported wishlist.",
+        import_event_id=92,
+        replay_skipped=False,
+        durable_success_recorded=True,
+    )
+
+
+def test_automatic_import_durable_wishlist_maps_succeeded_replay_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = WISHLIST
+    coordinator = Mock()
+    coordinator.coordinate_wishlist.return_value = WishlistProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        wishlist_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("wishlist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        WISHLIST_MESSAGE,
+        "caller-source",
+        detected_kind="wishlist",
+        durable_wishlist_context=_wishlist_context(attempt_id=None),
+    )
+
+    parser.parse_wishlist.assert_called_once_with(WISHLIST_MESSAGE)
+    coordinator.coordinate_wishlist.assert_called_once()
+    assert coordinator.coordinate_wishlist.call_args.kwargs["attempt_id"] is None
+    catalog.import_wishlist.assert_not_called()
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_wishlist_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = WISHLIST
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="WishlistProjectionCoordinator"):
+        service.import_message(
+            WISHLIST_MESSAGE,
+            "discord",
+            detected_kind="wishlist",
+            durable_wishlist_context=_wishlist_context(),
+        )
+
+    parser.parse_wishlist.assert_called_once_with(WISHLIST_MESSAGE)
+    catalog.import_wishlist.assert_not_called()
+
+
+def test_automatic_import_durable_wishlist_coordinator_failure_does_not_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = WISHLIST
+    coordinator = Mock()
+    coordinator.coordinate_wishlist.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            WISHLIST_MESSAGE,
+            "discord",
+            detected_kind="wishlist",
+            durable_wishlist_context=_wishlist_context(),
+        )
+
+    parser.parse_wishlist.assert_called_once_with(WISHLIST_MESSAGE)
+    catalog.import_wishlist.assert_not_called()
+
+
+def test_automatic_import_malformed_wishlist_does_not_invoke_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.side_effect = ValueError("invalid wishlist response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid wishlist response"):
+        service.import_message(
+            WISHLIST_MESSAGE,
+            "discord",
+            detected_kind="wishlist",
+            durable_wishlist_context=_wishlist_context(),
+        )
+
+    coordinator.coordinate_wishlist.assert_not_called()
+    catalog.import_wishlist.assert_not_called()
+
+
+@pytest.mark.parametrize("state", (WISHLIST, EMPTY_WISHLIST, ZERO_WISHLIST))
+def test_automatic_import_durable_wishlist_forwards_boundaries_and_entries_unchanged(state) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_wishlist.return_value = WishlistProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        wishlist_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("wishlist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        WISHLIST_MESSAGE,
+        "discord",
+        detected_kind="wishlist",
+        durable_wishlist_context=_wishlist_context(),
+    )
+
+    forwarded = coordinator.coordinate_wishlist.call_args.kwargs["state"]
+    assert forwarded is state
+    assert (
+        forwarded.wishlist_count,
+        forwarded.wishlist_capacity,
+        forwarded.starwish_count,
+        forwarded.starwish_capacity,
+    ) == (
+        state.wishlist_count,
+        state.wishlist_capacity,
+        state.starwish_count,
+        state.starwish_capacity,
+    )
+    assert [entry.model_dump() for entry in forwarded.entries] == [
+        entry.model_dump() for entry in state.entries
+    ]
+    catalog.import_wishlist.assert_not_called()
+
+
+def test_automatic_import_unrelated_route_does_not_invoke_wishlist_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        wishlist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        BONUS_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="bonus",
+    )
+
+    assert result.kind == "bonus"
+    coordinator.coordinate_wishlist.assert_not_called()
+    parser.parse_wishlist.assert_not_called()
 
 
 def test_automatic_import_unrelated_route_does_not_invoke_bonus_coordinator() -> None:
