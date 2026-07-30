@@ -21,6 +21,7 @@ from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinat
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
+from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
@@ -172,6 +173,10 @@ def _listener_with_two_configured_users(tmp_path):
             discord_repository,
         ),
         sphere_result_projection_coordinator=SphereResultProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
+        player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
             catalog_repository,
             discord_repository,
         ),
@@ -1286,6 +1291,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -1351,6 +1360,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             sphere_result_projection_coordinator=SphereResultProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            player_bonus_projection_coordinator=PlayerBonusProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -1598,6 +1611,36 @@ def _durable_sphere_message(message_id: int = 1218, *, interaction=True):
     )
 
 
+def _durable_bonus_message(message_id: int = 1222, *, interaction=True):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=(
+            SimpleNamespace(name="bonus", user=SimpleNamespace(id=456))
+            if interaction
+            else None
+        ),
+        # Sanitized real Mudae `$bonus` response.
+        content=(
+            "Player Bonuses\n"
+            ":addroll: · Rolls per hour: +9 (6 $k + 1 $kl + 2 $kt) -3 ($bw)\n"
+            ":wlslot: · Wishlist slots: +8 (6 $k + 0 $kl + 2 $kt) -2 ($sw)\n"
+            ":wlslot: · Spawn bonus for wishes: +210% ($k + $bw + slash)\n"
+            ":sw: · Additional % spawn bonus for $starwish: +180% ($kt + $bw + $tuto) (= 390%)\n"
+            ":sw: · Starwish slots: +1 (0 $kl + 1 $sw)\n"
+            ":morekakera: · Kakera max power: 110% ($kt)\n"
+            ":morekakera: · Power cost per kakera button: 36% (-60% $k -4% $kt)\n"
+            ":morekakera: · Additional bonus for kakera buttons on starwishes: +20% ($sw)\n"
+            ":kakeraL: · Random kakera per light kakera: 4-5 (1 $kt)\n"
+            ":chaoskey: · Chance to get an additional key on wishes: +10% ($kt)"
+        ),
+        embeds=(),
+        edited_at=None,
+    )
+
+
 def _receipt_rows(database_path, table: str):
     with connect(database_path) as connection:
         return connection.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()
@@ -1693,6 +1736,22 @@ def _durable_sphere_counts(database_path):
                 "(SELECT COUNT(*) FROM discord_processing_attempts), "
                 "(SELECT COUNT(*) FROM import_events WHERE kind = 'sphere_result'), "
                 "(SELECT COUNT(*) FROM sphere_result_observations), "
+                "(SELECT COUNT(*) FROM discord_projection_links), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def _durable_bonus_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM discord_processing_attempts), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'player_bonus'), "
+                "(SELECT COUNT(*) FROM player_bonus_observations), "
                 "(SELECT COUNT(*) FROM discord_projection_links), "
                 "(SELECT COUNT(*) FROM server_contexts), "
                 "(SELECT COUNT(*) FROM account_contexts)"
@@ -5641,3 +5700,339 @@ def test_listener_attribution_write_failure_prevents_attempt_and_import(tmp_path
     importer.import_message.assert_not_called()
     assert listener._seen_payloads == set()
     assert _receipt_rows(database_path, "discord_processing_attempts") == []
+
+
+def test_listener_first_durable_player_bonus_uses_coordinator_owned_success(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    direct_bonus = Mock(wraps=listener._catalog.import_player_bonus)
+    listener._catalog.import_player_bonus = direct_bonus
+    message = _durable_bonus_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_player_bonus_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id == 1
+    assert context.server == "Test Server"
+    assert context.account == "user_a"
+    assert context.raw == message.content
+    assert context.source == "discord:guild=123:channel=900:message=1222"
+    assert context.observed_at.tzinfo is not None
+    assert context.finished_at.tzinfo is not None
+    assert context.observed_at <= context.finished_at
+    importer.import_message.assert_called_once()
+    direct_bonus.assert_not_called()
+    assert _durable_bonus_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_processing_attempts")[0]["status"] == "succeeded"
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+
+
+def test_listener_player_bonus_attribution_is_persisted_before_attempt_creation(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    order = []
+    for name in (
+        "record_server_attribution",
+        "record_account_attribution",
+        "begin_processing_attempt",
+    ):
+        original = getattr(repository, name)
+
+        def record_call(*args, _name=name, _original=original, **kwargs):
+            order.append(_name)
+            return _original(*args, **kwargs)
+
+        setattr(repository, name, record_call)
+
+    asyncio.run(listener.handle_bot_response(_durable_bonus_message()))
+
+    assert order == [
+        "record_server_attribution",
+        "record_account_attribution",
+        "begin_processing_attempt",
+    ]
+    assert _durable_bonus_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+
+
+def test_listener_succeeded_player_bonus_restart_replay_uses_no_attempt_and_no_duplicates(
+    tmp_path,
+) -> None:
+    first_listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_bonus_message()
+    asyncio.run(first_listener.handle_bot_response(message))
+
+    restarted_listener, restarted_repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted_listener._importer)
+    restarted_listener._importer = importer
+    restarted_listener._contexts.clear()
+    restarted_listener._pending_contexts.clear()
+    restarted_repository.begin_processing_attempt = Mock(
+        wraps=restarted_repository.begin_processing_attempt
+    )
+    message.interaction_metadata = None
+
+    asyncio.run(restarted_listener.handle_bot_response(message))
+
+    context = importer.import_message.call_args.kwargs["durable_player_bonus_context"]
+    assert context.source_event_id == 1
+    assert context.attempt_id is None
+    restarted_repository.begin_processing_attempt.assert_not_called()
+    assert _durable_bonus_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+
+
+def test_listener_player_bonuses_for_two_users_sharing_one_channel_stay_attributed(tmp_path) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    message_a = _durable_bonus_message(1223)
+    message_b = _durable_bonus_message(1224)
+    message_b.interaction_metadata = SimpleNamespace(
+        name="bonus", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(listener.handle_bot_response(message_a))
+    asyncio.run(listener.handle_bot_response(message_b))
+
+    assert catalog.player_bonus("Test Server", "user_a") is not None
+    assert catalog.player_bonus("Test Server", "user_b") is not None
+    assert _durable_bonus_counts(tmp_path / "catalog.db") == (2, 2, 2, 2, 2, 1, 2)
+
+
+def test_listener_player_bonus_missing_identity_evidence_blocks_attempt_and_import(tmp_path) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "bonus-missing.json",
+        (("Test Server", "user_a", "primary", "456"),),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_bonus_message(interaction=False)))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "unresolved", None)]
+    assert _account_attribution_rows(database_path) == []
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert listener._seen_payloads == set()
+
+
+def test_listener_player_bonus_ambiguous_identity_evidence_blocks_attempt_and_import(
+    tmp_path,
+) -> None:
+    importer = Mock()
+    listener, _repository, database_path = _attribution_listener(
+        tmp_path,
+        "bonus-ambiguous.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "456"),
+        ),
+        importer=importer,
+    )
+
+    asyncio.run(listener.handle_bot_response(_durable_bonus_message()))
+
+    importer.import_message.assert_not_called()
+    assert _server_attribution_rows(database_path) == [(1, "resolved", "Test Server")]
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "ambiguous",
+        None,
+        None,
+    )
+    assert _receipt_rows(database_path, "discord_processing_attempts") == []
+    assert listener._seen_payloads == set()
+
+
+def test_listener_player_bonus_resolved_attribution_conflict_fails_closed(tmp_path) -> None:
+    listener, _catalog = _listener_with_two_configured_users(tmp_path)
+    message = _durable_bonus_message()
+    asyncio.run(listener.handle_bot_response(message))
+
+    replay_importer = Mock()
+    database_path = tmp_path / "catalog.db"
+    replay_listener = DiscordListenerService(
+        config_service=listener._config,
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        importer=replay_importer,
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+    replay_listener._mudae_user_id = 999
+    message.interaction_metadata = SimpleNamespace(
+        name="bonus", user=SimpleNamespace(id=789)
+    )
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    replay_importer.import_message.assert_not_called()
+    assert _durable_bonus_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _account_attribution_rows(database_path)[0][1:4] == (
+        "resolved",
+        "Test Server",
+        "user_a",
+    )
+
+
+def test_listener_active_player_bonus_processing_does_not_redispatch(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_bonus_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        account_name="user_a",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(
+        tmp_path,
+        importer=importer,
+    )
+
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert len(attempts) == 1
+    assert attempts[0]["id"] == active.attempt_id
+    assert attempts[0]["status"] == "processing"
+
+
+def test_listener_retryable_player_bonus_coordinator_failure_allows_later_retry(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._player_bonus_projection_coordinator
+    coordinator.coordinate_player_bonus = Mock(
+        side_effect=RuntimeError("player bonus coordinator failed")
+    )
+    direct_bonus = Mock(wraps=listener._catalog.import_player_bonus)
+    listener._catalog.import_player_bonus = direct_bonus
+    message = _durable_bonus_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+
+    first_attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
+    assert (first_attempt["status"], first_attempt["retryable"]) == ("failed", 1)
+    assert _durable_bonus_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+    direct_bonus.assert_not_called()
+
+    retry_listener, _retry_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(retry_listener.handle_bot_response(message))
+
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["status"], row["retryable"]) for row in attempts] == [
+        ("failed", 1),
+        ("succeeded", 0),
+    ]
+    assert _durable_bonus_counts(database_path) == (1, 2, 1, 1, 1, 1, 1)
+
+
+def test_listener_terminal_player_bonus_lifecycle_never_falls_back_to_direct_importing(
+    tmp_path,
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _durable_bonus_message()
+    received = listener._receive_message(message, message.content)
+    assert received is not None
+    repository.record_server_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    repository.record_account_attribution(
+        received.source_event_id,
+        status="resolved",
+        server_name="Test Server",
+        account_name="user_a",
+        recorded_at=datetime.now(timezone.utc),
+    )
+    active = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="mudae-parser-v1",
+        router_version="mudae-router-v1",
+        started_at=datetime.now(timezone.utc),
+    )
+    repository.mark_processing_failure(
+        source_event_id=active.source_event_id,
+        attempt_id=active.attempt_id,
+        status="failed",
+        retryable=False,
+        failure_code="terminal_test_failure",
+        failure_detail="terminal player bonus failure",
+        finished_at=datetime.now(timezone.utc),
+    )
+
+    importer = Mock()
+    replay_listener, _replay_repository, _ = _durable_listener(
+        tmp_path,
+        importer=importer,
+    )
+    direct_bonus = Mock(wraps=replay_listener._catalog.import_player_bonus)
+    replay_listener._catalog.import_player_bonus = direct_bonus
+    asyncio.run(replay_listener.handle_bot_response(message))
+
+    importer.import_message.assert_not_called()
+    direct_bonus.assert_not_called()
+    assert len(_receipt_rows(database_path, "discord_processing_attempts")) == 1
+    assert _durable_bonus_counts(database_path) == (1, 1, 0, 0, 0, 0, 0)
+
+
+def test_listener_same_process_durable_player_bonus_duplicate_is_suppressed(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    message = _durable_bonus_message()
+
+    asyncio.run(listener.handle_bot_response(message))
+    asyncio.run(listener.handle_bot_response(message))
+
+    importer.import_message.assert_called_once()
+    assert _durable_bonus_counts(database_path) == (1, 1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["status"] == "succeeded"
+
+
+def test_listener_non_durable_player_bonus_keeps_direct_catalog_path(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    importer = Mock(wraps=AutomaticImportService(catalog))
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=SimpleNamespace(),
+        importer=importer,
+        discord_message_repository=None,
+    )
+    listener._mudae_user_id = 999
+
+    asyncio.run(listener.handle_bot_response(_durable_bonus_message()))
+
+    kwargs = importer.import_message.call_args.kwargs
+    assert "durable_player_bonus_context" not in kwargs
+    observation = catalog.player_bonus("Test Server", "user_a")
+    assert observation is not None
+    assert len(observation.metrics) == 10
+    assert _receipt_rows(database_path, "discord_source_events") == []
