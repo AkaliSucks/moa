@@ -10,6 +10,8 @@ from moa.models.character import (
     KakeraStateSnapshot,
     KakeralootSettingsSnapshot,
     MudapinSnapshot,
+    PlayerBonusMetric,
+    PlayerBonusSnapshot,
     ProfileSnapshot,
     RollObservation,
     ServerSettingMetric,
@@ -30,6 +32,7 @@ from moa.services.automatic_import_service import (
     DurableInfoklImportContext,
     DurableKakeraImportContext,
     DurableMudapinsImportContext,
+    DurablePlayerBonusImportContext,
     DurableProfileImportContext,
     DurableRollImportContext,
     DurableSettingsImportContext,
@@ -54,6 +57,7 @@ from moa.services.mudapins_projection_coordinator import (
     MudapinsProjectionCoordinator,
     MudapinsProjectionResult,
 )
+from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionResult
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
     ProfileProjectionResult,
@@ -89,6 +93,7 @@ EMPTY_MUDAPINS_MESSAGE = "No mudapins found! Collect them with kakeraloots ($kl)
 TOWER_MESSAGE = "tower payload"
 SPHERE_MESSAGE = ":sp: +158\n:spG: +43 (Stock: 3,655)"
 SETTINGS_MESSAGE = "settings payload"
+BONUS_MESSAGE = "bonus payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -201,6 +206,21 @@ MUDAPINS = MudapinSnapshot(
     pin_markers=(":pin139:", ":pin139:", ":logopin6:", ":pin2157:")
 )
 EMPTY_MUDAPINS = MudapinSnapshot(pin_markers=())
+PLAYER_BONUS = PlayerBonusSnapshot(
+    metrics=(PlayerBonusMetric(label="Rolls", detail="+2"),),
+    rolls_per_hour_bonus=2,
+    wishlist_slot_bonus=0,
+    wish_spawn_bonus_percent=None,
+    starwish_spawn_bonus_percent=3,
+    starwish_total_spawn_bonus_percent=4,
+    starwish_slot_bonus=5,
+    additional_wish_key_chance_percent=6,
+    kakera_max_power_percent=7,
+    kakera_button_power_cost_percent=8,
+    starwish_kakera_button_bonus_percent=9,
+    light_kakera_minimum=10,
+    light_kakera_maximum=11,
+)
 
 
 def _durable_roll_importer(tmp_path):
@@ -3749,3 +3769,279 @@ def test_automatic_import_non_durable_tower_does_not_require_context_metadata() 
     assert result.imported_count == 1
     coordinator.coordinate_tower_state.assert_not_called()
     catalog.import_tower_state.assert_called_once()
+
+
+def _player_bonus_context(attempt_id: int | None = 83) -> DurablePlayerBonusImportContext:
+    return DurablePlayerBonusImportContext(
+        source_event_id=81,
+        attempt_id=attempt_id,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted bonus payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def test_automatic_import_non_durable_bonus_keeps_catalog_path_with_configured_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        BONUS_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="bonus",
+    )
+
+    parser.parse_player_bonus.assert_called_once_with(BONUS_MESSAGE)
+    catalog.import_player_bonus.assert_called_once_with(
+        PLAYER_BONUS, "Lake", "ernieuuu", BONUS_MESSAGE, "clipboard"
+    )
+    coordinator.coordinate_player_bonus.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="bonus",
+        imported_count=len(PLAYER_BONUS.metrics),
+        message="Imported player bonuses.",
+    )
+
+
+def test_automatic_import_durable_bonus_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    coordinator = Mock()
+    coordinator.coordinate_player_bonus.return_value = PlayerBonusProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        player_bonus_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("player_bonus_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+    context = _player_bonus_context()
+
+    result = service.import_message(
+        BONUS_MESSAGE,
+        "caller-source",
+        "caller-server",
+        "caller-account",
+        detected_kind="bonus",
+        observed_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc),
+        durable_player_bonus_context=context,
+    )
+
+    parser.parse_player_bonus.assert_called_once_with(BONUS_MESSAGE)
+    coordinator.coordinate_player_bonus.assert_called_once_with(
+        source_event_id=context.source_event_id,
+        attempt_id=context.attempt_id,
+        state=PLAYER_BONUS,
+        server=context.server,
+        account=context.account,
+        raw=context.raw,
+        source=context.source,
+        observed_at=context.observed_at,
+        finished_at=context.finished_at,
+    )
+    catalog.import_player_bonus.assert_not_called()
+    assert result.kind == "bonus"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_bonus_maps_succeeded_replay_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    coordinator = Mock()
+    coordinator.coordinate_player_bonus.return_value = PlayerBonusProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        player_bonus_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("player_bonus_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        BONUS_MESSAGE,
+        "caller-source",
+        detected_kind="bonus",
+        durable_player_bonus_context=_player_bonus_context(attempt_id=None),
+    )
+
+    coordinator.coordinate_player_bonus.assert_called_once()
+    assert coordinator.coordinate_player_bonus.call_args.kwargs["attempt_id"] is None
+    catalog.import_player_bonus.assert_not_called()
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_bonus_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="PlayerBonusProjectionCoordinator"):
+        service.import_message(
+            BONUS_MESSAGE,
+            "discord",
+            detected_kind="bonus",
+            durable_player_bonus_context=_player_bonus_context(),
+        )
+
+    parser.parse_player_bonus.assert_called_once_with(BONUS_MESSAGE)
+    catalog.import_player_bonus.assert_not_called()
+
+
+def test_automatic_import_durable_bonus_coordinator_failure_does_not_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = PLAYER_BONUS
+    coordinator = Mock()
+    coordinator.coordinate_player_bonus.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            BONUS_MESSAGE,
+            "discord",
+            detected_kind="bonus",
+            durable_player_bonus_context=_player_bonus_context(),
+        )
+
+    catalog.import_player_bonus.assert_not_called()
+
+
+def test_automatic_import_malformed_bonus_does_not_invoke_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.side_effect = ValueError("invalid bonus response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid bonus response"):
+        service.import_message(
+            BONUS_MESSAGE,
+            "discord",
+            detected_kind="bonus",
+            durable_player_bonus_context=_player_bonus_context(),
+        )
+
+    coordinator.coordinate_player_bonus.assert_not_called()
+    catalog.import_player_bonus.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        PlayerBonusSnapshot(metrics=()),
+        PlayerBonusSnapshot(
+            metrics=(PlayerBonusMetric(label="Zero", detail="0"),),
+            rolls_per_hour_bonus=0,
+            wishlist_slot_bonus=0,
+            wish_spawn_bonus_percent=0,
+            starwish_spawn_bonus_percent=0,
+            starwish_total_spawn_bonus_percent=0,
+            starwish_slot_bonus=0,
+            additional_wish_key_chance_percent=0,
+            kakera_max_power_percent=0,
+            kakera_button_power_cost_percent=0,
+            starwish_kakera_button_bonus_percent=0,
+            light_kakera_minimum=0,
+            light_kakera_maximum=0,
+        ),
+        PLAYER_BONUS,
+    ),
+)
+def test_automatic_import_durable_bonus_forwards_every_snapshot_value(state) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_player_bonus.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_player_bonus.return_value = PlayerBonusProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        player_bonus_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("player_bonus_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        BONUS_MESSAGE,
+        "discord",
+        detected_kind="bonus",
+        durable_player_bonus_context=_player_bonus_context(),
+    )
+
+    assert coordinator.coordinate_player_bonus.call_args.kwargs["state"] is state
+    catalog.import_player_bonus.assert_not_called()
+
+
+def test_automatic_import_unrelated_route_does_not_invoke_bonus_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_wishlist.return_value = Mock(entries=(object(),))
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        player_bonus_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "wishlist payload",
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="wishlist",
+    )
+
+    assert result.kind == "wishlist"
+    coordinator.coordinate_player_bonus.assert_not_called()
+    parser.parse_player_bonus.assert_not_called()
