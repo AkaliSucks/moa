@@ -9,6 +9,8 @@ from moa.database.sqlite import connect
 from moa.models.character import (
     BadgeLevel,
     ClaimConfirmation,
+    DisableListEntry,
+    DisableListSnapshot,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     PlayerBonusMetric,
@@ -30,6 +32,7 @@ from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey,
 from moa.repositories.catalog_repository import (
     CatalogRepository,
     _KakeralootStateImportConnectionResult,
+    _DisableListImportConnectionResult,
     _PlayerBonusImportConnectionResult,
     _WishlistImportConnectionResult,
 )
@@ -266,6 +269,38 @@ EMPTY_WISHLIST = WishlistSnapshot(
     starwish_capacity=0,
     entries=(),
 )
+DISABLELIST = DisableListSnapshot(
+    slots_used=13,
+    slots_capacity=16,
+    total_disabled=107_529,
+    disabled_wa=41_247,
+    disabled_ha=42_438,
+    disabled_wg=20_996,
+    disabled_hg=14_789,
+    wa_pool_limit=40_861,
+    ha_pool_limit=42_213,
+    western_disabled=True,
+    irl_disabled=False,
+    entries=(
+        DisableListEntry(name="Kadokawa Corporation", disabled_count=13_207),
+        DisableListEntry(name="Webcomics", disabled_count=11_073),
+        DisableListEntry(name="Kadokawa Corporation", disabled_count=13_207),
+    ),
+)
+BOUNDARY_DISABLELIST = DisableListSnapshot(
+    slots_used=0,
+    slots_capacity=0,
+    total_disabled=0,
+    disabled_wa=0,
+    disabled_ha=0,
+    disabled_wg=0,
+    disabled_hg=0,
+    wa_pool_limit=0,
+    ha_pool_limit=None,
+    western_disabled=False,
+    irl_disabled=False,
+    entries=(),
+)
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -443,6 +478,24 @@ def _wishlist_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "wishlist_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _disablelist_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "disablelist_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -3222,6 +3275,282 @@ def test_wishlist_helper_preserves_empty_zero_and_duplicate_boundaries(tmp_path,
             (catalog.import_wishlist(WISHLIST, "Server", "Account", "duplicate payload", "discord").import_event_id,),
         ).fetchone()
         assert json.loads(duplicate_row["entries_json"]) == [entry.model_dump() for entry in WISHLIST.entries]
+
+
+def test_disablelist_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_DisableListImportConnectionResult)
+    assert _DisableListImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_DisableListImportConnectionResult)] == [
+        "import_event_id",
+        "disablelist_observation_id",
+    ]
+    assert not hasattr(_DisableListImportConnectionResult(1, 2), "__dict__")
+
+
+def test_public_disablelist_wrapper_preserves_result_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    raw_message = "disablelist payload with exact source text"
+
+    result = catalog.import_disablelist(
+        DISABLELIST,
+        "  Server  ",
+        "  Account  ",
+        raw_message,
+        "discord",
+    )
+
+    assert set(result.model_dump()) == {"import_event_id", "server_name", "account_name", "observed_at"}
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "disablelist_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT account_context_id, slots_used, slots_capacity, total_disabled, disabled_wa,
+                   disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit,
+                   western_disabled, irl_disabled, entries_json, observed_at, import_event_id
+            FROM disablelist_observations WHERE import_event_id = ?
+            """,
+            (result.import_event_id,),
+        ).fetchone()
+        account = connection.execute("SELECT id, name, normalized_name FROM account_contexts").fetchone()
+        server = connection.execute("SELECT id, name, normalized_name FROM server_contexts").fetchone()
+        assert tuple(event) == ("disablelist", "discord", result.observed_at.isoformat(), raw_message)
+        assert observation["account_context_id"] == account["id"]
+        assert tuple(observation)[1:12] == (
+            DISABLELIST.slots_used,
+            DISABLELIST.slots_capacity,
+            DISABLELIST.total_disabled,
+            DISABLELIST.disabled_wa,
+            DISABLELIST.disabled_ha,
+            DISABLELIST.disabled_wg,
+            DISABLELIST.disabled_hg,
+            DISABLELIST.wa_pool_limit,
+            DISABLELIST.ha_pool_limit,
+            DISABLELIST.western_disabled,
+            DISABLELIST.irl_disabled,
+        )
+        assert observation["entries_json"] == json.dumps(
+            [entry.model_dump() for entry in DISABLELIST.entries]
+        )
+        assert observation["observed_at"] == result.observed_at.isoformat()
+        assert observation["import_event_id"] == result.import_event_id
+        assert tuple(server) == (server["id"], "Server", "server")
+        assert tuple(account) == (account["id"], "Account", "account")
+
+
+def test_disablelist_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        imported = catalog._import_disablelist_with_connection(
+            connection,
+            state=DISABLELIST,
+            server="Server",
+            account="Account",
+            raw="disablelist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert isinstance(imported, _DisableListImportConnectionResult)
+        assert connection.in_transaction is True
+        assert _disablelist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "disablelist_observations": 1,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT id, kind FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()
+        observation = connection.execute(
+            "SELECT id, import_event_id FROM disablelist_observations WHERE id = ?",
+            (imported.disablelist_observation_id,),
+        ).fetchone()
+        assert tuple(event) == (imported.import_event_id, "disablelist")
+        assert tuple(observation) == (
+            imported.disablelist_observation_id,
+            imported.import_event_id,
+        )
+        with connect(database_path) as observer:
+            assert _disablelist_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "disablelist_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.rollback()
+
+
+def test_disablelist_helper_commit_preserves_all_values_and_returned_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_disablelist_with_connection(
+            connection,
+            state=DISABLELIST,
+            server="Server",
+            account="Account",
+            raw="disablelist payload",
+            source="clipboard",
+            observed_at=OBSERVED_AT,
+        )
+        connection.commit()
+
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT id, kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        observation = connection.execute(
+            """
+            SELECT id, slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha,
+                   disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled,
+                   irl_disabled, entries_json, observed_at, import_event_id
+            FROM disablelist_observations WHERE id = ?
+            """,
+            (imported.disablelist_observation_id,),
+        ).fetchone()
+        assert event["id"] == imported.import_event_id
+        assert tuple(event)[1:] == (
+            "disablelist",
+            "clipboard",
+            "disablelist payload",
+            OBSERVED_AT.isoformat(),
+        )
+        assert observation["id"] == imported.disablelist_observation_id
+        assert tuple(observation)[1:12] == (
+            DISABLELIST.slots_used,
+            DISABLELIST.slots_capacity,
+            DISABLELIST.total_disabled,
+            DISABLELIST.disabled_wa,
+            DISABLELIST.disabled_ha,
+            DISABLELIST.disabled_wg,
+            DISABLELIST.disabled_hg,
+            DISABLELIST.wa_pool_limit,
+            DISABLELIST.ha_pool_limit,
+            DISABLELIST.western_disabled,
+            DISABLELIST.irl_disabled,
+        )
+        assert observation["entries_json"] == json.dumps(
+            [entry.model_dump() for entry in DISABLELIST.entries]
+        )
+        assert observation["observed_at"] == OBSERVED_AT.isoformat()
+        assert observation["import_event_id"] == imported.import_event_id
+        disablelist = catalog.disablelist("Server", "Account")
+        assert disablelist is not None
+        assert disablelist.entries == DISABLELIST.entries
+
+
+def test_disablelist_helper_rollback_removes_new_rows_and_contexts(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_disablelist_with_connection(
+            connection,
+            state=DISABLELIST,
+            server="Server",
+            account="Account",
+            raw="disablelist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "disablelist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_disablelist_helper_reuses_contexts_and_preserves_boundary_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_disablelist(DISABLELIST, "Server", "Account", "initial payload", "discord")
+
+    with connect(database_path) as connection:
+        existing = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        before_counts = _disablelist_counts(connection)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_disablelist_with_connection(
+            connection,
+            state=BOUNDARY_DISABLELIST,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="boundary disablelist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        row = connection.execute(
+            """
+            SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg,
+                   disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, entries_json
+            FROM disablelist_observations WHERE id = ?
+            """,
+            (imported.disablelist_observation_id,),
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert tuple(row) == (0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, "[]")
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        current = connection.execute(
+            """
+            SELECT server_contexts.id AS server_id, account_contexts.id AS account_id
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert _disablelist_counts(connection) == before_counts
 
 
 def test_public_mudapins_wrapper_preserves_compatibility_and_stored_values(tmp_path) -> None:

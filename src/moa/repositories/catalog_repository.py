@@ -525,6 +525,14 @@ class _WishlistImportConnectionResult:
     wishlist_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _DisableListImportConnectionResult:
+    """Rows created by one disablelist import on a caller-owned connection."""
+
+    import_event_id: int
+    disablelist_observation_id: int
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -2406,13 +2414,42 @@ class CatalogRepository:
         """Store a complete account-scoped `$dl` snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("disablelist", source, observed_at.isoformat(), raw_message),
+            imported = self._import_disablelist_with_connection(
+                connection,
+                state=disablelist,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return DisableListImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_disablelist_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: DisableListSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _DisableListImportConnectionResult:
+        """Store one disablelist snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("disablelist", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        disablelist_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO disablelist_observations (
@@ -2423,27 +2460,26 @@ class CatalogRepository:
                 """,
                 (
                     account_id,
-                    disablelist.slots_used,
-                    disablelist.slots_capacity,
-                    disablelist.total_disabled,
-                    disablelist.disabled_wa,
-                    disablelist.disabled_ha,
-                    disablelist.disabled_wg,
-                    disablelist.disabled_hg,
-                    disablelist.wa_pool_limit,
-                    disablelist.ha_pool_limit,
-                    disablelist.western_disabled,
-                    disablelist.irl_disabled,
-                    json.dumps([entry.model_dump() for entry in disablelist.entries]),
+                    state.slots_used,
+                    state.slots_capacity,
+                    state.total_disabled,
+                    state.disabled_wa,
+                    state.disabled_ha,
+                    state.disabled_wg,
+                    state.disabled_hg,
+                    state.wa_pool_limit,
+                    state.ha_pool_limit,
+                    state.western_disabled,
+                    state.irl_disabled,
+                    json.dumps([entry.model_dump() for entry in state.entries]),
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return DisableListImportResult(
+            ).lastrowid
+        )
+        return _DisableListImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            disablelist_observation_id=disablelist_observation_id,
         )
 
     def disablelist(self, server_name: str, account_name: str) -> DisableListObservation | None:
