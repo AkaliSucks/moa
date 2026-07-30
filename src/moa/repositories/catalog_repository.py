@@ -470,6 +470,14 @@ class _KakeralootSettingsImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _KakeralootStateImportConnectionResult:
+    """Rows created by one Kakeraloot-state import on a caller-owned connection."""
+
+    import_event_id: int
+    kakeraloot_state_observation_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class _TimerStateImportConnectionResult:
     """Rows created by one timer-state import on a caller-owned connection."""
 
@@ -2928,13 +2936,42 @@ class CatalogRepository:
         """Store a complete account-scoped `$lk` snapshot."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("kakeraloot_state", source, observed_at.isoformat(), raw_message),
+            imported = self._import_kakeraloot_state_with_connection(
+                connection,
+                state=state,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
+        return KakeralootStateImportResult(
+            import_event_id=imported.import_event_id,
+            server_name=server_name.strip(),
+            account_name=account_name.strip(),
+            observed_at=observed_at,
+        )
+
+    def _import_kakeraloot_state_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        state: KakeralootStateSnapshot,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _KakeralootStateImportConnectionResult:
+        """Store one Kakeraloot-state snapshot without taking transaction ownership."""
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("kakeraloot_state", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        kakeraloot_state_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO kakeraloot_state_observations (
@@ -2966,12 +3003,11 @@ class CatalogRepository:
                     observed_at.isoformat(),
                     import_event_id,
                 ),
-            )
-        return KakeralootStateImportResult(
+            ).lastrowid
+        )
+        return _KakeralootStateImportConnectionResult(
             import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+            kakeraloot_state_observation_id=kakeraloot_state_observation_id,
         )
 
     def kakeraloot_state(
