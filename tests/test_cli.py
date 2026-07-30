@@ -12,6 +12,7 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
@@ -180,6 +181,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     importers: list[AutomaticImportService] = []
     listeners: list[object] = []
     kakera_coordinators: list[KakeraStateProjectionCoordinator] = []
+    kakeraloot_coordinators: list[KakeralootStateProjectionCoordinator] = []
     timer_coordinators: list[TimerProjectionCoordinator] = []
     tower_coordinators: list[TowerStateProjectionCoordinator] = []
     sphere_coordinators: list[SphereResultProjectionCoordinator] = []
@@ -203,6 +205,13 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     class RecordingKakeraStateProjectionCoordinator(KakeraStateProjectionCoordinator):
         def __init__(self, *repositories):
             kakera_coordinators.append(self)
+            super().__init__(*repositories)
+
+    class RecordingKakeralootStateProjectionCoordinator(
+        KakeralootStateProjectionCoordinator
+    ):
+        def __init__(self, *repositories):
+            kakeraloot_coordinators.append(self)
             super().__init__(*repositories)
 
     class RecordingTimerProjectionCoordinator(TimerProjectionCoordinator):
@@ -244,6 +253,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         "KakeraStateProjectionCoordinator",
         RecordingKakeraStateProjectionCoordinator,
     )
+    monkeypatch.setattr(
+        main,
+        "KakeralootStateProjectionCoordinator",
+        RecordingKakeralootStateProjectionCoordinator,
+    )
     monkeypatch.setattr(main, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
     monkeypatch.setattr(
         main,
@@ -277,6 +291,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     infokl_coordinator = importer._infokl_projection_coordinator
     timer_coordinator = importer._timer_projection_coordinator
     kakera_coordinator = importer._kakera_state_projection_coordinator
+    kakeraloot_coordinator = importer._kakeraloot_state_projection_coordinator
     tower_coordinator = importer._tower_state_projection_coordinator
     sphere_coordinator = importer._sphere_result_projection_coordinator
     player_bonus_coordinator = importer._player_bonus_projection_coordinator
@@ -295,10 +310,12 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(infokl_coordinator, InfoklProjectionCoordinator)
     assert isinstance(timer_coordinator, TimerProjectionCoordinator)
     assert isinstance(kakera_coordinator, KakeraStateProjectionCoordinator)
+    assert isinstance(kakeraloot_coordinator, KakeralootStateProjectionCoordinator)
     assert isinstance(tower_coordinator, TowerStateProjectionCoordinator)
     assert isinstance(sphere_coordinator, SphereResultProjectionCoordinator)
     assert isinstance(player_bonus_coordinator, PlayerBonusProjectionCoordinator)
     assert kakera_coordinators == [kakera_coordinator]
+    assert kakeraloot_coordinators == [kakeraloot_coordinator]
     assert timer_coordinators == [timer_coordinator]
     assert tower_coordinators == [tower_coordinator]
     assert sphere_coordinators == [sphere_coordinator]
@@ -326,6 +343,9 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert kakera_coordinator._catalog is catalog_service._repository
     assert kakera_coordinator._discord is discord_repository
     assert kakera_coordinator._database_path == database_path
+    assert kakeraloot_coordinator._catalog is catalog_service._repository
+    assert kakeraloot_coordinator._discord is discord_repository
+    assert kakeraloot_coordinator._database_path == database_path
     assert tower_coordinator._catalog is catalog_service._repository
     assert tower_coordinator._discord is discord_repository
     assert tower_coordinator._database_path == database_path
@@ -380,6 +400,46 @@ def test_import_auto_keeps_direct_automatic_import_without_tower_coordinator(
     args, kwargs = calls[0]
     assert args == ("tower response", "clipboard", "Lake", "ernieuuu")
     assert kwargs == {"harem_scan_id": None}
+
+
+def test_import_auto_keeps_direct_kakeraloot_import_without_durable_coordinator(
+    monkeypatch,
+) -> None:
+    constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class RecordingImporter:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args, kwargs))
+
+        def import_message(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return SimpleNamespace(
+                kind="kakeraloot_state",
+                imported_count=1,
+                message="Imported Kakeraloot state.",
+            )
+
+    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(
+        main,
+        "_read_message_source",
+        lambda path, clipboard: "Kakera Loots: 0",
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "auto", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert constructed == [((), {})]
+    assert calls == [
+        (
+            ("Kakera Loots: 0", "clipboard", "Lake", "ernieuuu"),
+            {"harem_scan_id": None},
+        )
+    ]
 
 
 def test_import_auto_keeps_direct_sphere_import_without_durable_coordinator(
