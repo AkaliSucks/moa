@@ -8,6 +8,7 @@ from moa.models.character import (
     BadgeLevel,
     ClaimConfirmation,
     KakeraStateSnapshot,
+    KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
     MudapinSnapshot,
     PlayerBonusMetric,
@@ -31,6 +32,7 @@ from moa.services.automatic_import_service import (
     DurableClaimImportContext,
     DurableInfoklImportContext,
     DurableKakeraImportContext,
+    DurableKakeralootStateImportContext,
     DurableMudapinsImportContext,
     DurablePlayerBonusImportContext,
     DurableProfileImportContext,
@@ -52,6 +54,9 @@ from moa.services.infokl_projection_coordinator import (
 from moa.services.kakera_state_projection_coordinator import (
     KakeraStateProjectionCoordinator,
     KakeraStateProjectionResult,
+)
+from moa.services.kakeraloot_state_projection_coordinator import (
+    KakeralootStateProjectionResult,
 )
 from moa.services.mudapins_projection_coordinator import (
     MudapinsProjectionCoordinator,
@@ -135,6 +140,26 @@ INFOKL_SETTINGS = KakeralootSettingsSnapshot(
     loot_cost=500,
     quantity_quality_base_cost=1000,
     quantity_quality_level_increment=250,
+)
+
+KAKERALOOT_MESSAGE = "kakeraloot state payload"
+KAKERALOOT_STATE = KakeralootStateSnapshot(
+    has_kakeraloots=True,
+    status_note="all fields",
+    rolls_stacked=1,
+    disable_wa_ha_reduction=102,
+    disable_wg_hg_reduction=68,
+    protected_wish_level=42,
+    protected_wish_denominator=4642,
+    mudapins=22,
+    rt_cooldown_reduction_hours=2,
+    permanent_roll_bonus=1,
+    star_branches=3,
+    starwish_slots_from_branches=4,
+    quantity_level=23,
+    quality_level=6,
+    usage_count=256,
+    kakera_balance=9210,
 )
 
 KAKERA_STATE = KakeraStateSnapshot(
@@ -3769,6 +3794,309 @@ def test_automatic_import_non_durable_tower_does_not_require_context_metadata() 
     assert result.imported_count == 1
     coordinator.coordinate_tower_state.assert_not_called()
     catalog.import_tower_state.assert_called_once()
+
+
+def _kakeraloot_context(attempt_id: int | None = 83) -> DurableKakeralootStateImportContext:
+    return DurableKakeralootStateImportContext(
+        source_event_id=81,
+        attempt_id=attempt_id,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted kakeraloot payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def test_automatic_import_non_durable_kakeraloot_keeps_catalog_path_and_result() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = KAKERALOOT_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERALOOT_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="lootstate",
+    )
+
+    parser.parse_kakeraloot_state.assert_called_once_with(KAKERALOOT_MESSAGE)
+    catalog.import_kakeraloot_state.assert_called_once_with(
+        KAKERALOOT_STATE,
+        "Lake",
+        "ernieuuu",
+        KAKERALOOT_MESSAGE,
+        "clipboard",
+    )
+    coordinator.coordinate_kakeraloot_state.assert_not_called()
+    assert result.kind == "lootstate"
+    assert result.imported_count == 1
+    assert result.message == "Imported Kakeraloot state."
+    assert result.import_event_id is None
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_kakeraloot_first_processing_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = KAKERALOOT_STATE
+    coordinator = Mock()
+    coordinator.coordinate_kakeraloot_state.return_value = KakeralootStateProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        kakeraloot_state_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("kakeraloot_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+    context = _kakeraloot_context()
+
+    result = service.import_message(
+        KAKERALOOT_MESSAGE,
+        "caller-source",
+        detected_kind="lootstate",
+        durable_kakeraloot_state_context=context,
+    )
+
+    parser.parse_kakeraloot_state.assert_called_once_with(KAKERALOOT_MESSAGE)
+    coordinator.coordinate_kakeraloot_state.assert_called_once_with(
+        source_event_id=81,
+        attempt_id=83,
+        state=KAKERALOOT_STATE,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted kakeraloot payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    catalog.import_kakeraloot_state.assert_not_called()
+    assert result.kind == "lootstate"
+    assert result.imported_count == 1
+    assert result.import_event_id == 92
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is True
+
+    forwarded = coordinator.coordinate_kakeraloot_state.call_args.kwargs["state"]
+    assert forwarded.has_kakeraloots is True
+    assert forwarded.status_note == "all fields"
+    assert forwarded.rolls_stacked == 1
+    assert forwarded.disable_wa_ha_reduction == 102
+    assert forwarded.disable_wg_hg_reduction == 68
+    assert forwarded.protected_wish_level == 42
+    assert forwarded.protected_wish_denominator == 4642
+    assert forwarded.mudapins == 22
+    assert forwarded.rt_cooldown_reduction_hours == 2
+    assert forwarded.permanent_roll_bonus == 1
+    assert forwarded.star_branches == 3
+    assert forwarded.starwish_slots_from_branches == 4
+    assert forwarded.quantity_level == 23
+    assert forwarded.quality_level == 6
+    assert forwarded.usage_count == 256
+    assert forwarded.kakera_balance == 9210
+
+
+def test_automatic_import_durable_kakeraloot_maps_succeeded_replay() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = KAKERALOOT_STATE
+    coordinator = Mock()
+    coordinator.coordinate_kakeraloot_state.return_value = KakeralootStateProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        kakeraloot_state_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("kakeraloot_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERALOOT_MESSAGE,
+        "caller-source",
+        detected_kind="lootstate",
+        durable_kakeraloot_state_context=_kakeraloot_context(attempt_id=None),
+    )
+
+    parser.parse_kakeraloot_state.assert_called_once_with(KAKERALOOT_MESSAGE)
+    coordinator.coordinate_kakeraloot_state.assert_called_once()
+    assert coordinator.coordinate_kakeraloot_state.call_args.kwargs["attempt_id"] is None
+    catalog.import_kakeraloot_state.assert_not_called()
+    assert result.kind == "lootstate"
+    assert result.imported_count == 0
+    assert result.import_event_id == 92
+    assert result.replay_skipped is True
+    assert result.durable_success_recorded is True
+
+
+def test_automatic_import_durable_kakeraloot_requires_coordinator_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = KAKERALOOT_STATE
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="KakeralootStateProjectionCoordinator"):
+        service.import_message(
+            KAKERALOOT_MESSAGE,
+            "discord",
+            detected_kind="lootstate",
+            durable_kakeraloot_state_context=_kakeraloot_context(),
+        )
+
+    parser.parse_kakeraloot_state.assert_called_once_with(KAKERALOOT_MESSAGE)
+    catalog.import_kakeraloot_state.assert_not_called()
+
+
+def test_automatic_import_durable_kakeraloot_propagates_coordinator_error_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = KAKERALOOT_STATE
+    coordinator = Mock()
+    coordinator.coordinate_kakeraloot_state.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            KAKERALOOT_MESSAGE,
+            "discord",
+            detected_kind="lootstate",
+            durable_kakeraloot_state_context=_kakeraloot_context(),
+        )
+
+    coordinator.coordinate_kakeraloot_state.assert_called_once()
+    catalog.import_kakeraloot_state.assert_not_called()
+
+
+def test_automatic_import_malformed_kakeraloot_does_not_invoke_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.side_effect = ValueError("invalid Kakeraloot response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid Kakeraloot response"):
+        service.import_message(
+            KAKERALOOT_MESSAGE,
+            "discord",
+            detected_kind="lootstate",
+            durable_kakeraloot_state_context=_kakeraloot_context(),
+        )
+
+    parser.parse_kakeraloot_state.assert_called_once_with(KAKERALOOT_MESSAGE)
+    coordinator.coordinate_kakeraloot_state.assert_not_called()
+    catalog.import_kakeraloot_state.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        KAKERALOOT_STATE,
+        KakeralootStateSnapshot(),
+        KakeralootStateSnapshot(
+            has_kakeraloots=False,
+            status_note="",
+            rolls_stacked=0,
+            disable_wa_ha_reduction=0,
+            disable_wg_hg_reduction=0,
+            protected_wish_level=0,
+            protected_wish_denominator=0,
+            mudapins=0,
+            rt_cooldown_reduction_hours=0,
+            permanent_roll_bonus=0,
+            star_branches=0,
+            starwish_slots_from_branches=0,
+            quantity_level=0,
+            quality_level=0,
+            usage_count=0,
+            kakera_balance=0,
+        ),
+    ),
+)
+def test_automatic_import_durable_kakeraloot_preserves_boundary_states(state) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakeraloot_state.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_kakeraloot_state.return_value = KakeralootStateProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        kakeraloot_state_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("kakeraloot_state_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        KAKERALOOT_MESSAGE,
+        "caller-source",
+        detected_kind="lootstate",
+        durable_kakeraloot_state_context=_kakeraloot_context(),
+    )
+
+    assert coordinator.coordinate_kakeraloot_state.call_args.kwargs["state"] is state
+    catalog.import_kakeraloot_state.assert_not_called()
+
+
+def test_automatic_import_unrelated_route_does_not_invoke_kakeraloot_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_kakera_state.return_value = KAKERA_STATE
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        kakeraloot_state_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        KAKERA_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="kakera",
+    )
+
+    assert result.kind == "kakera"
+    coordinator.coordinate_kakeraloot_state.assert_not_called()
+    parser.parse_kakeraloot_state.assert_not_called()
 
 
 def _player_bonus_context(attempt_id: int | None = 83) -> DurablePlayerBonusImportContext:

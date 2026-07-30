@@ -10,6 +10,9 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
+from moa.services.kakeraloot_state_projection_coordinator import (
+    KakeralootStateProjectionCoordinator,
+)
 from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
@@ -122,6 +125,20 @@ class DurableTowerStateImportContext:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableKakeralootStateImportContext:
+    """Durable lifecycle, scope, and payload metadata for one Kakeraloot-state import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class DurableSphereResultImportContext:
     """Durable lifecycle, scope, and payload metadata for one sphere-result import."""
 
@@ -166,6 +183,7 @@ class AutomaticImportService:
         kakera_state_projection_coordinator: KakeraStateProjectionCoordinator | None = None,
         mudapins_projection_coordinator: MudapinsProjectionCoordinator | None = None,
         tower_state_projection_coordinator: TowerStateProjectionCoordinator | None = None,
+        kakeraloot_state_projection_coordinator: KakeralootStateProjectionCoordinator | None = None,
         sphere_result_projection_coordinator: SphereResultProjectionCoordinator | None = None,
         player_bonus_projection_coordinator: PlayerBonusProjectionCoordinator | None = None,
     ) -> None:
@@ -181,6 +199,7 @@ class AutomaticImportService:
         self._kakera_state_projection_coordinator = kakera_state_projection_coordinator
         self._mudapins_projection_coordinator = mudapins_projection_coordinator
         self._tower_state_projection_coordinator = tower_state_projection_coordinator
+        self._kakeraloot_state_projection_coordinator = kakeraloot_state_projection_coordinator
         self._sphere_result_projection_coordinator = sphere_result_projection_coordinator
         self._player_bonus_projection_coordinator = player_bonus_projection_coordinator
 
@@ -203,6 +222,7 @@ class AutomaticImportService:
         durable_kakera_context: DurableKakeraImportContext | None = None,
         durable_mudapins_context: DurableMudapinsImportContext | None = None,
         durable_tower_state_context: DurableTowerStateImportContext | None = None,
+        durable_kakeraloot_state_context: DurableKakeralootStateImportContext | None = None,
         durable_sphere_result_context: DurableSphereResultImportContext | None = None,
         durable_player_bonus_context: DurablePlayerBonusImportContext | None = None,
     ) -> AutomaticImportResult:
@@ -243,12 +263,16 @@ class AutomaticImportService:
                         durable_tower_state_context.server
                         if kind == "towerstate" and durable_tower_state_context is not None
                         else (
-                            durable_sphere_result_context.server
-                            if kind == "sphere_result" and durable_sphere_result_context is not None
+                            durable_kakeraloot_state_context.server
+                            if kind == "lootstate" and durable_kakeraloot_state_context is not None
                             else (
-                                durable_player_bonus_context.server
-                                if kind == "bonus" and durable_player_bonus_context is not None
-                                else self._require(server_name, "server", kind)
+                                durable_sphere_result_context.server
+                                if kind == "sphere_result" and durable_sphere_result_context is not None
+                                else (
+                                    durable_player_bonus_context.server
+                                    if kind == "bonus" and durable_player_bonus_context is not None
+                                    else self._require(server_name, "server", kind)
+                                )
                             )
                         )
                     )
@@ -645,12 +669,16 @@ class AutomaticImportService:
                     durable_tower_state_context.account
                     if kind == "towerstate" and durable_tower_state_context is not None
                     else (
-                        durable_sphere_result_context.account
-                        if kind == "sphere_result" and durable_sphere_result_context is not None
+                        durable_kakeraloot_state_context.account
+                        if kind == "lootstate" and durable_kakeraloot_state_context is not None
                         else (
-                            durable_player_bonus_context.account
-                            if kind == "bonus" and durable_player_bonus_context is not None
-                            else self._require(account_name, "account", kind)
+                            durable_sphere_result_context.account
+                            if kind == "sphere_result" and durable_sphere_result_context is not None
+                            else (
+                                durable_player_bonus_context.account
+                                if kind == "bonus" and durable_player_bonus_context is not None
+                                else self._require(account_name, "account", kind)
+                            )
                         )
                     )
                 )
@@ -826,10 +854,42 @@ class AutomaticImportService:
                 durable_success_recorded=durable_success_recorded,
             )
         if kind == "lootstate":
-            self._catalog.import_kakeraloot_state(
-                self._parser.parse_kakeraloot_state(raw_message), server, account, raw_message, source
+            state = self._parser.parse_kakeraloot_state(raw_message)
+            if durable_kakeraloot_state_context is None:
+                self._catalog.import_kakeraloot_state(state, server, account, raw_message, source)
+                imported_count = 1
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._kakeraloot_state_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A KakeralootStateProjectionCoordinator is required for a durable Kakeraloot-state import."
+                    )
+                coordinated = coordinator.coordinate_kakeraloot_state(
+                    source_event_id=durable_kakeraloot_state_context.source_event_id,
+                    attempt_id=durable_kakeraloot_state_context.attempt_id,
+                    state=state,
+                    server=durable_kakeraloot_state_context.server,
+                    account=durable_kakeraloot_state_context.account,
+                    raw=durable_kakeraloot_state_context.raw,
+                    source=durable_kakeraloot_state_context.source,
+                    observed_at=durable_kakeraloot_state_context.observed_at,
+                    finished_at=durable_kakeraloot_state_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported Kakeraloot state.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
             )
-            return AutomaticImportResult(kind=kind, imported_count=1, message="Imported Kakeraloot state.")
         if kind == "sphere_result":
             state = self._parser.parse_sphere_result(raw_message)
             if durable_sphere_result_context is None:
