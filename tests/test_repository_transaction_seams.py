@@ -7,6 +7,7 @@ import pytest
 
 from moa.database.sqlite import connect
 from moa.models.character import (
+    AntidisablePage,
     BadgeLevel,
     ClaimConfirmation,
     DisableListEntry,
@@ -31,6 +32,7 @@ from moa.models.character import (
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import (
     CatalogRepository,
+    _AntidisablePageImportConnectionResult,
     _KakeralootStateImportConnectionResult,
     _DisableListImportConnectionResult,
     _PlayerBonusImportConnectionResult,
@@ -261,6 +263,22 @@ WISHLIST = WishlistSnapshot(
             kakera_marker_present=True,
         ),
     ),
+)
+ANTIDISABLE_PAGE = AntidisablePage(
+    page_number=1,
+    page_count=2,
+    slots_used=0,
+    slots_capacity=0,
+    antidisabled_character_count=2_614,
+    series_names=("Series B", "Series A", "Series B"),
+)
+ANTIDISABLE_CONTINUATION_PAGE = AntidisablePage(
+    page_number=2,
+    page_count=2,
+    slots_used=7,
+    slots_capacity=9,
+    antidisabled_character_count=None,
+    series_names=("Series C", "Series A"),
 )
 EMPTY_WISHLIST = WishlistSnapshot(
     wishlist_count=0,
@@ -496,6 +514,26 @@ def _disablelist_counts(connection: sqlite3.Connection) -> dict[str, int]:
         "server_contexts",
         "account_contexts",
         "disablelist_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_processing_attempts",
+    )
+    return {
+        table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        for table in tables
+    }
+
+
+def _antidisable_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "harem_scans",
+        "harem_scan_pages",
+        "antidisable_series_observations",
         "discord_projection_links",
         "discord_source_events",
         "discord_source_event_server_attributions",
@@ -3837,3 +3875,314 @@ def test_mudapins_helper_does_not_write_discord_or_legacy_state(tmp_path) -> Non
     assert after_attempt == before_attempt
     assert imported.import_event_id > 0
     assert imported.mudapin_observation_id > 0
+
+
+def test_public_antidisable_import_preserves_result_and_stored_values(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE,
+        "  Server  ",
+        "  Account  ",
+        "antidisable payload",
+        "clipboard",
+    )
+
+    assert set(result.model_dump()) == {
+        "import_event_id",
+        "server_name",
+        "account_name",
+        "series_imported",
+        "observed_at",
+        "scan_id",
+        "page_number",
+        "page_count",
+    }
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.series_imported == 3
+    assert result.scan_id is None
+    assert result.page_number == 1
+    assert result.page_count == 2
+    assert result.observed_at == datetime.fromisoformat(result.observed_at.isoformat())
+
+    with connect(database_path) as connection:
+        assert _antidisable_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "harem_scans": 0,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 3,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT series_name, normalized_series_name, antidisabled_character_count,
+                   observed_at, import_event_id, harem_scan_id
+            FROM antidisable_series_observations
+            WHERE import_event_id = ?
+            ORDER BY id
+            """,
+            (result.import_event_id,),
+        ).fetchall()
+        assert tuple(event) == (
+            "antidisable",
+            "clipboard",
+            result.observed_at.isoformat(),
+            "antidisable payload",
+        )
+        assert [tuple(row) for row in rows] == [
+            ("Series B", "series b", 2_614, result.observed_at.isoformat(), result.import_event_id, None),
+            ("Series A", "series a", 2_614, result.observed_at.isoformat(), result.import_event_id, None),
+            ("Series B", "series b", 2_614, result.observed_at.isoformat(), result.import_event_id, None),
+        ]
+
+
+def test_antidisable_helper_uses_supplied_connection_and_returns_actual_ids(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_antidisable_page_with_connection(
+            connection,
+            page=ANTIDISABLE_PAGE,
+            scan_id=None,
+            server=" Server ",
+            account=" Account ",
+            raw="raw antidisable",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert isinstance(imported, _AntidisablePageImportConnectionResult)
+        assert [field.name for field in fields(imported)] == ["import_event_id", "scan_id"]
+        assert imported.import_event_id > 0
+        assert imported.scan_id is None
+        assert connection.in_transaction is True
+        assert _antidisable_counts(connection)["antidisable_series_observations"] == 3
+        with connect(database_path) as observer:
+            assert _antidisable_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "harem_scans": 0,
+                "harem_scan_pages": 0,
+                "antidisable_series_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.commit()
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT kind FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone()[0] == "antidisable"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM antidisable_series_observations WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone()[0] == 3
+
+
+def test_antidisable_helper_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        catalog._import_antidisable_page_with_connection(
+            connection,
+            page=ANTIDISABLE_PAGE,
+            scan_id=None,
+            server="Server",
+            account="Account",
+            raw="rollback antidisable",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        assert _antidisable_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "harem_scans": 0,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_antidisable_helper_rollback_preserves_existing_scan_and_contexts(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+
+    with connect(database_path) as connection:
+        before = _antidisable_counts(connection)
+        existing = connection.execute(
+            "SELECT account_context_id, expected_page_count FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+
+    with connect(database_path) as connection:
+        imported = catalog._import_antidisable_page_with_connection(
+            connection,
+            page=ANTIDISABLE_PAGE,
+            scan_id=scan.id,
+            server=" SERVER ",
+            account=" ACCOUNT ",
+            raw="rolled back page",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert imported.scan_id == scan.id
+        connection.rollback()
+
+    with connect(database_path) as connection:
+        after = _antidisable_counts(connection)
+        current = connection.execute(
+            "SELECT account_context_id, expected_page_count FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+        assert tuple(current) == tuple(existing)
+        assert after == before
+
+
+def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+
+    with connect(database_path) as connection:
+        second = catalog._import_antidisable_page_with_connection(
+            connection,
+            page=ANTIDISABLE_CONTINUATION_PAGE,
+            scan_id=scan.id,
+            server="Server",
+            account="Account",
+            raw="page two",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert second.scan_id == scan.id
+        assert connection.execute(
+            "SELECT expected_page_count FROM harem_scans WHERE id = ?", (scan.id,)
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ?", (scan.id,)
+        ).fetchone()[0] == 2
+        continuation_rows = connection.execute(
+            """
+            SELECT series_name, antidisabled_character_count
+            FROM antidisable_series_observations
+            WHERE import_event_id = ?
+            ORDER BY id
+            """,
+            (second.import_event_id,),
+        ).fetchall()
+        assert [tuple(row) for row in continuation_rows] == [
+            ("Series C", None),
+            ("Series A", None),
+        ]
+        with connect(database_path) as observer:
+            assert observer.execute(
+                "SELECT COUNT(*) FROM harem_scan_pages WHERE harem_scan_id = ?", (scan.id,)
+            ).fetchone()[0] == 0
+        connection.commit()
+
+    first = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE,
+        "Server",
+        "Account",
+        "page one",
+        "discord",
+        scan.id,
+    )
+    assert first.scan_id == scan.id
+    progress = catalog.harem_scan_progress(scan.id)
+    assert progress is not None
+    assert progress.imported_pages == (1, 2)
+    assert progress.is_complete is True
+    with connect(database_path) as connection:
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages WHERE harem_scan_id = ? "
+            "ORDER BY page_number",
+            (scan.id,),
+        ).fetchall()
+        assert [tuple(row) for row in pages] == [(1, first.import_event_id), (2, second.import_event_id)]
+        rows = connection.execute(
+            """
+            SELECT series_name, antidisabled_character_count
+            FROM antidisable_series_observations
+            WHERE harem_scan_id = ?
+            ORDER BY id
+            """,
+            (scan.id,),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("Series C", None),
+            ("Series A", None),
+            ("Series B", 2_614),
+            ("Series A", 2_614),
+            ("Series B", 2_614),
+        ]
+
+    catalog.complete_antidisable_scan(scan.id)
+    assert catalog.antidisable_series("Server", "Account") == ("Series A", "Series B", "Series C")
+
+
+def test_antidisable_duplicate_and_invalid_pages_keep_existing_rejections(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE, "Server", "Account", "first", "discord", scan.id
+    )
+    with connect(database_path) as connection:
+        before = _antidisable_counts(connection)
+
+    with pytest.raises(ValueError, match="already contains that page"):
+        catalog.import_antidisable_page(
+            ANTIDISABLE_PAGE, "Server", "Account", "duplicate", "discord", scan.id
+        )
+    with pytest.raises(ValueError, match="include its Page X / Y"):
+        catalog.import_antidisable_page(
+            ANTIDISABLE_PAGE.model_copy(update={"page_number": None}),
+            "Server",
+            "Account",
+            "invalid",
+            "discord",
+            scan.id,
+        )
+    with pytest.raises(ValueError, match="page count does not match"):
+        catalog.import_antidisable_page(
+            ANTIDISABLE_CONTINUATION_PAGE.model_copy(update={"page_count": 3}),
+            "Server",
+            "Account",
+            "mismatch",
+            "discord",
+            scan.id,
+        )
+
+    with connect(database_path) as connection:
+        assert _antidisable_counts(connection) == before
+
+    other_scan = catalog.begin_antidisable_scan("Server", "Account")
+    other = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE, "Server", "Account", "other scan", "discord", other_scan.id
+    )
+    assert other.scan_id == other_scan.id
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_scan_pages WHERE page_number = 1"
+        ).fetchone()[0] == 2

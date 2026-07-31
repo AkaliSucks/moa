@@ -526,6 +526,14 @@ class _WishlistImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _AntidisablePageImportConnectionResult:
+    """Rows created by one antidisable page import on a caller-owned connection."""
+
+    import_event_id: int
+    scan_id: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class _DisableListImportConnectionResult:
     """Rows created by one disablelist import on a caller-owned connection."""
 
@@ -2290,54 +2298,82 @@ class CatalogRepository:
         scan_id: int | None = None,
     ) -> AntidisableImportResult:
         """Store one account-scoped `$adl` series page."""
-        if scan_id is not None and (page.page_number is None or page.page_count is None):
-            raise ValueError("A scanned antidisable page must include its Page X / Y indicator.")
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            cursor = connection.execute(
-                "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-                ("antidisable", source, observed_at.isoformat(), raw_message),
+            imported = self._import_antidisable_page_with_connection(
+                connection,
+                page=page,
+                scan_id=scan_id,
+                server=server_name,
+                account=account_name,
+                raw=raw_message,
+                source=source,
+                observed_at=observed_at,
             )
-            import_event_id = int(cursor.lastrowid)
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
-            if scan_id is not None:
-                self._prepare_antidisable_scan_page(
-                    connection, scan_id, account_id, page.page_number, page.page_count
-                )
-            for series_name in page.series_names:
-                connection.execute(
-                    """
-                    INSERT INTO antidisable_series_observations (
-                        account_context_id, series_name, normalized_series_name,
-                        antidisabled_character_count, observed_at, import_event_id, harem_scan_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        account_id,
-                        series_name,
-                        self._normalize(series_name),
-                        page.antidisabled_character_count,
-                        observed_at.isoformat(),
-                        import_event_id,
-                        scan_id,
-                    ),
-                )
-            if scan_id is not None:
-                connection.execute(
-                    "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
-                    "VALUES (?, ?, ?)",
-                    (scan_id, page.page_number, import_event_id),
-                )
         return AntidisableImportResult(
-            import_event_id=import_event_id,
+            import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
             account_name=account_name.strip(),
             series_imported=len(page.series_names),
             observed_at=observed_at,
-            scan_id=scan_id,
+            scan_id=imported.scan_id,
             page_number=page.page_number,
             page_count=page.page_count,
+        )
+
+    def _import_antidisable_page_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        page: AntidisablePage,
+        scan_id: int | None,
+        server: str,
+        account: str,
+        raw: str,
+        source: str,
+        observed_at: datetime,
+    ) -> _AntidisablePageImportConnectionResult:
+        """Store one antidisable page without taking transaction ownership."""
+        if scan_id is not None and (page.page_number is None or page.page_count is None):
+            raise ValueError("A scanned antidisable page must include its Page X / Y indicator.")
+        cursor = connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
+            ("antidisable", source, observed_at.isoformat(), raw),
+        )
+        import_event_id = int(cursor.lastrowid)
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        if scan_id is not None:
+            self._prepare_antidisable_scan_page(
+                connection, scan_id, account_id, page.page_number, page.page_count
+            )
+        for series_name in page.series_names:
+            connection.execute(
+                """
+                INSERT INTO antidisable_series_observations (
+                    account_context_id, series_name, normalized_series_name,
+                    antidisabled_character_count, observed_at, import_event_id, harem_scan_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    series_name,
+                    self._normalize(series_name),
+                    page.antidisabled_character_count,
+                    observed_at.isoformat(),
+                    import_event_id,
+                    scan_id,
+                ),
+            )
+        if scan_id is not None:
+            connection.execute(
+                "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+                "VALUES (?, ?, ?)",
+                (scan_id, page.page_number, import_event_id),
+            )
+        return _AntidisablePageImportConnectionResult(
+            import_event_id=import_event_id,
+            scan_id=scan_id,
         )
 
     def begin_antidisable_scan(
