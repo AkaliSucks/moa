@@ -27,12 +27,14 @@ from moa.models.character import (
     WishlistSnapshot,
 )
 from moa.models.catalog import AutomaticImportResult
+from moa.models.character import AntidisablePage
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import (
     AutomaticImportService,
+    DurableAntidisablePageImportContext,
     DurableClaimImportContext,
     DurableDisableListImportContext,
     DurableInfoklImportContext,
@@ -49,6 +51,9 @@ from moa.services.automatic_import_service import (
     DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.antidisable_page_projection_coordinator import (
+    AntidisablePageProjectionResult,
+)
 from moa.services.disablelist_projection_coordinator import DisableListProjectionResult
 from moa.services.claim_projection_coordinator import (
     ClaimProjectionCoordinator,
@@ -5048,3 +5053,381 @@ def test_automatic_import_durable_disablelist_forwards_boundaries_and_entries_un
         entry.model_dump() for entry in state.entries
     ]
     catalog.import_disablelist.assert_not_called()
+
+
+def _antidisable_page_context(
+    attempt_id: int | None = 83,
+) -> DurableAntidisablePageImportContext:
+    return DurableAntidisablePageImportContext(
+        source_event_id=81,
+        attempt_id=attempt_id,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted antidisable payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def _antidisable_page(
+    *,
+    page_number: int | None = 1,
+    page_count: int | None = 3,
+    character_count: int | None = 12,
+    series_names: tuple[str, ...] = ("Series A", "Series B"),
+) -> AntidisablePage:
+    return AntidisablePage(
+        page_number=page_number,
+        page_count=page_count,
+        slots_used=2,
+        slots_capacity=10,
+        antidisabled_character_count=character_count,
+        series_names=series_names,
+    )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param(_antidisable_page(page_number=1, page_count=3), id="first-page"),
+        pytest.param(_antidisable_page(page_number=2, page_count=3, character_count=None), id="continuation"),
+        pytest.param(_antidisable_page(page_number=3, page_count=3), id="out-of-order"),
+    ],
+)
+def test_automatic_import_non_durable_antidisable_preserves_direct_scan_path(page) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = page
+    catalog.import_antidisable_page.return_value = Mock(series_imported=len(page.series_names))
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "antidisable payload",
+        "clipboard",
+        "Caller Lake",
+        "caller-account",
+        harem_scan_id=47,
+        detected_kind="antidisable",
+    )
+
+    parser.parse_antidisable_page.assert_called_once_with("antidisable payload")
+    catalog.import_antidisable_page.assert_called_once_with(
+        page,
+        "Caller Lake",
+        "caller-account",
+        "antidisable payload",
+        "clipboard",
+        47,
+    )
+    coordinator.coordinate_antidisable_page.assert_not_called()
+    assert result.kind == "antidisable"
+    assert result.imported_count == len(page.series_names)
+    assert result.replay_skipped is False
+    assert result.durable_success_recorded is False
+
+
+def test_automatic_import_durable_antidisable_first_forwards_boundaries_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    page = _antidisable_page(page_number=2, page_count=4, series_names=("A", "A", "B"))
+    parser.parse_antidisable_page.return_value = page
+    coordinator = Mock()
+    coordinator.coordinate_antidisable_page.return_value = AntidisablePageProjectionResult(
+        imported_count=1,
+        import_event_id=901,
+        scan_id=47,
+        page_number=2,
+        page_count=4,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("import_events", 901),
+    )
+    context = _antidisable_page_context()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "parser payload",
+        "caller-source",
+        "Caller Lake",
+        "caller-account",
+        harem_scan_id=47,
+        detected_kind="antidisable",
+        durable_antidisable_page_context=context,
+    )
+
+    parser.parse_antidisable_page.assert_called_once_with("parser payload")
+    coordinator.coordinate_antidisable_page.assert_called_once_with(
+        source_event_id=context.source_event_id,
+        attempt_id=context.attempt_id,
+        page=page,
+        scan_id=47,
+        server=context.server,
+        account=context.account,
+        raw=context.raw,
+        source=context.source,
+        observed_at=context.observed_at,
+        finished_at=context.finished_at,
+    )
+    catalog.import_antidisable_page.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="antidisable",
+        imported_count=1,
+        message="Imported 3 antidisable series page 2/4.",
+        import_event_id=901,
+        replay_skipped=False,
+        durable_success_recorded=True,
+    )
+
+
+def test_automatic_import_durable_antidisable_replay_forwards_explicit_scan_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    page = _antidisable_page(
+        page_number=3,
+        page_count=4,
+        character_count=None,
+        series_names=(),
+    )
+    parser.parse_antidisable_page.return_value = page
+    coordinator = Mock()
+    coordinator.coordinate_antidisable_page.return_value = AntidisablePageProjectionResult(
+        imported_count=0,
+        import_event_id=902,
+        scan_id=48,
+        page_number=3,
+        page_count=4,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("import_events", 902),
+    )
+    context = _antidisable_page_context(attempt_id=None)
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "parser payload",
+        "caller-source",
+        harem_scan_id=48,
+        detected_kind="antidisable",
+        durable_antidisable_page_context=context,
+    )
+
+    coordinator.coordinate_antidisable_page.assert_called_once_with(
+        source_event_id=context.source_event_id,
+        attempt_id=None,
+        page=page,
+        scan_id=48,
+        server=context.server,
+        account=context.account,
+        raw=context.raw,
+        source=context.source,
+        observed_at=context.observed_at,
+        finished_at=context.finished_at,
+    )
+    catalog.import_antidisable_page.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="antidisable",
+        imported_count=0,
+        message="Imported 0 antidisable series page 3/4.",
+        import_event_id=902,
+        replay_skipped=True,
+        durable_success_recorded=True,
+    )
+
+
+def test_automatic_import_durable_antidisable_requires_coordinator_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = _antidisable_page()
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="AntidisablePageProjectionCoordinator"):
+        service.import_message(
+            "parser payload",
+            "discord",
+            harem_scan_id=47,
+            detected_kind="antidisable",
+            durable_antidisable_page_context=_antidisable_page_context(),
+        )
+
+    parser.parse_antidisable_page.assert_called_once_with("parser payload")
+    catalog.import_antidisable_page.assert_not_called()
+
+
+def test_automatic_import_durable_antidisable_coordinator_failure_does_not_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = _antidisable_page()
+    coordinator = Mock()
+    coordinator.coordinate_antidisable_page.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            "parser payload",
+            "discord",
+            harem_scan_id=47,
+            detected_kind="antidisable",
+            durable_antidisable_page_context=_antidisable_page_context(),
+        )
+
+    catalog.import_antidisable_page.assert_not_called()
+
+
+@pytest.mark.parametrize("attempt_id", [83, None], ids=["first-processing", "replay"])
+def test_automatic_import_durable_antidisable_requires_explicit_scan_before_dispatch(attempt_id) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = _antidisable_page()
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="explicit scan ID"):
+        service.import_message(
+            "parser payload",
+            "discord",
+            detected_kind="antidisable",
+            durable_antidisable_page_context=_antidisable_page_context(attempt_id),
+        )
+
+    coordinator.coordinate_antidisable_page.assert_not_called()
+    catalog.import_antidisable_page.assert_not_called()
+    catalog.begin_antidisable_scan.assert_not_called()
+
+
+def test_automatic_import_durable_antidisable_forwards_invalid_scan_without_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = _antidisable_page()
+    coordinator = Mock()
+    coordinator.coordinate_antidisable_page.side_effect = ValueError("invalid scan")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid scan"):
+        service.import_message(
+            "parser payload",
+            "discord",
+            harem_scan_id=-17,
+            detected_kind="antidisable",
+            durable_antidisable_page_context=_antidisable_page_context(),
+        )
+
+    assert coordinator.coordinate_antidisable_page.call_args.kwargs["scan_id"] == -17
+    catalog.import_antidisable_page.assert_not_called()
+    catalog.begin_antidisable_scan.assert_not_called()
+
+
+def test_automatic_import_durable_antidisable_malformed_and_unrelated_messages_do_not_dispatch() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.side_effect = ValueError("malformed antidisable")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+    context = _antidisable_page_context()
+
+    with pytest.raises(ValueError, match="malformed antidisable"):
+        service.import_message(
+            "malformed",
+            "discord",
+            harem_scan_id=47,
+            detected_kind="antidisable",
+            durable_antidisable_page_context=context,
+        )
+    coordinator.coordinate_antidisable_page.assert_not_called()
+    catalog.import_antidisable_page.assert_not_called()
+
+    service.import_message(
+        "help payload",
+        "discord",
+        detected_kind="help",
+        durable_antidisable_page_context=context,
+    )
+    coordinator.coordinate_antidisable_page.assert_not_called()
+    parser.parse_antidisable_page.assert_called_once_with("malformed")
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        pytest.param(_antidisable_page(character_count=0, series_names=("A", "A")), id="populated-zero-duplicate"),
+        pytest.param(_antidisable_page(character_count=None, series_names=("B",)), id="null-continuation"),
+        pytest.param(_antidisable_page(series_names=()), id="empty-series"),
+    ],
+)
+def test_automatic_import_durable_antidisable_forwards_page_values_unchanged(page) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = page
+    coordinator = Mock()
+    coordinator.coordinate_antidisable_page.return_value = AntidisablePageProjectionResult(
+        imported_count=1,
+        import_event_id=903,
+        scan_id=49,
+        page_number=page.page_number,
+        page_count=page.page_count,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("import_events", 903),
+    )
+    context = _antidisable_page_context()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        antidisable_page_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        "parser payload",
+        "caller-source",
+        harem_scan_id=49,
+        detected_kind="antidisable",
+        durable_antidisable_page_context=context,
+    )
+
+    forwarded = coordinator.coordinate_antidisable_page.call_args.kwargs["page"]
+    assert forwarded is page
+    assert forwarded.model_dump() == page.model_dump()
+    assert forwarded.page_number == page.page_number
+    assert forwarded.page_count == page.page_count
+    assert forwarded.antidisabled_character_count == page.antidisabled_character_count
+    assert forwarded.series_names == page.series_names
+    assert forwarded.slots_used == page.slots_used
+    assert forwarded.slots_capacity == page.slots_capacity
+    catalog.import_antidisable_page.assert_not_called()
