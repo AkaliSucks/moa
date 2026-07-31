@@ -6,6 +6,9 @@ from datetime import datetime
 from moa.models.catalog import AutomaticImportResult
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.mudae import MudaeTextParser
+from moa.services.antidisable_page_projection_coordinator import (
+    AntidisablePageProjectionCoordinator,
+)
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
@@ -196,6 +199,20 @@ class DurableDisableListImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableAntidisablePageImportContext:
+    """Durable lifecycle, scope, and payload metadata for one `$adl` page."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -218,6 +235,7 @@ class AutomaticImportService:
         player_bonus_projection_coordinator: PlayerBonusProjectionCoordinator | None = None,
         wishlist_projection_coordinator: WishlistProjectionCoordinator | None = None,
         disablelist_projection_coordinator: DisableListProjectionCoordinator | None = None,
+        antidisable_page_projection_coordinator: AntidisablePageProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -236,6 +254,7 @@ class AutomaticImportService:
         self._player_bonus_projection_coordinator = player_bonus_projection_coordinator
         self._wishlist_projection_coordinator = wishlist_projection_coordinator
         self._disablelist_projection_coordinator = disablelist_projection_coordinator
+        self._antidisable_page_projection_coordinator = antidisable_page_projection_coordinator
 
     def import_message(
         self,
@@ -261,6 +280,7 @@ class AutomaticImportService:
         durable_player_bonus_context: DurablePlayerBonusImportContext | None = None,
         durable_wishlist_context: DurableWishlistImportContext | None = None,
         durable_disablelist_context: DurableDisableListImportContext | None = None,
+        durable_antidisable_page_context: DurableAntidisablePageImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -286,7 +306,10 @@ class AutomaticImportService:
                 message=f"Imported {result.characters_imported} ranked characters.",
             )
 
-        server = (
+        if kind == "antidisable" and durable_antidisable_page_context is not None:
+            server = durable_antidisable_page_context.server
+        else:
+            server = (
             durable_timer_context.server
             if kind == "timers" and durable_timer_context is not None
             else (
@@ -322,7 +345,7 @@ class AutomaticImportService:
                     )
                 )
             )
-        )
+            )
         transaction_commands = {
             "gift_kakera": "givek",
             "gift_spheres": "givesp",
@@ -340,20 +363,55 @@ class AutomaticImportService:
                 message=f"Observed ${transaction_commands[kind]} transaction step; no catalog data imported.",
             )
         if kind == "antidisable":
-            account = self._require(account_name, "account", kind)
-            page = self._parser.parse_antidisable_page(raw_message)
-            result = self._catalog.import_antidisable_page(
-                page, server, account, raw_message, source, harem_scan_id
+            durable_context = durable_antidisable_page_context
+            account = (
+                durable_context.account
+                if durable_context is not None
+                else self._require(account_name, "account", kind)
             )
+            page = self._parser.parse_antidisable_page(raw_message)
             page_label = (
                 f" page {page.page_number}/{page.page_count}"
                 if page.page_number is not None and page.page_count is not None
                 else ""
             )
+            if durable_context is None:
+                result = self._catalog.import_antidisable_page(
+                    page, server, account, raw_message, source, harem_scan_id
+                )
+                return AutomaticImportResult(
+                    kind=kind,
+                    imported_count=result.series_imported,
+                    message=f"Imported {result.series_imported} antidisable series{page_label}.",
+                )
+            if harem_scan_id is None:
+                raise ValueError(
+                    "An explicit scan ID is required for a durable antidisable page import."
+                )
+            coordinator = self._antidisable_page_projection_coordinator
+            if coordinator is None:
+                raise RuntimeError(
+                    "An AntidisablePageProjectionCoordinator is required for a durable antidisable page import."
+                )
+            coordinated = coordinator.coordinate_antidisable_page(
+                source_event_id=durable_context.source_event_id,
+                attempt_id=durable_context.attempt_id,
+                page=page,
+                scan_id=harem_scan_id,
+                server=durable_context.server,
+                account=durable_context.account,
+                raw=durable_context.raw,
+                source=durable_context.source,
+                observed_at=durable_context.observed_at,
+                finished_at=durable_context.finished_at,
+            )
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=result.series_imported,
-                message=f"Imported {result.series_imported} antidisable series{page_label}.",
+                imported_count=coordinated.imported_count,
+                message=f"Imported {len(page.series_names)} antidisable series{page_label}.",
+                import_event_id=coordinated.import_event_id,
+                replay_skipped=coordinated.replay_skipped,
+                durable_success_recorded=coordinated.durable_success_recorded,
             )
         if kind == "ranked_harem":
             account = self._require(account_name, "account", kind)
