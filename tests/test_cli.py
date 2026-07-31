@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from typer.testing import CliRunner
 
 from moa.cli import main
@@ -170,6 +172,304 @@ def test_discord_listener_rejects_example_bot_token() -> None:
 
     assert result.exit_code == 1
     assert "Replace YOUR_DISCORD_BOT_TOKEN" in result.stdout
+
+
+def _capture_only_arguments(output_path: str) -> list[str]:
+    return [
+        "discord",
+        "listen",
+        "--token",
+        "test-token",
+        "--capture-only",
+        "--capture-discord-events",
+        output_path,
+        "--capture-guild-id",
+        "100",
+        "--capture-channel-id",
+        "200",
+        "--mudae-user-id",
+        "300",
+        "--capture-user-id",
+        "400",
+        "--capture-user-id",
+        "401",
+    ]
+
+
+def test_discord_capture_arguments_require_capture_only(tmp_path) -> None:
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "discord",
+            "listen",
+            "--token",
+            "test-token",
+            "--capture-discord-events",
+            str(tmp_path / "capture.jsonl"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "require --capture-only" in result.stdout
+
+
+def test_discord_capture_text_option_requires_capture_only() -> None:
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--capture-include-message-text"],
+    )
+
+    assert result.exit_code == 1
+    assert "require --capture-only" in result.stdout
+
+
+def test_discord_capture_guild_option_requires_capture_only(monkeypatch) -> None:
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("capture-only validation must precede service construction")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--capture-guild-id", "100"],
+    )
+
+    assert result.exit_code == 1
+    assert "require --capture-only" in result.stdout
+
+
+def test_discord_capture_channel_option_requires_capture_only(monkeypatch) -> None:
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("capture-only validation must precede service construction")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--capture-channel-id", "200"],
+    )
+
+    assert result.exit_code == 1
+    assert "require --capture-only" in result.stdout
+
+
+def test_discord_capture_user_option_requires_capture_only(monkeypatch) -> None:
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("capture-only validation must precede service construction")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--capture-user-id", "400"],
+    )
+
+    assert result.exit_code == 1
+    assert "require --capture-only" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("output_path", "expected"),
+    [
+        ("relative.jsonl", "must be an absolute path"),
+        (str(Path(main.__file__).resolve().parents[3] / "capture.jsonl"), "outside the repository"),
+    ],
+)
+def test_discord_capture_only_rejects_unsafe_output_paths(output_path, expected) -> None:
+    result = CliRunner().invoke(main.app, _capture_only_arguments(output_path))
+
+    assert result.exit_code == 1
+    assert expected in result.stdout
+
+
+def test_discord_capture_only_rejects_existing_directory_without_construction(
+    monkeypatch, tmp_path
+) -> None:
+    directory = tmp_path / "capture-directory"
+    directory.mkdir()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("invalid capture paths must not construct MOA services")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(main, "CatalogRepository", unexpected)
+    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+
+    result = CliRunner().invoke(main.app, _capture_only_arguments(str(directory)))
+
+    assert result.exit_code == 1
+    assert "must name a file, not a directory" in result.stdout
+    assert "test-token" not in result.stdout
+
+
+def test_discord_capture_only_rejects_nonexistent_parent_without_construction(
+    monkeypatch, tmp_path
+) -> None:
+    output_path = tmp_path / "missing-parent" / "capture.jsonl"
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("invalid capture paths must not construct MOA services")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(main, "CatalogRepository", unexpected)
+    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+
+    result = CliRunner().invoke(main.app, _capture_only_arguments(str(output_path)))
+
+    assert result.exit_code == 1
+    assert "parent directory" in result.stdout
+    assert not output_path.exists()
+    assert not output_path.parent.exists()
+
+
+def test_discord_capture_only_requires_output_path(tmp_path) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    index = arguments.index("--capture-discord-events")
+    del arguments[index : index + 2]
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "--capture-discord-events" in result.stdout
+
+
+def test_discord_capture_only_requires_guild_id(tmp_path) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    index = arguments.index("--capture-guild-id")
+    del arguments[index : index + 2]
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "--capture-guild-id" in result.stdout
+
+
+def test_discord_capture_only_requires_channel_id(tmp_path) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    index = arguments.index("--capture-channel-id")
+    del arguments[index : index + 2]
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "--capture-channel-id" in result.stdout
+
+
+def test_discord_capture_only_requires_mudae_id(tmp_path) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    index = arguments.index("--mudae-user-id")
+    del arguments[index : index + 2]
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "--mudae-user-id" in result.stdout
+
+
+def test_discord_capture_only_requires_capture_user(tmp_path) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    while "--capture-user-id" in arguments:
+        index = arguments.index("--capture-user-id")
+        del arguments[index : index + 2]
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "--capture-user-id" in result.stdout
+
+
+def test_discord_capture_only_refuses_existing_output(tmp_path) -> None:
+
+    existing_path = tmp_path / "existing.jsonl"
+    existing_path.write_text("existing diagnostic data\n", encoding="utf-8")
+    existing = CliRunner().invoke(main.app, _capture_only_arguments(str(existing_path)))
+
+    assert existing.exit_code == 1
+    assert "refusing to overwrite" in existing.stdout
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--capture-guild-id", "0"),
+        ("--capture-channel-id", "-1"),
+        ("--mudae-user-id", "not-an-id"),
+        ("--capture-user-id", "0"),
+    ],
+)
+def test_discord_capture_only_rejects_nonpositive_or_nonnumeric_ids(tmp_path, flag, value) -> None:
+    arguments = _capture_only_arguments(str(tmp_path / "capture.jsonl"))
+    index = arguments.index(flag)
+    arguments[index + 1] = value
+
+    result = CliRunner().invoke(main.app, arguments)
+
+    assert result.exit_code == 1
+    assert "positive numeric Discord IDs" in result.stdout
+
+
+def test_discord_capture_only_bypasses_database_and_import_construction(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCaptureService:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def run(self, token):
+            captured["token"] = token
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("capture-only must not construct normal listener dependencies")
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", FakeCaptureService)
+    monkeypatch.setattr(main, "CatalogRepository", unexpected)
+    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+
+    output_path = tmp_path / "capture.jsonl"
+    result = CliRunner().invoke(main.app, _capture_only_arguments(str(output_path)))
+
+    assert result.exit_code == 0
+    assert captured["token"] == "test-token"
+    config = captured["config"]
+    assert config.output_path == output_path.resolve()
+    assert config.guild_id == "100"
+    assert config.channel_id == "200"
+    assert config.mudae_user_id == "300"
+    assert config.user_ids == frozenset({"400", "401"})
+    assert config.enabled
+    assert not config.include_message_text
+    assert not output_path.exists()
+
+
+def test_discord_capture_only_passes_explicit_text_capture_opt_in(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCaptureService:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def run(self, _token):
+            return None
+
+    monkeypatch.setattr(main, "DiscordEventCaptureService", FakeCaptureService)
+    result = CliRunner().invoke(
+        main.app,
+        [*_capture_only_arguments(str(tmp_path / "capture.jsonl")), "--capture-include-message-text"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["config"].include_message_text
+
+
+def test_discord_capture_help_warns_text_output_is_sensitive() -> None:
+    result = CliRunner().invoke(main.app, ["discord", "listen", "--help"])
+
+    assert result.exit_code == 0
+    for warning in ("Optional", "best-effort", "sensitive diagnostic", "manually inspect", "never commit"):
+        assert warning in result.stdout
 
 
 def test_discord_listener_wires_shared_database_and_roll_coordinator(

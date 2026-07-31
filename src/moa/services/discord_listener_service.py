@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
+import hashlib
+import asyncio
+import inspect
 import logging
 import re
 import time
 import warnings
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, Mapping
 
 import discord
 
@@ -75,6 +80,534 @@ class _AccountAttributionDecision:
     server_name: str | None
     account_name: str | None
     authoritative_evidence: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DiscordEventCaptureConfig:
+    """Explicit filters for a sensitive, diagnostic-only Gateway capture."""
+
+    output_path: Path
+    guild_id: str
+    channel_id: str
+    mudae_user_id: str
+    user_ids: frozenset[str]
+    enabled: bool = False
+    include_message_text: bool = False
+
+
+class DiscordEventCaptureError(RuntimeError):
+    """Safe diagnostic-capture failure without source payload details."""
+
+
+class DiscordEventCaptureService:
+    """Write narrowly filtered Discord Gateway events without importing MOA data.
+
+    This service is deliberately separate from ``DiscordListenerService`` so capture-only
+    runs cannot construct repositories, import services, or scan workflow state. discord.py
+    dispatches ``on_socket_raw_receive`` only when ``enable_debug_events=True``; that callback
+    supplies the Gateway envelope needed to preserve message/update/interaction relationships.
+    """
+
+    _SCHEMA_VERSION = "moa.discord-event-capture.v1"
+    _EVENT_TYPES = frozenset({"MESSAGE_CREATE", "MESSAGE_UPDATE", "INTERACTION_CREATE"})
+    _SECRET_KEY_PARTS = frozenset(
+        {
+            "token",
+            "authorization",
+            "cookie",
+            "session",
+            "webhook",
+            "auth",
+            "email",
+            "phone",
+            "username",
+            "globalname",
+            "discriminator",
+            "avatar",
+            "banner",
+            "displayname",
+            "member",
+        }
+    )
+
+    def __init__(self, config: DiscordEventCaptureConfig) -> None:
+        self._validate_config(config)
+        self._config = config
+        self._output_file: Any | None = None
+        self._sequence = 0
+        self._failed = False
+        self._client: Any | None = None
+        self._shutdown_requested = False
+        self._shutdown_task: asyncio.Task[None] | None = None
+        self._close_attempted = False
+        self._mudae_text_message_ids: set[str] = set()
+
+    @staticmethod
+    def _validate_config(config: DiscordEventCaptureConfig) -> None:
+        if not config.enabled:
+            raise ValueError("Diagnostic capture must be explicitly enabled.")
+        if not isinstance(config.output_path, Path):
+            raise ValueError("Diagnostic capture output path is required.")
+        path = config.output_path.expanduser()
+        repository_root = Path(__file__).resolve().parents[3]
+        if not path.is_absolute() or path.resolve(strict=False).is_relative_to(repository_root):
+            raise ValueError("Diagnostic capture output must be an absolute path outside the repository.")
+        if path.exists() and path.is_dir():
+            raise ValueError("Diagnostic capture output must name a file, not a directory.")
+        if path.exists():
+            raise ValueError("Diagnostic capture output already exists; refusing to overwrite it.")
+        if not path.parent.is_dir():
+            raise ValueError("Diagnostic capture output parent directory does not exist.")
+        identifiers = (config.guild_id, config.channel_id, config.mudae_user_id, *config.user_ids)
+        if not config.user_ids or any(
+            not isinstance(value, str) or not value.isdigit() or int(value) <= 0
+            for value in identifiers
+        ):
+            raise ValueError("Diagnostic capture IDs must be positive numeric Discord IDs.")
+
+    def run(self, token: str) -> None:
+        """Run only the diagnostic Gateway client until it is interrupted."""
+        normalized_token = token.strip()
+        if not normalized_token:
+            raise ValueError("A Discord bot token is required.")
+        if normalized_token.casefold() in {
+            "your_discord_bot_token",
+            "your-bot-token",
+            "your bot token",
+        }:
+            raise ValueError(
+                "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
+            )
+        self._open_output()
+        intents = discord.Intents.none()
+        intents.guilds = True
+        intents.messages = True
+        intents.message_content = True
+        client = _MOADiagnosticDiscordClient(self, intents=intents, enable_debug_events=True)
+        self._client = client
+        try:
+            client.run(normalized_token)
+        finally:
+            self.close()
+            self._observe_shutdown_task()
+
+    def _open_output(self) -> None:
+        if self._output_file is not None:
+            return
+        try:
+            self._output_file = self._config.output_path.open("x", encoding="utf-8", newline="\n")
+        except OSError as error:
+            self._fail(error)
+
+    def close(self) -> None:
+        if self._close_attempted:
+            return
+        self._close_attempted = True
+        output_file, self._output_file = self._output_file, None
+        if output_file is not None:
+            try:
+                output_file.close()
+            except Exception:
+                pass
+
+    def capture_gateway_payload(self, payload: Mapping[str, Any]) -> bool:
+        """Transform one supported Gateway envelope after every filter has matched."""
+        if self._failed:
+            return False
+        event_type = payload.get("t")
+        data = payload.get("d")
+        if event_type not in self._EVENT_TYPES or not isinstance(data, Mapping):
+            return False
+        if not self._matches_location(data):
+            return False
+        if event_type == "MESSAGE_CREATE" and not self._matches_message_create(data):
+            return False
+        if event_type == "MESSAGE_UPDATE" and not self._matches_message_update(data):
+            return False
+        if event_type == "INTERACTION_CREATE" and not self._matches_interaction(data):
+            return False
+        text_allowed = self._text_allowed(event_type, data)
+        try:
+            record = self._record_for(event_type, data, text_allowed=text_allowed)
+            if record is None:
+                return False
+            self._write(record)
+        except DiscordEventCaptureError:
+            raise
+        except Exception as error:
+            self._fail(error)
+        if self._is_mudae_message(event_type, data):
+            message_id = self._id(data.get("id"))
+            if message_id is not None:
+                self._mudae_text_message_ids.add(message_id)
+        return True
+
+    def _matches_location(self, data: Mapping[str, Any]) -> bool:
+        return (
+            self._id(data.get("guild_id")) == self._config.guild_id
+            and self._id(data.get("channel_id")) == self._config.channel_id
+        )
+
+    def _matches_message_create(self, data: Mapping[str, Any]) -> bool:
+        author_id = self._id_from_mapping(data.get("author"), "id")
+        if author_id == self._config.mudae_user_id:
+            return True
+        content = data.get("content")
+        return (
+            author_id in self._config.user_ids
+            and isinstance(content, str)
+            and content.lstrip().casefold().startswith("$adl")
+        )
+
+    def _matches_message_update(self, data: Mapping[str, Any]) -> bool:
+        author_id = self._id_from_mapping(data.get("author"), "id")
+        if author_id is None:
+            # Gateway updates commonly omit author data. Guild/channel filtering is the narrowest
+            # safe filter in that case; retaining it is necessary to characterize uncached edits.
+            return True
+        if author_id == self._config.mudae_user_id:
+            return True
+        content = data.get("content")
+        return (
+            author_id in self._config.user_ids
+            and isinstance(content, str)
+            and content.lstrip().casefold().startswith("$adl")
+        )
+
+    def _matches_interaction(self, data: Mapping[str, Any]) -> bool:
+        return self._interaction_user_id(data) in self._config.user_ids
+
+    def _text_allowed(self, event_type: str, data: Mapping[str, Any]) -> bool:
+        if not self._config.include_message_text:
+            return False
+        if event_type == "MESSAGE_CREATE":
+            return self._is_mudae_message(event_type, data) or self._is_selected_adl_request(data)
+        if event_type == "MESSAGE_UPDATE":
+            return self._is_mudae_message(event_type, data) or (
+                self._id(data.get("id")) in self._mudae_text_message_ids
+            )
+        if event_type == "INTERACTION_CREATE":
+            source_message = data.get("message")
+            return (
+                isinstance(source_message, Mapping)
+                and self._id(source_message.get("id")) in self._mudae_text_message_ids
+            )
+        return False
+
+    def _is_mudae_message(self, event_type: str, data: Mapping[str, Any]) -> bool:
+        return event_type in {"MESSAGE_CREATE", "MESSAGE_UPDATE"} and (
+            self._id_from_mapping(data.get("author"), "id") == self._config.mudae_user_id
+        )
+
+    def _is_selected_adl_request(self, data: Mapping[str, Any]) -> bool:
+        content = data.get("content")
+        return (
+            self._id_from_mapping(data.get("author"), "id") in self._config.user_ids
+            and isinstance(content, str)
+            and content.lstrip().casefold().startswith("$adl")
+        )
+
+    def _record_for(
+        self, event_type: str, data: Mapping[str, Any], *, text_allowed: bool
+    ) -> dict[str, Any] | None:
+        if event_type in {"MESSAGE_CREATE", "MESSAGE_UPDATE"}:
+            message = self._message_record(data, include_text=text_allowed)
+            return {
+                "capture_schema_version": self._SCHEMA_VERSION,
+                "gateway_event_type": event_type,
+                "guild_id": self._id(data.get("guild_id")),
+                "channel_id": self._id(data.get("channel_id")),
+                "message_id": message.get("id"),
+                "author_id": message.get("author_id"),
+                "message": message,
+            }
+        if event_type == "INTERACTION_CREATE":
+            interaction_data = data.get("data")
+            interaction_data = interaction_data if isinstance(interaction_data, Mapping) else {}
+            source_message = data.get("message")
+            source_message = source_message if isinstance(source_message, Mapping) else None
+            return {
+                "capture_schema_version": self._SCHEMA_VERSION,
+                "gateway_event_type": event_type,
+                "guild_id": self._id(data.get("guild_id")),
+                "channel_id": self._id(data.get("channel_id")),
+                "interaction": {
+                    "id": self._id(data.get("id")),
+                    "type": data.get("type"),
+                    "application_id": self._id(data.get("application_id")),
+                    "acting_user_id": self._interaction_user_id(data),
+                    "component_type": interaction_data.get("component_type"),
+                    "custom_id_sha256": self._safe_digest(interaction_data.get("custom_id")),
+                    "custom_id_length": len(interaction_data["custom_id"])
+                    if isinstance(interaction_data.get("custom_id"), str)
+                    else None,
+                    "values_sha256": self._safe_digests(interaction_data.get("values")),
+                    "source_message_id": self._id_from_mapping(source_message, "id"),
+                    "source_message": self._message_record(source_message, include_text=text_allowed)
+                    if source_message is not None
+                    else None,
+                },
+            }
+        return None
+
+    def _message_record(self, data: Mapping[str, Any], *, include_text: bool = False) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "id": self._id(data.get("id")),
+            "author_id": self._id_from_mapping(data.get("author"), "id"),
+            "application_id": self._id(data.get("application_id")),
+            "type": data.get("type"),
+            "content": self._sanitize_text(data.get("content"))
+            if include_text and isinstance(data.get("content"), str)
+            else None,
+            "created_at": data.get("timestamp"),
+            "edited_at": data.get("edited_timestamp"),
+            "reference": self._reference_record(data.get("message_reference")),
+            "interaction_metadata": self._interaction_metadata_record(
+                data.get("interaction_metadata") or data.get("interaction")
+            ),
+            "components": self._components_record(data.get("components")),
+            "embeds": self._embeds_record(data.get("embeds"), include_text=include_text),
+        }
+        return self._without_none(record)
+
+    def _reference_record(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        return self._without_none(
+            {
+                "message_id": self._id(value.get("message_id")),
+                "channel_id": self._id(value.get("channel_id")),
+                "guild_id": self._id(value.get("guild_id")),
+                "type": value.get("type"),
+            }
+        )
+
+    def _interaction_metadata_record(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        return self._without_none(
+            {
+                "id": self._id(value.get("id")),
+                "type": value.get("type"),
+                "name": None,
+                "user_id": self._interaction_user_id(value),
+            }
+        )
+
+    def _components_record(
+        self, value: Any, path: tuple[int, ...] = ()
+    ) -> list[dict[str, Any]] | None:
+        if not isinstance(value, list):
+            return None
+        return [
+            self._component_record(component, (*path, index))
+            for index, component in enumerate(value)
+            if isinstance(component, Mapping)
+        ]
+
+    def _component_record(self, value: Mapping[str, Any], path: tuple[int, ...]) -> dict[str, Any]:
+        return self._without_none(
+            {
+                "path": list(path),
+                "type": value.get("type"),
+                "custom_id_sha256": self._safe_digest(value.get("custom_id")),
+                "custom_id_length": len(value["custom_id"])
+                if isinstance(value.get("custom_id"), str)
+                else None,
+                "values_sha256": self._safe_digests(value.get("values")),
+                "disabled": value.get("disabled") if isinstance(value.get("disabled"), bool) else None,
+                "components": self._components_record(value.get("components"), path),
+            }
+        )
+
+    def _embeds_record(self, value: Any, *, include_text: bool) -> list[dict[str, Any]] | None:
+        if not isinstance(value, list):
+            return None
+        records: list[dict[str, Any]] = []
+        for embed in value:
+            if not isinstance(embed, Mapping):
+                continue
+            fields = embed.get("fields")
+            records.append(
+                self._without_none(
+                    {
+                        "type": embed.get("type"),
+                        "field_count": len(fields) if isinstance(fields, list) else None,
+                        "has_footer": True if isinstance(embed.get("footer"), Mapping) else None,
+                        "title": self._sanitize_text(embed.get("title"))
+                        if include_text and isinstance(embed.get("title"), str)
+                        else None,
+                        "description": self._sanitize_text(embed.get("description"))
+                        if include_text and isinstance(embed.get("description"), str)
+                        else None,
+                        "fields": [
+                            self._without_none(
+                                {
+                                    "name": self._sanitize_text(field.get("name"))
+                                    if include_text and isinstance(field.get("name"), str)
+                                    else None,
+                                    "value": self._sanitize_text(field.get("value"))
+                                    if include_text and isinstance(field.get("value"), str)
+                                    else None,
+                                }
+                            )
+                            for field in fields
+                            if isinstance(field, Mapping)
+                        ]
+                        if include_text and isinstance(fields, list)
+                        else None,
+                        "footer": {
+                            "text": self._sanitize_text(embed["footer"]["text"])
+                        }
+                        if isinstance(embed.get("footer"), Mapping)
+                        and include_text
+                        and isinstance(embed["footer"].get("text"), str)
+                        else None,
+                    }
+                )
+            )
+        return records
+
+    @staticmethod
+    def _scalar_values(value: Any) -> list[str] | None:
+        if not isinstance(value, list):
+            return None
+        return [str(item) for item in value if isinstance(item, (str, int, float, bool))]
+
+    @staticmethod
+    def _id(value: Any) -> str | None:
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value)
+        return None
+
+    @classmethod
+    def _id_from_mapping(cls, value: Any, key: str) -> str | None:
+        return cls._id(value.get(key)) if isinstance(value, Mapping) else None
+
+    @classmethod
+    def _interaction_user_id(cls, data: Mapping[str, Any]) -> str | None:
+        member = data.get("member")
+        if isinstance(member, Mapping):
+            user_id = cls._id_from_mapping(member.get("user"), "id")
+            if user_id is not None:
+                return user_id
+        return cls._id_from_mapping(data.get("user"), "id")
+
+    def _write(self, record: dict[str, Any]) -> None:
+        if self._output_file is None:
+            raise RuntimeError("Diagnostic capture output is not open.")
+        position: int | None = None
+        try:
+            prepared = self._redact(
+                {
+                    "sequence": self._sequence + 1,
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    **record,
+                }
+            )
+            line = json.dumps(prepared, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+            position = self._output_file.tell()
+            self._output_file.write(line)
+            self._output_file.flush()
+            self._sequence += 1
+        except Exception as error:
+            try:
+                if position is not None:
+                    self._output_file.seek(position)
+                    self._output_file.truncate()
+            except (OSError, ValueError):
+                pass
+            self._fail(error)
+
+    def _fail(self, error: Exception) -> None:
+        if self._failed:
+            raise DiscordEventCaptureError("Diagnostic capture failed; output was closed.") from None
+        self._failed = True
+        self.close()
+        self._request_client_shutdown()
+        raise DiscordEventCaptureError("Diagnostic capture failed; output was closed.") from error
+
+    def _request_client_shutdown(self) -> None:
+        if self._shutdown_requested or self._client is None:
+            return
+        self._shutdown_requested = True
+        try:
+            result = self._client.close()
+            if inspect.isawaitable(result):
+                try:
+                    task = asyncio.get_running_loop().create_task(result)
+                    self._shutdown_task = task
+                    task.add_done_callback(self._observe_shutdown_task_result)
+                except RuntimeError:
+                    result.close()
+        except Exception:
+            pass
+
+    def _observe_shutdown_task_result(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:
+            pass
+        finally:
+            if self._shutdown_task is task:
+                self._shutdown_task = None
+
+    def _observe_shutdown_task(self) -> None:
+        task = self._shutdown_task
+        if task is not None and task.done():
+            self._observe_shutdown_task_result(task)
+
+    @staticmethod
+    def _safe_digest(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _safe_digests(cls, value: Any) -> list[str] | None:
+        if not isinstance(value, list):
+            return None
+        return [digest for item in value if (digest := cls._safe_digest(item)) is not None]
+
+    @staticmethod
+    def _sanitize_text(value: str) -> str:
+        text = re.sub(r"<@!?(\d+)>", r"<mention:\1>", value)
+        text = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[redacted-email]", text)
+        text = re.sub(r"https?://\S+|discord\.gg/\S+", "[redacted-url]", text, flags=re.I)
+        text = re.sub(r"(?i)\b(?:bearer|token|authorization|cookie|session)\s*[:=]\s*\S+", "[redacted-secret]", text)
+        text = re.sub(r"\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]+\.[a-zA-Z0-9_-]+\b", "[redacted-jwt]", text)
+        text = re.sub(
+            r"(?<!\d)(?:\+\d[ .-]+)?(?:\(\d{3}\)|\d{3})[ .-]+\d{3}[ .-]+\d{4}(?!\d)",
+            "[redacted-phone]",
+            text,
+        )
+        text = re.sub(
+            r"\b(?=[A-Za-z0-9_-]{24,}\b)(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9_-]+\b",
+            "[redacted-long-secret]",
+            text,
+        )
+        return text
+
+    def _redact(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(key): self._redact(child)
+                for key, child in value.items()
+                if not self._is_secret_key(str(key))
+            }
+        if isinstance(value, list):
+            return [self._redact(item) for item in value]
+        return value
+
+    def _is_secret_key(self, key: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
+        if normalized == "authorid":
+            return False
+        return any(part in normalized for part in self._SECRET_KEY_PARTS)
+
+    @staticmethod
+    def _without_none(value: dict[str, Any]) -> dict[str, Any]:
+        return {key: child for key, child in value.items() if child is not None}
 
 
 class DiscordListenerService:
@@ -2567,3 +3100,17 @@ class _MOADiscordClient(discord.Client):
 
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         await self._listener.handle_raw_reaction_add(payload)
+
+
+class _MOADiagnosticDiscordClient(discord.Client):
+    """Gateway-only adapter for opt-in diagnostic capture runs."""
+
+    def __init__(self, capture: DiscordEventCaptureService, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._capture = capture
+
+    async def on_socket_raw_receive(self, payload: dict[str, Any]) -> None:
+        try:
+            self._capture.capture_gateway_payload(payload)
+        except DiscordEventCaptureError:
+            raise

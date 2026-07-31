@@ -1,13 +1,16 @@
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
 import time
 from dataclasses import fields
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import discord
 import pytest
 
 from moa.database.sqlite import connect
@@ -18,7 +21,14 @@ from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
-from moa.services.discord_listener_service import DiscordCommandContext, DiscordListenerService
+from moa.services.discord_listener_service import (
+    DiscordCommandContext,
+    DiscordEventCaptureConfig,
+    DiscordEventCaptureError,
+    DiscordEventCaptureService,
+    DiscordListenerService,
+    _MOADiagnosticDiscordClient,
+)
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import (
@@ -55,6 +65,980 @@ def test_extract_message_text_flattens_discord_embed_content() -> None:
         "ernieuuu's harem\nMudae\n#1 - Zero Two - DARLING in the FRANXX\n"
         "Page\n1 / 67\nMudae"
     )
+
+
+def _diagnostic_capture(tmp_path) -> tuple[DiscordEventCaptureService, object]:
+    output_path = tmp_path / "adl-capture.jsonl"
+    capture = DiscordEventCaptureService(
+        DiscordEventCaptureConfig(
+            output_path=output_path,
+            guild_id="100",
+            channel_id="200",
+            mudae_user_id="300",
+            user_ids=frozenset({"400", "401"}),
+            enabled=True,
+        )
+    )
+    return capture, output_path
+
+
+def test_diagnostic_capture_is_opt_in_and_filters_message_creates(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+
+    assert not output_path.exists()
+    assert not capture.capture_gateway_payload({"t": "READY", "d": {}})
+    assert not output_path.exists()
+
+    capture._open_output()
+    assert capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "500",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "400", "username": "private-user"},
+                "content": "$adl",
+                "timestamp": "2026-07-30T12:00:00.000Z",
+                "message_reference": {"message_id": "499", "channel_id": "200", "guild_id": "100"},
+            },
+        }
+    )
+    assert capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "501",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "300", "username": "Mudae"},
+                "content": "user's Antidisablelist (1/2)",
+                "embeds": [{"title": "Antidisable", "description": "Page 1"}],
+                "components": [{"type": 1, "components": [{"type": 2, "custom_id": "next"}]}],
+            },
+        }
+    )
+    assert not capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "502",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "999"},
+                "content": "$adl",
+            },
+        }
+    )
+    capture.close()
+
+    records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["sequence"] for record in records] == [1, 2]
+    assert records[0]["message_id"] == "500"
+    assert records[0]["author_id"] == "400"
+    assert records[0]["message"]["reference"] == {
+        "channel_id": "200",
+        "guild_id": "100",
+        "message_id": "499",
+    }
+    assert records[1]["message_id"] == "501"
+    assert records[1]["message"]["components"] == [
+        {
+            "components": [
+                {
+                    "custom_id_length": 4,
+                    "custom_id_sha256": hashlib.sha256(b"next").hexdigest(),
+                    "path": [0, 0],
+                    "type": 2,
+                }
+            ],
+            "path": [0],
+            "type": 1,
+        }
+    ]
+    serialized = output_path.read_text(encoding="utf-8")
+    for private_value in ("private-user", "$adl", "Antidisable", "Page 1", "next"):
+        assert private_value not in serialized
+
+
+def test_diagnostic_capture_records_uncached_updates_and_redacts_interactions(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+
+    assert capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_UPDATE",
+            "d": {
+                "id": "501",
+                "guild_id": "100",
+                "channel_id": "200",
+                "content": "user's Antidisablelist (2/2)",
+                "edited_timestamp": "2026-07-30T12:01:00.000Z",
+                "message_reference": {"message_id": "500", "channel_id": "200", "guild_id": "100"},
+                "embeds": [{"description": "Page 2", "fields": [{"name": "Page", "value": "2/2"}]}],
+                "components": [{"type": 1, "components": [{"type": 2, "custom_id": "previous"}]}],
+            },
+        }
+    )
+    assert capture.capture_gateway_payload(
+        {
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "600",
+                "type": 3,
+                "guild_id": "100",
+                "channel_id": "200",
+                "application_id": "300",
+                "member": {
+                    "user": {"id": "400", "username": "private-user", "email": "private@example.test"},
+                    "nick": "private nickname",
+                },
+                "token": "interaction-secret",
+                "authorization": "Bearer secret",
+                "data": {"component_type": 2, "custom_id": "next", "values": ["page-2"], "cookie": "secret"},
+                "message": {
+                    "id": "501",
+                    "author": {"id": "300", "username": "Mudae"},
+                    "content": "user's Antidisablelist (2/2)",
+                    "components": [{"type": 1, "components": [{"type": 2, "custom_id": "next"}]}],
+                },
+            },
+        }
+    )
+    assert not capture.capture_gateway_payload({"t": "MESSAGE_UPDATE", "d": "malformed"})
+    capture.close()
+
+    records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    update, interaction = records
+    assert update["message_id"] == interaction["interaction"]["source_message_id"] == "501"
+    assert update["message"]["edited_at"] == "2026-07-30T12:01:00.000Z"
+    assert update["message"]["embeds"] == [{"field_count": 1}]
+    assert interaction["interaction"] == {
+        "acting_user_id": "400",
+        "application_id": "300",
+        "component_type": 2,
+            "custom_id_length": 4,
+        "custom_id_sha256": hashlib.sha256(b"next").hexdigest(),
+        "id": "600",
+        "source_message": {
+            "author_id": "300",
+            "components": [
+                {
+                    "components": [
+                        {
+                            "custom_id_length": 4,
+                            "custom_id_sha256": hashlib.sha256(b"next").hexdigest(),
+                            "path": [0, 0],
+                            "type": 2,
+                        }
+                    ],
+                    "path": [0],
+                    "type": 1,
+                }
+            ],
+            "id": "501",
+        },
+        "source_message_id": "501",
+        "type": 3,
+        "values_sha256": [hashlib.sha256(b"page-2").hexdigest()],
+    }
+    serialized = output_path.read_text(encoding="utf-8")
+    for secret in (
+        "interaction-secret",
+        "Bearer secret",
+        "private-user",
+        "private@example.test",
+        "private nickname",
+        "next",
+        "page-2",
+    ):
+        assert secret not in serialized
+
+
+def test_diagnostic_capture_includes_only_sanitized_opt_in_message_text(tmp_path) -> None:
+    output_path = tmp_path / "adl-capture.jsonl"
+    capture = DiscordEventCaptureService(
+        DiscordEventCaptureConfig(
+            output_path=output_path,
+            guild_id="100",
+            channel_id="200",
+            mudae_user_id="300",
+            user_ids=frozenset({"400"}),
+            enabled=True,
+            include_message_text=True,
+        )
+    )
+    capture._open_output()
+
+    assert capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "500",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "400", "username": "not-allowed"},
+                "content": "$adl <@400> private@example.test https://discord.gg/secret token=secret",
+                "embeds": [
+                    {
+                        "title": "private@example.test",
+                        "fields": [{"name": "token=secret", "value": "Call 555-123-4567"}],
+                    }
+                ],
+            },
+        }
+    )
+    capture.close()
+
+    serialized = output_path.read_text(encoding="utf-8")
+    record = json.loads(serialized)
+    assert record["message"]["content"] == (
+        "$adl <mention:400> [redacted-email] [redacted-url] [redacted-secret]"
+    )
+    assert record["message"]["embeds"] == [
+        {
+            "field_count": 1,
+            "fields": [{"name": "[redacted-secret]", "value": "Call [redacted-phone]"}],
+            "title": "[redacted-email]",
+        }
+    ]
+    for secret in ("not-allowed", "private@example.test", "discord.gg/secret", "token=secret", "555-123-4567"):
+        assert secret not in serialized
+
+
+def test_diagnostic_capture_text_requires_attributable_mudae_message(tmp_path) -> None:
+    capture = DiscordEventCaptureService(
+        DiscordEventCaptureConfig(
+            output_path=tmp_path / "capture.jsonl",
+            guild_id="100",
+            channel_id="200",
+            mudae_user_id="300",
+            user_ids=frozenset({"400"}),
+            enabled=True,
+            include_message_text=True,
+        )
+    )
+    capture._open_output()
+    def event(event_type, data):
+        assert capture.capture_gateway_payload({"t": event_type, "d": data})
+    event("MESSAGE_UPDATE", {"id": "unknown", "guild_id": "100", "channel_id": "200", "content": "unknown text"})
+    event("MESSAGE_CREATE", {"id": "mudae", "guild_id": "100", "channel_id": "200", "author": {"id": "300"}, "content": "Mudae https://example.test/secret"})
+    event("MESSAGE_UPDATE", {"id": "mudae", "guild_id": "100", "channel_id": "200", "content": "updated private@example.test"})
+    event("INTERACTION_CREATE", {"id": "i1", "type": 3, "guild_id": "100", "channel_id": "200", "member": {"user": {"id": "400"}}, "data": {"custom_id": "same"}, "message": {"id": "unknown", "content": "arbitrary source text", "interaction_metadata": {"name": "arbitrary"}}})
+    event("INTERACTION_CREATE", {"id": "i2", "type": 3, "guild_id": "100", "channel_id": "200", "member": {"user": {"id": "400"}}, "data": {"custom_id": "same"}, "message": {"id": "mudae", "author": {"id": "300"}, "content": "Mudae https://example.test/secret"}})
+    capture.close()
+    records = [json.loads(line) for line in (tmp_path / "capture.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "content" not in records[0]["message"]
+    assert records[1]["message"]["content"] == "Mudae [redacted-url]"
+    assert records[2]["message"]["content"] == "updated [redacted-email]"
+    assert "content" not in records[3]["interaction"]["source_message"]
+    assert records[4]["interaction"]["source_message"]["content"] == "Mudae [redacted-url]"
+    assert "arbitrary" not in json.dumps(records)
+
+
+def test_diagnostic_capture_component_paths_and_digests_are_structural(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    assert capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "300"}, "components": [{"type": 1, "components": [{"type": 2, "custom_id": "same"}, {"type": 2, "custom_id": "same"}]}, {"type": 1, "components": [{"type": 2, "custom_id": "other"}]}]}})
+    capture.close()
+    leaves = [component for row in json.loads(output_path.read_text(encoding="utf-8"))["message"]["components"] for component in row["components"]]
+    assert [leaf["path"] for leaf in leaves] == [[0, 0], [0, 1], [1, 0]]
+    assert leaves[0]["custom_id_sha256"] == leaves[1]["custom_id_sha256"] != leaves[2]["custom_id_sha256"]
+    assert [leaf["custom_id_length"] for leaf in leaves] == [4, 4, 5]
+    assert "same" not in output_path.read_text(encoding="utf-8")
+
+
+def test_diagnostic_capture_closes_after_encoding_failure(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "300"}, "type": object(), "content": "secret-token-value"}})
+    assert "secret-token-value" not in str(error.value)
+    assert not capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {}})
+    assert output_path.read_text(encoding="utf-8") == ""
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        DiscordEventCaptureConfig(
+            output_path=Path("relative.jsonl"),
+            guild_id="100",
+            channel_id="200",
+            mudae_user_id="300",
+            user_ids=frozenset({"400"}),
+            enabled=True,
+        ),
+        DiscordEventCaptureConfig(
+            output_path=Path(__file__).resolve(),
+            guild_id="100",
+            channel_id="200",
+            mudae_user_id="300",
+            user_ids=frozenset({"400"}),
+            enabled=False,
+        ),
+    ],
+)
+def test_diagnostic_capture_rejects_unsafe_direct_service_configs(config) -> None:
+    with pytest.raises(ValueError):
+        DiscordEventCaptureService(config)
+
+
+def test_diagnostic_capture_direct_service_rejects_repository_contained_path() -> None:
+    output_path = Path(__file__).resolve().parent / ".diagnostic-capture-repository-path-test.jsonl"
+    assert not output_path.exists()
+    config = DiscordEventCaptureConfig(
+        output_path=output_path,
+        guild_id="100",
+        channel_id="200",
+        mudae_user_id="300",
+        user_ids=frozenset({"400"}),
+        enabled=True,
+    )
+
+    with pytest.raises(ValueError, match="outside the repository"):
+        DiscordEventCaptureService(config)
+
+    assert not output_path.exists()
+
+
+def test_diagnostic_capture_closes_and_stops_after_write_failure(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class FailingOutput:
+        closed = False
+
+        def tell(self):
+            return 0
+
+        def write(self, _line):
+            raise OSError("test write failure")
+
+        def flush(self):
+            raise AssertionError("flush must not follow a failed write")
+
+        def seek(self, _position):
+            return None
+
+        def truncate(self):
+            return None
+
+        def close(self):
+            self.closed = True
+
+    output = FailingOutput()
+    capture._output_file = output
+    payload = {
+        "t": "MESSAGE_CREATE",
+        "d": {
+            "id": "500",
+            "guild_id": "100",
+            "channel_id": "200",
+            "author": {"id": "400"},
+            "content": "$adl",
+        },
+    }
+
+    with pytest.raises(DiscordEventCaptureError, match="output was closed"):
+        capture.capture_gateway_payload(payload)
+
+    assert output.closed
+    assert not capture.capture_gateway_payload(payload)
+
+
+def test_diagnostic_capture_open_failure_fails_closed_before_client(tmp_path, monkeypatch, caplog) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError("unsafe-open-secret")
+
+    monkeypatch.setattr(Path, "open", fail_open)
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture._open_output()
+
+    assert "unsafe-open-secret" not in str(error.value)
+    assert "unsafe-open-secret" not in repr(error.value)
+    assert "unsafe-open-secret" not in caplog.text
+    assert capture._failed
+    assert capture._output_file is None
+    assert capture._client is None
+    assert capture._shutdown_task is None
+    assert not output_path.exists()
+    assert not capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {}})
+    capture.close()
+    capture.close()
+
+
+def test_diagnostic_capture_open_failure_requests_existing_client_shutdown_once(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    def fail_open(*_args, **_kwargs):
+        raise OSError("unsafe-open-payload")
+
+    client = Client()
+    capture._client = client
+    monkeypatch.setattr(Path, "open", fail_open)
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture._open_output()
+
+    assert "unsafe-open-payload" not in str(error.value)
+    assert "unsafe-open-payload" not in repr(error.value)
+    assert "unsafe-open-payload" not in caplog.text
+    assert capture._failed
+    assert capture._output_file is None
+    assert not output_path.exists()
+    assert client.calls == 1
+    assert not capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {}})
+    capture.close()
+    assert client.calls == 1
+
+
+def test_diagnostic_capture_partial_write_rolls_back_current_record(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class PartialWriteOutput:
+        def __init__(self):
+            self.content = '{"previous":true}\n'
+            self.position = len(self.content)
+            self.pre_record_offset = self.position
+            self.write_calls = []
+            self.seek_calls = []
+            self.truncate_calls = 0
+            self.flush_calls = 0
+            self.close_calls = 0
+
+        def tell(self):
+            return self.position
+
+        def write(self, line):
+            self.write_calls.append(line)
+            fragment = line[:17]
+            self.content += fragment
+            self.position += len(fragment)
+            raise OSError("unsafe-partial-write-secret")
+
+        def flush(self):
+            self.flush_calls += 1
+
+        def seek(self, position):
+            self.seek_calls.append(position)
+            self.position = position
+
+        def truncate(self):
+            self.truncate_calls += 1
+            self.content = self.content[: self.position]
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    output = PartialWriteOutput()
+    client = Client()
+    capture._output_file = output
+    capture._client = client
+    payload = {"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "400"}, "content": "$adl synthetic-secret"}}
+
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload(payload)
+
+    assert "unsafe-partial-write-secret" not in str(error.value)
+    assert output.write_calls and output.write_calls[0].endswith("\n")
+    assert output.seek_calls == [output.pre_record_offset]
+    assert output.truncate_calls == 1
+    assert output.position == output.pre_record_offset
+    assert output.content == '{"previous":true}\n'
+    assert [json.loads(line) for line in output.content.splitlines()] == [{"previous": True}]
+    assert output.flush_calls == 0
+    assert output.close_calls == 1
+    assert client.calls == 1
+    assert capture._failed
+    assert not capture.capture_gateway_payload(payload)
+
+
+def test_diagnostic_capture_newline_failure_rolls_back_current_record(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class NewlineFailureOutput:
+        def __init__(self):
+            self.content = '{"previous":true}\n'
+            self.position = len(self.content)
+            self.pre_record_offset = self.position
+            self.write_calls = []
+            self.seek_calls = []
+            self.truncate_calls = 0
+            self.flush_calls = 0
+            self.close_calls = 0
+
+        def tell(self):
+            return self.position
+
+        def write(self, line):
+            self.write_calls.append(line)
+            assert line.endswith("\n")
+            self.content += line[:-1]
+            self.position += len(line) - 1
+            raise OSError("unsafe-newline-secret")
+
+        def flush(self):
+            self.flush_calls += 1
+
+        def seek(self, position):
+            self.seek_calls.append(position)
+            self.position = position
+
+        def truncate(self):
+            self.truncate_calls += 1
+            self.content = self.content[: self.position]
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    output = NewlineFailureOutput()
+    client = Client()
+    capture._output_file = output
+    capture._client = client
+    payload = {"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "400"}, "content": "$adl"}}
+
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload(payload)
+
+    assert "unsafe-newline-secret" not in str(error.value)
+    assert output.write_calls and output.write_calls[0][:-1] not in output.content
+    assert output.seek_calls == [output.pre_record_offset]
+    assert output.truncate_calls == 1
+    assert output.content == '{"previous":true}\n'
+    assert [json.loads(line) for line in output.content.splitlines()] == [{"previous": True}]
+    assert output.flush_calls == 0
+    assert output.close_calls == 1
+    assert client.calls == 1
+    assert capture._failed
+    assert not capture.capture_gateway_payload(payload)
+
+
+def test_diagnostic_capture_flush_failure_rolls_back_current_record(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class FlushFailureOutput:
+        def __init__(self):
+            self.content = '{"previous":true}\n'
+            self.position = len(self.content)
+            self.pre_record_offset = self.position
+            self.write_calls = []
+            self.seek_calls = []
+            self.truncate_calls = 0
+            self.flush_calls = 0
+            self.close_calls = 0
+
+        def tell(self):
+            return self.position
+
+        def write(self, line):
+            self.write_calls.append(line)
+            self.content += line
+            self.position += len(line)
+
+        def flush(self):
+            self.flush_calls += 1
+            raise OSError("unsafe-flush-secret")
+
+        def seek(self, position):
+            self.seek_calls.append(position)
+            self.position = position
+
+        def truncate(self):
+            self.truncate_calls += 1
+            self.content = self.content[: self.position]
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    output = FlushFailureOutput()
+    client = Client()
+    capture._output_file = output
+    capture._client = client
+    payload = {"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "400"}, "content": "$adl"}}
+
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload(payload)
+
+    assert "unsafe-flush-secret" not in str(error.value)
+    assert output.write_calls and output.write_calls[0].endswith("\n")
+    assert output.flush_calls == 1
+    assert output.seek_calls == [output.pre_record_offset]
+    assert output.truncate_calls == 1
+    assert output.content == '{"previous":true}\n'
+    assert [json.loads(line) for line in output.content.splitlines()] == [{"previous": True}]
+    assert output.close_calls == 1
+    assert client.calls == 1
+    assert capture._failed
+    assert not capture.capture_gateway_payload(payload)
+
+
+def test_diagnostic_capture_seek_failure_remains_controlled(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class SeekFailureOutput:
+        def __init__(self):
+            self.position = 0
+            self.write_calls = []
+            self.seek_calls = []
+            self.truncate_calls = 0
+            self.close_calls = 0
+
+        def tell(self):
+            return self.position
+
+        def write(self, line):
+            self.write_calls.append(line)
+            raise OSError("unsafe-original-write-secret")
+
+        def flush(self):
+            raise AssertionError("flush must not follow the failed write")
+
+        def seek(self, position):
+            self.seek_calls.append(position)
+            raise OSError("unsafe-seek-secret")
+
+        def truncate(self):
+            self.truncate_calls += 1
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    output = SeekFailureOutput()
+    client = Client()
+    capture._output_file = output
+    capture._client = client
+    payload = {"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "400"}, "content": "$adl"}}
+
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload(payload)
+
+    assert "unsafe-original-write-secret" not in str(error.value)
+    assert "unsafe-seek-secret" not in str(error.value)
+    assert output.seek_calls == [0]
+    assert output.truncate_calls == 0
+    assert output.close_calls == 1
+    assert client.calls == 1
+    assert capture._failed
+    assert not capture.capture_gateway_payload(payload)
+    capture.close()
+    assert output.close_calls == 1
+
+
+def test_diagnostic_capture_truncate_failure_remains_controlled(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class TruncateFailureOutput:
+        def __init__(self):
+            self.position = 0
+            self.write_calls = []
+            self.seek_calls = []
+            self.truncate_calls = 0
+            self.close_calls = 0
+
+        def tell(self):
+            return self.position
+
+        def write(self, line):
+            self.write_calls.append(line)
+            raise OSError("unsafe-original-write-secret")
+
+        def flush(self):
+            raise AssertionError("flush must not follow the failed write")
+
+        def seek(self, position):
+            self.seek_calls.append(position)
+            self.position = position
+
+        def truncate(self):
+            self.truncate_calls += 1
+            raise OSError("unsafe-truncate-secret")
+
+        def close(self):
+            self.close_calls += 1
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    output = TruncateFailureOutput()
+    client = Client()
+    capture._output_file = output
+    capture._client = client
+    payload = {"t": "MESSAGE_CREATE", "d": {"id": "500", "guild_id": "100", "channel_id": "200", "author": {"id": "400"}, "content": "$adl"}}
+
+    with pytest.raises(DiscordEventCaptureError) as error:
+        capture.capture_gateway_payload(payload)
+
+    assert "unsafe-original-write-secret" not in str(error.value)
+    assert "unsafe-truncate-secret" not in str(error.value)
+    assert output.seek_calls == [0]
+    assert output.truncate_calls == 1
+    assert output.close_calls == 1
+    assert client.calls == 1
+    assert capture._failed
+    assert not capture.capture_gateway_payload(payload)
+    capture.close()
+    assert output.close_calls == 1
+
+
+def test_diagnostic_capture_normal_shutdown_closes_resources_once(tmp_path, monkeypatch) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+
+    class Client:
+        instances = []
+
+        def __init__(self, _capture, **_kwargs):
+            self.run_calls = []
+            self.close_calls = 0
+            self.__class__.instances.append(self)
+
+        def run(self, token):
+            self.run_calls.append(token)
+            self.close()
+
+        def close(self):
+            self.close_calls += 1
+
+    monkeypatch.setattr("moa.services.discord_listener_service._MOADiagnosticDiscordClient", Client)
+    capture.run("diagnostic-token")
+    client = Client.instances[0]
+
+    assert output_path.exists()
+    assert client.run_calls == ["diagnostic-token"]
+    assert client.close_calls == 1
+    assert capture._output_file is None
+    assert capture._shutdown_task is None
+    assert not capture._failed
+    capture.close()
+    capture.close()
+    assert client.close_calls == 1
+
+
+def test_diagnostic_capture_failure_requests_one_safe_client_shutdown(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class Client:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+
+    client = Client()
+    capture._client = client
+    with pytest.raises(DiscordEventCaptureError):
+        capture._fail(RuntimeError("synthetic-secret"))
+    with pytest.raises(DiscordEventCaptureError):
+        capture._fail(RuntimeError("synthetic-secret"))
+
+    assert client.calls == 1
+    assert capture._failed
+
+
+def test_diagnostic_client_raw_callback_forwards_supported_events(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    client = _MOADiagnosticDiscordClient(capture, intents=discord.Intents.none())
+    capture._client = client
+
+    async def exercise() -> None:
+        await client.on_socket_raw_receive(
+            {"t": "MESSAGE_CREATE", "d": {"id": "1", "guild_id": "100", "channel_id": "200", "author": {"id": "300"}}}
+        )
+        await client.on_socket_raw_receive(
+            {"t": "MESSAGE_UPDATE", "d": {"id": "1", "guild_id": "100", "channel_id": "200"}}
+        )
+        await client.on_socket_raw_receive(
+            {"t": "INTERACTION_CREATE", "d": {"id": "2", "guild_id": "100", "channel_id": "200", "member": {"user": {"id": "400"}}}}
+        )
+        await client.on_socket_raw_receive({"t": "READY", "d": {}})
+
+    asyncio.run(exercise())
+    capture.close()
+
+    records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["gateway_event_type"] for record in records] == [
+        "MESSAGE_CREATE",
+        "MESSAGE_UPDATE",
+        "INTERACTION_CREATE",
+    ]
+
+
+def test_diagnostic_callback_observes_async_client_close_failure(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+    client = _MOADiagnosticDiscordClient(capture, intents=discord.Intents.none())
+    capture._client = client
+    close_calls = 0
+
+    async def failing_close() -> None:
+        nonlocal close_calls
+        close_calls += 1
+        raise RuntimeError("unsafe-client-close-secret")
+
+    client.close = failing_close
+
+    async def exercise() -> None:
+        with pytest.raises(DiscordEventCaptureError) as error:
+            await client.on_socket_raw_receive(
+                {"t": "MESSAGE_CREATE", "d": {"id": "1", "guild_id": "100", "channel_id": "200", "author": {"id": "300"}, "type": object(), "content": "payload-secret"}}
+            )
+        assert "payload-secret" not in str(error.value)
+        await asyncio.sleep(0)
+
+    asyncio.run(exercise())
+
+    assert close_calls == 1
+    assert capture._failed
+    assert capture._shutdown_task is None
+    assert not capture.capture_gateway_payload({"t": "MESSAGE_CREATE", "d": {}})
+
+
+def test_diagnostic_capture_safe_close_contains_writer_failure(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+
+    class FailingClose:
+        calls = 0
+
+        def close(self):
+            self.calls += 1
+            raise OSError("unsafe-close-secret")
+
+    output = FailingClose()
+    capture._output_file = output
+    capture.close()
+    capture.close()
+
+    assert output.calls == 1
+    assert capture._output_file is None
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+        "abc_DEF-ghiJKLmnopQRStuvWXYZ0123456789",
+        "a3f5c7e9b1d3f5a7c9e1b3d5f7a9c1e3b5d7f9a",
+        "ApiKey9xY8wV7uT6sR5qP4oN3mL2kJ1hG0fE9dC8",
+    ],
+)
+def test_diagnostic_capture_redacts_generic_long_secrets(secret) -> None:
+    text = DiscordEventCaptureService._sanitize_text(f"$adl 1234567890 keep {secret} readable")
+
+    assert secret not in text
+    assert "[redacted-long-secret]" in text
+    assert "$adl 1234567890 keep" in text
+
+
+def test_diagnostic_capture_direct_validation_matrix(tmp_path) -> None:
+    valid = dict(
+        output_path=tmp_path / "capture.jsonl",
+        guild_id="100",
+        channel_id="200",
+        mudae_user_id="300",
+        user_ids=frozenset({"400"}),
+        enabled=True,
+    )
+    assert isinstance(DiscordEventCaptureService(DiscordEventCaptureConfig(**valid)), DiscordEventCaptureService)
+    invalid_configs = [
+        {**valid, "enabled": False},
+        {**valid, "output_path": None},
+        {**valid, "output_path": Path("relative.jsonl")},
+        {**valid, "output_path": tmp_path},
+        {**valid, "output_path": tmp_path / "missing" / "capture.jsonl"},
+        {**valid, "guild_id": ""},
+        {**valid, "channel_id": "0"},
+        {**valid, "mudae_user_id": "-1"},
+        {**valid, "user_ids": frozenset()},
+        {**valid, "user_ids": frozenset({"not-an-id"})},
+    ]
+    existing = tmp_path / "existing.jsonl"
+    existing.write_text("existing", encoding="utf-8")
+    invalid_configs.append({**valid, "output_path": existing})
+
+    for config in invalid_configs:
+        with pytest.raises(ValueError):
+            DiscordEventCaptureService(DiscordEventCaptureConfig(**config))
+
+
+def test_diagnostic_capture_recursively_excludes_secret_and_profile_fields(tmp_path) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+    secrets = {
+        "token": "token-secret",
+        "interaction_token": "interaction-secret",
+        "authorization": "authorization-secret",
+        "auth": "auth-secret",
+        "cookie": "cookie-secret",
+        "session_id": "session-secret",
+        "webhook-token": "webhook-secret",
+        "access token": "access-secret",
+        "refresh_token": "refresh-secret",
+        "username": "username-secret",
+        "global_name": "global-secret",
+        "display-name": "display-secret",
+        "discriminator": "discriminator-secret",
+        "avatar": "avatar-secret",
+        "banner": "banner-secret",
+        "member": {"email": "email-secret", "phone": "phone-secret"},
+    }
+
+    redacted = capture._redact({"safe_id": "1234567890", "nested": secrets})
+    serialized = json.dumps(redacted)
+
+    assert redacted == {"safe_id": "1234567890", "nested": {}}
+    for secret in (
+        "token-secret",
+        "interaction-secret",
+        "authorization-secret",
+        "auth-secret",
+        "cookie-secret",
+        "session-secret",
+        "webhook-secret",
+        "access-secret",
+        "refresh-secret",
+        "username-secret",
+        "global-secret",
+        "display-secret",
+        "discriminator-secret",
+        "avatar-secret",
+        "banner-secret",
+        "email-secret",
+        "phone-secret",
+    ):
+        assert secret not in serialized
 
 
 def test_listener_page_metadata_reads_supported_scan_pages(tmp_path) -> None:
