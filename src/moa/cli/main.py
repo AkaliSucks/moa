@@ -22,6 +22,7 @@ from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.command_service import CommandService
 from moa.services.discord_listener_service import DiscordListenerService
+from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
@@ -235,6 +236,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        disablelist_projection_coordinator = DisableListProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         wishlist_projection_coordinator = WishlistProjectionCoordinator(
             catalog_repository,
             discord_message_repository,
@@ -252,6 +257,7 @@ def discord_listen(
             tower_state_projection_coordinator=tower_state_projection_coordinator,
             sphere_result_projection_coordinator=sphere_result_projection_coordinator,
             player_bonus_projection_coordinator=player_bonus_projection_coordinator,
+            disablelist_projection_coordinator=disablelist_projection_coordinator,
             wishlist_projection_coordinator=wishlist_projection_coordinator,
         )
         DiscordListenerService(
