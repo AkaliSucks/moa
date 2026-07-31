@@ -7,6 +7,8 @@ import pytest
 from moa.models.character import (
     BadgeLevel,
     ClaimConfirmation,
+    DisableListEntry,
+    DisableListSnapshot,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     KakeralootSettingsSnapshot,
@@ -32,6 +34,7 @@ from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import (
     AutomaticImportService,
     DurableClaimImportContext,
+    DurableDisableListImportContext,
     DurableInfoklImportContext,
     DurableKakeraImportContext,
     DurableKakeralootStateImportContext,
@@ -46,6 +49,7 @@ from moa.services.automatic_import_service import (
     DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.disablelist_projection_coordinator import DisableListProjectionResult
 from moa.services.claim_projection_coordinator import (
     ClaimProjectionCoordinator,
     ClaimProjectionResult,
@@ -104,6 +108,7 @@ SPHERE_MESSAGE = ":sp: +158\n:spG: +43 (Stock: 3,655)"
 SETTINGS_MESSAGE = "settings payload"
 BONUS_MESSAGE = "bonus payload"
 WISHLIST_MESSAGE = "wishlist payload"
+DISABLELIST_MESSAGE = "disablelist payload"
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 21, 12, 1, tzinfo=timezone.utc)
 
@@ -153,6 +158,53 @@ ZERO_WISHLIST = WishlistSnapshot(
             kakera_marker_present=False,
         ),
     ),
+)
+
+DISABLELIST = DisableListSnapshot(
+    slots_used=3,
+    slots_capacity=16,
+    total_disabled=1_000,
+    disabled_wa=400,
+    disabled_ha=300,
+    disabled_wg=200,
+    disabled_hg=100,
+    wa_pool_limit=0,
+    ha_pool_limit=None,
+    western_disabled=True,
+    irl_disabled=False,
+    entries=(
+        DisableListEntry(name="Kadokawa Corporation", disabled_count=400),
+        DisableListEntry(name="Marvel", disabled_count=300),
+        DisableListEntry(name="Kadokawa Corporation", disabled_count=400),
+    ),
+)
+EMPTY_DISABLELIST = DisableListSnapshot(
+    slots_used=0,
+    slots_capacity=0,
+    total_disabled=0,
+    disabled_wa=0,
+    disabled_ha=0,
+    disabled_wg=0,
+    disabled_hg=0,
+    wa_pool_limit=None,
+    ha_pool_limit=None,
+    western_disabled=False,
+    irl_disabled=False,
+    entries=(),
+)
+ZERO_DISABLELIST = DisableListSnapshot(
+    slots_used=0,
+    slots_capacity=16,
+    total_disabled=0,
+    disabled_wa=0,
+    disabled_ha=0,
+    disabled_wg=0,
+    disabled_hg=0,
+    wa_pool_limit=0,
+    ha_pool_limit=0,
+    western_disabled=False,
+    irl_disabled=True,
+    entries=(DisableListEntry(name="Zero Boundary", disabled_count=0),),
 )
 
 SPHERE_RESULT = SphereResultSnapshot(
@@ -4701,3 +4753,298 @@ def test_automatic_import_unrelated_route_does_not_invoke_bonus_coordinator() ->
     assert result.kind == "wishlist"
     coordinator.coordinate_player_bonus.assert_not_called()
     parser.parse_player_bonus.assert_not_called()
+
+
+def _disablelist_context(attempt_id: int | None = 83) -> DurableDisableListImportContext:
+    return DurableDisableListImportContext(
+        source_event_id=81,
+        attempt_id=attempt_id,
+        server="Persisted Lake",
+        account="persisted-account",
+        raw="persisted disablelist payload",
+        source="discord:message",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def test_automatic_import_non_durable_disablelist_keeps_catalog_path_with_configured_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = DISABLELIST
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        DISABLELIST_MESSAGE,
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="disablelist",
+    )
+
+    parser.parse_disablelist.assert_called_once_with(DISABLELIST_MESSAGE)
+    catalog.import_disablelist.assert_called_once_with(
+        DISABLELIST, "Lake", "ernieuuu", DISABLELIST_MESSAGE, "clipboard"
+    )
+    coordinator.coordinate_disablelist.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="disablelist",
+        imported_count=len(DISABLELIST.entries),
+        message="Imported disablelist.",
+    )
+
+
+def test_automatic_import_canonical_disablelist_router_behavior_remains_unchanged() -> None:
+    catalog = Mock(spec=CatalogService)
+    coordinator = Mock()
+    text = (
+        "ernieuuu's Disablelist (1/16)\n"
+        "1,000 disabled (400 $wa, 300 $ha, 200 $wg, 100 $hg)\n"
+        "Western animanga series are completely disabled ($togglewestern)\n"
+        "Kadokawa Corporation (400)\n"
+    )
+    service = AutomaticImportService(
+        catalog,
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(text, "clipboard", "Lake", "ernieuuu")
+
+    assert result.kind == "disablelist"
+    assert result.imported_count == 1
+    catalog.import_disablelist.assert_called_once()
+    coordinator.coordinate_disablelist.assert_not_called()
+
+
+def test_automatic_import_durable_disablelist_delegates_once_with_all_context() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = DISABLELIST
+    coordinator = Mock()
+    coordinator.coordinate_disablelist.return_value = DisableListProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        disablelist_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("disablelist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+    context = _disablelist_context()
+
+    result = service.import_message(
+        DISABLELIST_MESSAGE,
+        "caller-source",
+        detected_kind="disablelist",
+        observed_at=datetime(2026, 7, 21, 12, 2, tzinfo=timezone.utc),
+        durable_disablelist_context=context,
+    )
+
+    parser.parse_disablelist.assert_called_once_with(DISABLELIST_MESSAGE)
+    coordinator.coordinate_disablelist.assert_called_once_with(
+        source_event_id=context.source_event_id,
+        attempt_id=context.attempt_id,
+        state=DISABLELIST,
+        server=context.server,
+        account=context.account,
+        raw=context.raw,
+        source=context.source,
+        observed_at=context.observed_at,
+        finished_at=context.finished_at,
+    )
+    catalog.import_disablelist.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="disablelist",
+        imported_count=1,
+        message="Imported disablelist.",
+        import_event_id=92,
+        replay_skipped=False,
+        durable_success_recorded=True,
+    )
+
+
+def test_automatic_import_durable_disablelist_maps_succeeded_replay_without_catalog_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = DISABLELIST
+    coordinator = Mock()
+    coordinator.coordinate_disablelist.return_value = DisableListProjectionResult(
+        imported_count=0,
+        import_event_id=92,
+        disablelist_observation_id=93,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=("disablelist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        DISABLELIST_MESSAGE,
+        "caller-source",
+        detected_kind="disablelist",
+        durable_disablelist_context=_disablelist_context(attempt_id=None),
+    )
+
+    parser.parse_disablelist.assert_called_once_with(DISABLELIST_MESSAGE)
+    coordinator.coordinate_disablelist.assert_called_once()
+    assert coordinator.coordinate_disablelist.call_args.kwargs["attempt_id"] is None
+    catalog.import_disablelist.assert_not_called()
+    assert result == AutomaticImportResult(
+        kind="disablelist",
+        imported_count=0,
+        message="Imported disablelist.",
+        import_event_id=92,
+        replay_skipped=True,
+        durable_success_recorded=True,
+    )
+
+
+def test_automatic_import_durable_disablelist_requires_coordinator_before_catalog_write() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = DISABLELIST
+    service = AutomaticImportService(catalog, parser=parser, router=Mock())
+
+    with pytest.raises(RuntimeError, match="DisableListProjectionCoordinator"):
+        service.import_message(
+            DISABLELIST_MESSAGE,
+            "discord",
+            detected_kind="disablelist",
+            durable_disablelist_context=_disablelist_context(),
+        )
+
+    parser.parse_disablelist.assert_called_once_with(DISABLELIST_MESSAGE)
+    catalog.import_disablelist.assert_not_called()
+
+
+def test_automatic_import_durable_disablelist_coordinator_failure_does_not_fallback() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = DISABLELIST
+    coordinator = Mock()
+    coordinator.coordinate_disablelist.side_effect = RuntimeError("coordinator failed")
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(RuntimeError, match="coordinator failed"):
+        service.import_message(
+            DISABLELIST_MESSAGE,
+            "discord",
+            detected_kind="disablelist",
+            durable_disablelist_context=_disablelist_context(),
+        )
+
+    parser.parse_disablelist.assert_called_once_with(DISABLELIST_MESSAGE)
+    catalog.import_disablelist.assert_not_called()
+
+
+def test_automatic_import_malformed_disablelist_does_not_invoke_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.side_effect = ValueError("invalid disablelist response")
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    with pytest.raises(ValueError, match="invalid disablelist response"):
+        service.import_message(
+            DISABLELIST_MESSAGE,
+            "discord",
+            detected_kind="disablelist",
+            durable_disablelist_context=_disablelist_context(),
+        )
+
+    coordinator.coordinate_disablelist.assert_not_called()
+    catalog.import_disablelist.assert_not_called()
+
+
+def test_automatic_import_antidisable_route_does_not_invoke_disablelist_coordinator() -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_antidisable_page.return_value = Mock(
+        series_imported=2, page_number=1, page_count=2
+    )
+    catalog.import_antidisable_page.return_value = Mock(
+        series_imported=2, page_number=1, page_count=2
+    )
+    coordinator = Mock()
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    result = service.import_message(
+        "antidisable page",
+        "clipboard",
+        "Lake",
+        "ernieuuu",
+        detected_kind="antidisable",
+    )
+
+    assert result.kind == "antidisable"
+    catalog.import_antidisable_page.assert_called_once()
+    coordinator.coordinate_disablelist.assert_not_called()
+    parser.parse_disablelist.assert_not_called()
+
+
+@pytest.mark.parametrize("state", (DISABLELIST, EMPTY_DISABLELIST, ZERO_DISABLELIST))
+def test_automatic_import_durable_disablelist_forwards_boundaries_and_entries_unchanged(state) -> None:
+    catalog = Mock(spec=CatalogService)
+    parser = Mock()
+    parser.parse_disablelist.return_value = state
+    coordinator = Mock()
+    coordinator.coordinate_disablelist.return_value = DisableListProjectionResult(
+        imported_count=1,
+        import_event_id=92,
+        disablelist_observation_id=93,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("disablelist_observations", 93),
+    )
+    service = AutomaticImportService(
+        catalog,
+        parser=parser,
+        router=Mock(),
+        disablelist_projection_coordinator=coordinator,
+    )
+
+    service.import_message(
+        DISABLELIST_MESSAGE,
+        "discord",
+        detected_kind="disablelist",
+        durable_disablelist_context=_disablelist_context(),
+    )
+
+    forwarded = coordinator.coordinate_disablelist.call_args.kwargs["state"]
+    assert forwarded is state
+    assert forwarded.model_dump() == state.model_dump()
+    assert [entry.model_dump() for entry in forwarded.entries] == [
+        entry.model_dump() for entry in state.entries
+    ]
+    catalog.import_disablelist.assert_not_called()

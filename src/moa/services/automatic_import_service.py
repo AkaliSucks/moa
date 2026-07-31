@@ -8,6 +8,7 @@ from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.mudae import MudaeTextParser
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
+from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import (
@@ -181,6 +182,20 @@ class DurableWishlistImportContext:
     finished_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DurableDisableListImportContext:
+    """Durable lifecycle, scope, and payload metadata for one disablelist import."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
+
+
 class AutomaticImportService:
     """Import one recognized message without duplicating parser or storage rules."""
 
@@ -202,6 +217,7 @@ class AutomaticImportService:
         sphere_result_projection_coordinator: SphereResultProjectionCoordinator | None = None,
         player_bonus_projection_coordinator: PlayerBonusProjectionCoordinator | None = None,
         wishlist_projection_coordinator: WishlistProjectionCoordinator | None = None,
+        disablelist_projection_coordinator: DisableListProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -219,6 +235,7 @@ class AutomaticImportService:
         self._sphere_result_projection_coordinator = sphere_result_projection_coordinator
         self._player_bonus_projection_coordinator = player_bonus_projection_coordinator
         self._wishlist_projection_coordinator = wishlist_projection_coordinator
+        self._disablelist_projection_coordinator = disablelist_projection_coordinator
 
     def import_message(
         self,
@@ -243,6 +260,7 @@ class AutomaticImportService:
         durable_sphere_result_context: DurableSphereResultImportContext | None = None,
         durable_player_bonus_context: DurablePlayerBonusImportContext | None = None,
         durable_wishlist_context: DurableWishlistImportContext | None = None,
+        durable_disablelist_context: DurableDisableListImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -292,7 +310,11 @@ class AutomaticImportService:
                                     else (
                                         durable_wishlist_context.server
                                         if kind == "wishlist" and durable_wishlist_context is not None
-                                        else self._require(server_name, "server", kind)
+                                        else (
+                                            durable_disablelist_context.server
+                                            if kind == "disablelist" and durable_disablelist_context is not None
+                                            else self._require(server_name, "server", kind)
+                                        )
                                     )
                                 )
                             )
@@ -702,7 +724,11 @@ class AutomaticImportService:
                                 else (
                                     durable_wishlist_context.account
                                     if kind == "wishlist" and durable_wishlist_context is not None
-                                    else self._require(account_name, "account", kind)
+                                    else (
+                                        durable_disablelist_context.account
+                                        if kind == "disablelist" and durable_disablelist_context is not None
+                                        else self._require(account_name, "account", kind)
+                                    )
                                 )
                             )
                         )
@@ -786,8 +812,41 @@ class AutomaticImportService:
             )
         if kind == "disablelist":
             disablelist = self._parser.parse_disablelist(raw_message)
-            self._catalog.import_disablelist(disablelist, server, account, raw_message, source)
-            return AutomaticImportResult(kind=kind, imported_count=len(disablelist.entries), message="Imported disablelist.")
+            if durable_disablelist_context is None:
+                self._catalog.import_disablelist(disablelist, server, account, raw_message, source)
+                imported_count = len(disablelist.entries)
+                import_event_id = None
+                replay_skipped = False
+                durable_success_recorded = False
+            else:
+                coordinator = self._disablelist_projection_coordinator
+                if coordinator is None:
+                    raise RuntimeError(
+                        "A DisableListProjectionCoordinator is required for a durable disablelist import."
+                    )
+                coordinated = coordinator.coordinate_disablelist(
+                    source_event_id=durable_disablelist_context.source_event_id,
+                    attempt_id=durable_disablelist_context.attempt_id,
+                    state=disablelist,
+                    server=durable_disablelist_context.server,
+                    account=durable_disablelist_context.account,
+                    raw=durable_disablelist_context.raw,
+                    source=durable_disablelist_context.source,
+                    observed_at=durable_disablelist_context.observed_at,
+                    finished_at=durable_disablelist_context.finished_at,
+                )
+                imported_count = coordinated.imported_count
+                import_event_id = coordinated.import_event_id
+                replay_skipped = coordinated.replay_skipped
+                durable_success_recorded = coordinated.durable_success_recorded
+            return AutomaticImportResult(
+                kind=kind,
+                imported_count=imported_count,
+                message="Imported disablelist.",
+                import_event_id=import_event_id,
+                replay_skipped=replay_skipped,
+                durable_success_recorded=durable_success_recorded,
+            )
         if kind == "topx":
             page = self._parser.parse_unavailable_characters(raw_message)
             result = self._catalog.import_unavailable_characters(page, server, account, raw_message, source)
