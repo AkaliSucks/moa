@@ -3109,8 +3109,28 @@ class _MOADiagnosticDiscordClient(discord.Client):
         super().__init__(**kwargs)
         self._capture = capture
 
-    async def on_socket_raw_receive(self, payload: dict[str, Any]) -> None:
+    async def on_socket_raw_receive(self, payload: object) -> None:
+        decoded_payload: Mapping[str, Any] | None
+        if isinstance(payload, Mapping):
+            decoded_payload = payload
+        else:
+            if isinstance(payload, str):
+                raw_payload = payload
+            elif isinstance(payload, (bytes, bytearray, memoryview)):
+                try:
+                    raw_payload = bytes(payload).decode("utf-8")
+                except UnicodeDecodeError:
+                    return
+            else:
+                return
+            try:
+                decoded = json.loads(raw_payload)
+            except json.JSONDecodeError:
+                return
+            if not isinstance(decoded, Mapping):
+                return
+            decoded_payload = decoded
         try:
-            self._capture.capture_gateway_payload(payload)
+            self._capture.capture_gateway_payload(decoded_payload)
         except DiscordEventCaptureError:
             raise

@@ -898,6 +898,69 @@ def test_diagnostic_client_raw_callback_forwards_supported_events(tmp_path) -> N
     ]
 
 
+def test_diagnostic_client_raw_callback_normalizes_json_string_and_bytes(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    client = _MOADiagnosticDiscordClient(capture, intents=discord.Intents.none())
+    capture._client = client
+    payload = {
+        "t": "MESSAGE_CREATE",
+        "d": {
+            "id": "3",
+            "guild_id": "100",
+            "channel_id": "200",
+            "author": {"id": "300"},
+            "content": "synthetic private content",
+        },
+    }
+
+    async def exercise() -> None:
+        await client.on_socket_raw_receive(json.dumps(payload))
+        await client.on_socket_raw_receive(json.dumps(payload).encode("utf-8"))
+
+    asyncio.run(exercise())
+    capture.close()
+
+    records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [record["gateway_event_type"] for record in records] == [
+        "MESSAGE_CREATE",
+        "MESSAGE_CREATE",
+    ]
+    assert all(
+        record["message"] == {"id": "3", "author_id": "300"}
+        for record in records
+    )
+    assert "synthetic private content" not in output_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "{malformed synthetic payload",
+        json.dumps(["not", "an", "object"]),
+        json.dumps("synthetic scalar"),
+        object(),
+        b"\xff\xfe",
+    ],
+    ids=["malformed-json", "json-list", "json-scalar", "unsupported-type", "invalid-bytes"],
+)
+def test_diagnostic_client_raw_callback_ignores_invalid_payloads_without_exposing_them(
+    tmp_path, payload
+) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    client = _MOADiagnosticDiscordClient(capture, intents=discord.Intents.none())
+    capture._client = client
+
+    async def exercise() -> None:
+        await client.on_socket_raw_receive(payload)
+
+    asyncio.run(exercise())
+    capture.close()
+
+    assert output_path.read_text(encoding="utf-8") == ""
+
+
 def test_diagnostic_callback_observes_async_client_close_failure(tmp_path) -> None:
     capture, _output_path = _diagnostic_capture(tmp_path)
     client = _MOADiagnosticDiscordClient(capture, intents=discord.Intents.none())
