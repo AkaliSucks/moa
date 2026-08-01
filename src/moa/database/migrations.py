@@ -471,6 +471,51 @@ def _apply_durable_discord_source_event_account_attributions(
     )
 
 
+def _apply_durable_discord_antidisable_workflow_bindings(
+    connection: sqlite3.Connection,
+) -> None:
+    """Create durable Discord antidisable workflow and response bindings."""
+    statements = (
+        """
+        CREATE TABLE discord_antidisable_workflows (
+            harem_scan_id INTEGER PRIMARY KEY
+                REFERENCES harem_scans(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            request_message_aggregate_id INTEGER NOT NULL UNIQUE
+                REFERENCES discord_message_aggregates(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            requesting_user_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            CHECK(length(trim(requesting_user_id)) > 0),
+            CHECK(expires_at > created_at)
+        )
+        """,
+        """
+        CREATE TABLE discord_antidisable_response_bindings (
+            harem_scan_id INTEGER NOT NULL
+                REFERENCES discord_antidisable_workflows(harem_scan_id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            response_message_aggregate_id INTEGER NOT NULL UNIQUE
+                REFERENCES discord_message_aggregates(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            bound_at TEXT NOT NULL,
+            PRIMARY KEY (harem_scan_id, response_message_aggregate_id)
+        )
+        """,
+        """
+        CREATE INDEX ix_discord_antidisable_workflows_expires_at
+        ON discord_antidisable_workflows(expires_at, harem_scan_id)
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -496,5 +541,10 @@ CATALOG_MIGRATIONS = (
         version=5,
         name="durable-discord-source-event-account-attributions",
         apply=_apply_durable_discord_source_event_account_attributions,
+    ),
+    Migration(
+        version=6,
+        name="durable-discord-antidisable-workflow-bindings",
+        apply=_apply_durable_discord_antidisable_workflow_bindings,
     ),
 )
