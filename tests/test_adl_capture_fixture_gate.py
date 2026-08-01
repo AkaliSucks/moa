@@ -15,6 +15,10 @@ SCHEMA = "moa.discord-event-capture.v1"
 
 def _record(sequence: int, event: str, message_id: str, author_id: str, *, edited: str | None = None, components: bool = False, footer: bool = False) -> dict:
     message = {"id": message_id, "author_id": author_id, "type": 0, "created_at": f"2024-01-01T00:00:0{sequence}Z"}
+    if sequence in (1, 5, 6):
+        message["components"] = []
+    if sequence in (1, 5):
+        message["embeds"] = []
     if sequence in (2, 3, 4, 6):
         message["embeds"] = [{"type": "rich", "has_footer": footer}]
     if edited is not None:
@@ -26,6 +30,15 @@ def _record(sequence: int, event: str, message_id: str, author_id: str, *, edite
 
 def _capture() -> list[dict]:
     return [_record(1, "MESSAGE_CREATE", "request-a", "synthetic-user-a"), _record(2, "MESSAGE_CREATE", "response-a", "synthetic-mudae", components=True, footer=True), _record(3, "MESSAGE_UPDATE", "response-a", "synthetic-mudae", edited="2024-01-01T00:00:03Z", components=True, footer=True), _record(4, "MESSAGE_UPDATE", "response-a", "synthetic-mudae", edited="2024-01-01T00:00:04Z", components=True, footer=True), _record(5, "MESSAGE_CREATE", "request-b", "synthetic-user-b"), _record(6, "MESSAGE_CREATE", "response-b", "synthetic-mudae")]
+
+
+def _capture_without_empty_collection_keys() -> list[dict]:
+    records = _capture()
+    for sequence in (1, 5, 6):
+        records[sequence - 1]["message"].pop("components")
+    for sequence in (1, 5):
+        records[sequence - 1]["message"].pop("embeds")
+    return records
 
 
 def _jsonl(records: list[dict]) -> str:
@@ -60,9 +73,61 @@ def _expected_artifact() -> dict:
     }
 
 
-def test_gate_converts_authorized_six_record_capture() -> None:
+def test_gate_accepts_producer_empty_component_and_embed_collections() -> None:
     artifact = sanitize_jsonl(_jsonl(_capture()), **IDS)
     assert artifact == _expected_artifact()
+
+
+def test_gate_accepts_omitted_empty_collection_keys() -> None:
+    artifact = sanitize_jsonl(_jsonl(_capture_without_empty_collection_keys()), **IDS)
+    assert artifact == _expected_artifact()
+
+
+@pytest.mark.parametrize("sequence", [1, 5, 6])
+def test_gate_rejects_nonempty_semantically_empty_components(tmp_path: Path, sequence: int) -> None:
+    records = _capture()
+    injected = "synthetic-component-value"
+    records[sequence - 1]["message"]["components"] = [{"synthetic": injected}]
+    input_path = tmp_path / "synthetic.jsonl"
+    input_path.write_text(_jsonl(records), encoding="utf-8")
+    output = tmp_path / "fixture.json"
+    with pytest.raises(AdlFixtureGateError) as raised:
+        convert_file(input_path, output, **IDS)
+    assert not output.exists()
+    assert injected not in str(raised.value)
+
+
+@pytest.mark.parametrize("sequence", [1, 5])
+def test_gate_rejects_nonempty_request_embeds(tmp_path: Path, sequence: int) -> None:
+    records = _capture()
+    injected = "synthetic-embed-value"
+    records[sequence - 1]["message"]["embeds"] = [{"type": "rich", "description": injected}]
+    input_path = tmp_path / "synthetic.jsonl"
+    input_path.write_text(_jsonl(records), encoding="utf-8")
+    output = tmp_path / "fixture.json"
+    with pytest.raises(AdlFixtureGateError) as raised:
+        convert_file(input_path, output, **IDS)
+    assert not output.exists()
+    assert injected not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("components", None),
+        ("components", {}),
+        ("components", "synthetic-components"),
+        ("embeds", None),
+        ("embeds", {}),
+        ("embeds", "synthetic-embeds"),
+    ],
+)
+def test_gate_rejects_malformed_empty_role_collections(field: str, value: object) -> None:
+    records = _capture()
+    sequence = 6 if field == "components" else 1
+    records[sequence - 1]["message"][field] = value
+    with pytest.raises(AdlFixtureGateError):
+        sanitize_jsonl(_jsonl(records), **IDS)
 
 
 def test_gate_output_is_byte_deterministic() -> None:

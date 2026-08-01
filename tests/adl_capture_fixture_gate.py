@@ -195,12 +195,13 @@ def sanitize_records(
             elif current_shape != component_shapes:
                 _fail("component hash equivalence is inconsistent")
         elif "components" in message:
-            _fail("components are not allowed on this record")
+            if not isinstance(components, list) or components:
+                _fail("components are not allowed on this record")
 
         embeds = message.get("embeds")
         normalized_embeds: list[dict[str, Any]] = []
         if position in (0, 4):
-            if embeds is not None:
+            if "embeds" in message and (not isinstance(embeds, list) or embeds):
                 _fail("request embeds are not allowed")
         else:
             if not isinstance(embeds, list) or len(embeds) != 1:
@@ -215,8 +216,6 @@ def sanitize_records(
             if position in (1, 2, 3) and embed.get("has_footer") is not True:
                 _fail("response embed footer is required")
             normalized_embeds.append({"has_footer": embed.get("has_footer") is True, "type": "rich"})
-        if position == 5 and "components" in message:
-            _fail("record six cannot contain components")
         semantic_author = "mudae" if message["author_id"] == mudae_user_id else user_aliases[message["author_id"]]
         normalized_records_message = {
             "alias": semantic_message,
