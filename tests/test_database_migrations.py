@@ -28,6 +28,8 @@ def _make_baseline_database(database_path):
     """Create a version-1 database to exercise the version-2 upgrade path."""
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
+        connection.execute("DROP TABLE discord_antidisable_response_bindings")
+        connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DROP TABLE discord_source_event_server_attributions")
         connection.execute("DROP TABLE discord_source_event_account_attributions")
         connection.execute("DROP TABLE discord_projection_links")
@@ -39,6 +41,15 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 2")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+
+
+def _make_version_5_database(database_path):
+    CatalogRepository(database_path)
+    with _open_database(database_path) as connection:
+        connection.execute("DROP TABLE discord_antidisable_response_bindings")
+        connection.execute("DROP TABLE discord_antidisable_workflows")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 6")
 
 
 def _insert_aggregate(
@@ -160,6 +171,77 @@ def _insert_attempt(
     ).lastrowid
 
 
+def _insert_account_context(connection, *, suffix="1"):
+    server_context_id = connection.execute(
+        """
+        INSERT INTO server_contexts (
+            name, normalized_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (f"Server {suffix}", f"server-{suffix}", "now", "now"),
+    ).lastrowid
+    return connection.execute(
+        """
+        INSERT INTO account_contexts (
+            server_context_id, name, normalized_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (server_context_id, f"Account {suffix}", f"account-{suffix}", "now", "now"),
+    ).lastrowid
+
+
+def _insert_harem_scan(connection, account_context_id, *, scan_kind="antidisable"):
+    return connection.execute(
+        """
+        INSERT INTO harem_scans (
+            account_context_id, expected_page_count, started_at, scan_kind
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (account_context_id, 2, "2026-07-18T00:00:00+00:00", scan_kind),
+    ).lastrowid
+
+
+def _insert_antidisable_workflow(
+    connection,
+    harem_scan_id,
+    request_message_aggregate_id,
+    *,
+    requesting_user_id="user-1",
+    created_at="2026-07-18T00:00:00+00:00",
+    expires_at="2026-07-18T00:05:00+00:00",
+):
+    connection.execute(
+        """
+        INSERT INTO discord_antidisable_workflows (
+            harem_scan_id, request_message_aggregate_id, requesting_user_id,
+            created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            harem_scan_id,
+            request_message_aggregate_id,
+            requesting_user_id,
+            created_at,
+            expires_at,
+        ),
+    )
+
+
+def _insert_antidisable_response_binding(
+    connection,
+    harem_scan_id,
+    response_message_aggregate_id,
+):
+    connection.execute(
+        """
+        INSERT INTO discord_antidisable_response_bindings (
+            harem_scan_id, response_message_aggregate_id, bound_at
+        ) VALUES (?, ?, ?)
+        """,
+        (harem_scan_id, response_message_aggregate_id, "2026-07-18T00:01:00+00:00"),
+    )
+
+
 def _insert_projection_link(
     connection,
     source_event_id,
@@ -219,6 +301,8 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "discord_projection_links",
         "discord_source_event_server_attributions",
         "discord_source_event_account_attributions",
+        "discord_antidisable_workflows",
+        "discord_antidisable_response_bindings",
     } <= tables
     assert _migration_rows(database_path) == [
         (1, "catalog-schema-baseline"),
@@ -226,6 +310,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
+        (6, "durable-discord-antidisable-workflow-bindings"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -239,6 +324,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "uq_discord_revision_unversioned",
         "uq_discord_active_revision",
         "uq_discord_processing_attempt",
+        "ix_discord_antidisable_workflows_expires_at",
     } <= indexes
 
     expected_columns = {
@@ -326,6 +412,18 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "created_at",
             "updated_at",
         },
+        "discord_antidisable_workflows": {
+            "harem_scan_id",
+            "request_message_aggregate_id",
+            "requesting_user_id",
+            "created_at",
+            "expires_at",
+        },
+        "discord_antidisable_response_bindings": {
+            "harem_scan_id",
+            "response_message_aggregate_id",
+            "bound_at",
+        },
     }
     with _open_database(database_path) as connection:
         for table, columns in expected_columns.items():
@@ -333,6 +431,325 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
                 row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
             }
             assert actual == columns
+
+
+def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        workflow_columns = {
+            row[1]: row for row in connection.execute(
+                "PRAGMA table_info(discord_antidisable_workflows)"
+            ).fetchall()
+        }
+        response_columns = {
+            row[1]: row for row in connection.execute(
+                "PRAGMA table_info(discord_antidisable_response_bindings)"
+            ).fetchall()
+        }
+        assert workflow_columns["harem_scan_id"][5] == 1
+        assert {
+            name: workflow_columns[name][3]
+            for name in (
+                "request_message_aggregate_id",
+                "requesting_user_id",
+                "created_at",
+                "expires_at",
+            )
+        } == {
+            "request_message_aggregate_id": 1,
+            "requesting_user_id": 1,
+            "created_at": 1,
+            "expires_at": 1,
+        }
+        assert {
+            name: response_columns[name][5]
+            for name in ("harem_scan_id", "response_message_aggregate_id")
+        } == {"harem_scan_id": 1, "response_message_aggregate_id": 2}
+        assert all(row[3] == 1 for row in response_columns.values())
+
+        workflow_foreign_keys = {
+            (row[2], row[3], row[4], row[5], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(discord_antidisable_workflows)"
+            ).fetchall()
+        }
+        assert workflow_foreign_keys == {
+            (
+                "harem_scans",
+                "harem_scan_id",
+                "id",
+                "RESTRICT",
+                "RESTRICT",
+            ),
+            (
+                "discord_message_aggregates",
+                "request_message_aggregate_id",
+                "id",
+                "RESTRICT",
+                "RESTRICT",
+            ),
+        }
+        response_foreign_keys = {
+            (row[2], row[3], row[4], row[5], row[6])
+            for row in connection.execute(
+                "PRAGMA foreign_key_list(discord_antidisable_response_bindings)"
+            ).fetchall()
+        }
+        assert response_foreign_keys == {
+            (
+                "discord_antidisable_workflows",
+                "harem_scan_id",
+                "harem_scan_id",
+                "RESTRICT",
+                "RESTRICT",
+            ),
+            (
+                "discord_message_aggregates",
+                "response_message_aggregate_id",
+                "id",
+                "RESTRICT",
+                "RESTRICT",
+            ),
+        }
+        assert connection.execute(
+            "PRAGMA index_info(ix_discord_antidisable_workflows_expires_at)"
+        ).fetchall() == [
+            (0, 4, "expires_at"),
+            (1, 0, "harem_scan_id"),
+        ]
+
+
+def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_5_database(database_path)
+
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "INSERT INTO characters "
+            "(name, series, normalized_name, normalized_series, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("Asuna", "Sword Art Online", "asuna", "sword art online", "now", "now"),
+        )
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        source_event_id = _insert_source_event(connection, revision_id)
+        account_context_id = _insert_account_context(connection)
+        scan_id = _insert_harem_scan(connection, account_context_id)
+        before = {
+            "characters": connection.execute(
+                "SELECT id, name, series FROM characters"
+            ).fetchall(),
+            "aggregates": connection.execute(
+                "SELECT id, guild_id, channel_id, message_id "
+                "FROM discord_message_aggregates"
+            ).fetchall(),
+            "source_events": connection.execute(
+                "SELECT id, event_key, revision_id FROM discord_source_events"
+            ).fetchall(),
+            "scans": connection.execute(
+                "SELECT id, account_context_id, scan_kind FROM harem_scans"
+            ).fetchall(),
+        }
+        assert source_event_id == before["source_events"][0][0]
+        assert scan_id == before["scans"][0][0]
+        assert _migration_rows(database_path)[-1] == (
+            5,
+            "durable-discord-source-event-account-attributions",
+        )
+        connection.commit()
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        assert connection.execute(
+            "SELECT id, name, series FROM characters"
+        ).fetchall() == before["characters"]
+        assert connection.execute(
+            "SELECT id, guild_id, channel_id, message_id "
+            "FROM discord_message_aggregates"
+        ).fetchall() == before["aggregates"]
+        assert connection.execute(
+            "SELECT id, event_key, revision_id FROM discord_source_events"
+        ).fetchall() == before["source_events"]
+        assert connection.execute(
+            "SELECT id, account_context_id, scan_kind FROM harem_scans"
+        ).fetchall() == before["scans"]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 0
+        assert _migration_rows(database_path)[-1] == (
+            6,
+            "durable-discord-antidisable-workflow-bindings",
+        )
+
+
+def test_failed_antidisable_workflow_migration_rolls_back_schema_and_metadata(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_5_database(database_path)
+
+    with _open_database(database_path) as connection:
+
+        def fail_after_schema(migration_connection):
+            CATALOG_MIGRATIONS[5].apply(migration_connection)
+            raise RuntimeError("migration 6 failed")
+
+        with pytest.raises(RuntimeError, match="migration 6 failed"):
+            run_migrations(
+                connection,
+                CATALOG_MIGRATIONS[:5]
+                + (Migration(6, "failing-antidisable-bindings", fail_after_schema),),
+            )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,)]
+        assert connection.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE name IN (
+                'discord_antidisable_workflows',
+                'discord_antidisable_response_bindings',
+                'ix_discord_antidisable_workflows_expires_at'
+            )
+            """
+        ).fetchall() == []
+
+
+def test_antidisable_workflow_and_response_foreign_keys_require_parents(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        account_context_id = _insert_account_context(connection)
+        scan_id = _insert_harem_scan(connection, account_context_id)
+        request_aggregate_id = _insert_aggregate(connection)
+        response_aggregate_id = _insert_aggregate(
+            connection, message_id="response-message-1"
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_workflow(connection, 999, request_aggregate_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_workflow(connection, scan_id, 999)
+
+        _insert_antidisable_workflow(connection, scan_id, request_aggregate_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_response_binding(connection, 999, response_aggregate_id)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_response_binding(connection, scan_id, 999)
+        _insert_antidisable_response_binding(
+            connection, scan_id, response_aggregate_id
+        )
+
+
+def test_antidisable_bindings_enforce_uniqueness_and_allow_concurrent_shape(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        account_context_id = _insert_account_context(connection)
+        first_scan_id = _insert_harem_scan(connection, account_context_id)
+        second_scan_id = _insert_harem_scan(connection, account_context_id)
+        third_scan_id = _insert_harem_scan(connection, account_context_id)
+        request_ids = [
+            _insert_aggregate(connection, message_id=f"request-message-{number}")
+            for number in range(1, 4)
+        ]
+        response_ids = [
+            _insert_aggregate(connection, message_id=f"response-message-{number}")
+            for number in range(1, 3)
+        ]
+
+        _insert_antidisable_workflow(
+            connection,
+            first_scan_id,
+            request_ids[0],
+            requesting_user_id="same-user",
+        )
+        _insert_antidisable_workflow(
+            connection,
+            second_scan_id,
+            request_ids[1],
+            requesting_user_id="same-user",
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_workflow(connection, first_scan_id, request_ids[2])
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_workflow(connection, third_scan_id, request_ids[0])
+
+        _insert_antidisable_response_binding(connection, first_scan_id, response_ids[0])
+        _insert_antidisable_response_binding(connection, first_scan_id, response_ids[1])
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_response_binding(connection, first_scan_id, response_ids[0])
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_antidisable_response_binding(connection, second_scan_id, response_ids[0])
+
+        assert connection.execute(
+            "SELECT harem_scan_id, requesting_user_id "
+            "FROM discord_antidisable_workflows ORDER BY harem_scan_id"
+        ).fetchall() == [
+            (first_scan_id, "same-user"),
+            (second_scan_id, "same-user"),
+        ]
+        assert connection.execute(
+            "SELECT response_message_aggregate_id "
+            "FROM discord_antidisable_response_bindings "
+            "WHERE harem_scan_id = ? ORDER BY response_message_aggregate_id",
+            (first_scan_id,),
+        ).fetchall() == [(response_ids[0],), (response_ids[1],)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings "
+            "WHERE harem_scan_id = ?",
+            (second_scan_id,),
+        ).fetchone()[0] == 0
+
+
+def test_antidisable_workflow_rejects_blank_user_and_nonfuture_expiry(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        account_context_id = _insert_account_context(connection)
+        scan_id = _insert_harem_scan(connection, account_context_id)
+        request_aggregate_id = _insert_aggregate(connection)
+
+        for blank_user_id in ("", "   "):
+            with pytest.raises(sqlite3.IntegrityError):
+                _insert_antidisable_workflow(
+                    connection,
+                    scan_id,
+                    request_aggregate_id,
+                    requesting_user_id=blank_user_id,
+                )
+        for invalid_expiry in (
+            "2026-07-18T00:00:00+00:00",
+            "2026-07-17T23:59:59+00:00",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                _insert_antidisable_workflow(
+                    connection,
+                    scan_id,
+                    request_aggregate_id,
+                    expires_at=invalid_expiry,
+                )
+
+        _insert_antidisable_workflow(
+            connection,
+            scan_id,
+            request_aggregate_id,
+            expires_at="2026-07-18T00:00:01+00:00",
+        )
 
 
 def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(tmp_path) -> None:
@@ -363,6 +780,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
+        (6, "durable-discord-antidisable-workflow-bindings"),
     ]
 
 
@@ -440,10 +858,13 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
     database_path = tmp_path / "catalog.db"
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
+        connection.execute("DROP TABLE discord_antidisable_response_bindings")
+        connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DROP TABLE discord_source_event_server_attributions")
         connection.execute("DROP TABLE discord_source_event_account_attributions")
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1108,6 +1529,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
+        (6, "durable-discord-antidisable-workflow-bindings"),
     ]
 
 
@@ -1133,6 +1555,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (3, "durable-discord-projection-links"),
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
+        (6, "durable-discord-antidisable-workflow-bindings"),
     ]
 
 
@@ -1218,11 +1641,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (6, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (7, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(6,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(7,)]
