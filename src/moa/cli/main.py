@@ -17,6 +17,7 @@ from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
 from moa.services.action_service import ActionService
+from moa.services.antidisable_page_projection_coordinator import AntidisablePageProjectionCoordinator
 from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
@@ -351,6 +352,10 @@ def discord_listen(
             catalog_repository,
             discord_message_repository,
         )
+        antidisable_page_projection_coordinator = AntidisablePageProjectionCoordinator(
+            catalog_repository,
+            discord_message_repository,
+        )
         importer = AutomaticImportService(
             catalog_service,
             roll_projection_coordinator=roll_projection_coordinator,
@@ -366,6 +371,7 @@ def discord_listen(
             player_bonus_projection_coordinator=player_bonus_projection_coordinator,
             disablelist_projection_coordinator=disablelist_projection_coordinator,
             wishlist_projection_coordinator=wishlist_projection_coordinator,
+            antidisable_page_projection_coordinator=antidisable_page_projection_coordinator,
         )
         DiscordListenerService(
             catalog_service=catalog_service,

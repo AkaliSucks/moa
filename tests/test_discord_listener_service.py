@@ -19,6 +19,9 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.core.config import ConfigAccount, ConfigService, MOAConfig
 from moa.services.automatic_import_service import AutomaticImportService
+from moa.services.antidisable_page_projection_coordinator import (
+    AntidisablePageProjectionCoordinator,
+)
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
@@ -1242,6 +1245,10 @@ def _listener_with_two_configured_users(tmp_path):
             catalog_repository,
             discord_repository,
         ),
+        antidisable_page_projection_coordinator=AntidisablePageProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
         kakeraloot_state_projection_coordinator=KakeralootStateProjectionCoordinator(
             catalog_repository,
             discord_repository,
@@ -2373,6 +2380,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 catalog_repository,
                 repository,
             ),
+            antidisable_page_projection_coordinator=AntidisablePageProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
         )
     listener = DiscordListenerService(
         config_service=config,
@@ -2454,6 +2465,10 @@ def _attribution_listener(tmp_path, config_name, accounts, *, importer=None):
                 repository,
             ),
             disablelist_projection_coordinator=DisableListProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            antidisable_page_projection_coordinator=AntidisablePageProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),
@@ -2818,6 +2833,60 @@ def _durable_disablelist_message(
         embeds=(),
         edited_at=None,
     )
+
+
+def _durable_antidisable_message(
+    message_id: int = 1400,
+    *,
+    guild_id: int = 123,
+    channel_id: int = 900,
+    content: str | None = None,
+    edited_at: datetime | None = None,
+):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=guild_id),
+        channel=SimpleNamespace(id=channel_id),
+        author=SimpleNamespace(bot=True, id=999),
+        # Sanitized real Mudae `$adl` response; no response-side user attribution.
+        interaction_metadata=None,
+        content=(
+            content
+            or "ernieuuu's Antidisablelist (83/500)\n"
+            "2,614 antidisabled characters\n"
+            "OSHI NO KO\n"
+            "Chainsaw Man\n"
+            "Page 1 / 6"
+        ),
+        embeds=(),
+        edited_at=edited_at,
+        created_at=datetime(2026, 8, 1, 12, 1, tzinfo=timezone.utc),
+    )
+
+
+def _adl_response_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_antidisable_response_bindings), "
+                "(SELECT COUNT(*) FROM import_events WHERE kind = 'antidisable'), "
+                "(SELECT COUNT(*) FROM harem_scan_pages WHERE harem_scan_id IN "
+                "(SELECT harem_scan_id FROM discord_antidisable_response_bindings)), "
+                "(SELECT COUNT(*) FROM discord_source_events WHERE status = 'unresolved_attribution')"
+            ).fetchone()
+        )
+
+
+def _adl_response_source_event(database_path, message_id: int):
+    with connect(database_path) as connection:
+        return connection.execute(
+            "SELECT discord_source_events.id FROM discord_source_events "
+            "JOIN discord_message_revisions ON discord_message_revisions.id = revision_id "
+            "JOIN discord_message_aggregates ON discord_message_aggregates.id = aggregate_id "
+            "WHERE discord_message_aggregates.message_id = ?",
+            (str(message_id),),
+        ).fetchone()
 
 
 def _receipt_rows(database_path, table: str):
@@ -8624,6 +8693,7 @@ def test_listener_non_durable_disablelist_keeps_direct_catalog_path(tmp_path) ->
 
 def test_listener_adl_never_enters_disablelist_durable_path(tmp_path) -> None:
     listener, _repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
     coordinator = listener._importer._disablelist_projection_coordinator
     coordinator.coordinate_disablelist = Mock()
     importer = Mock(wraps=listener._importer)
@@ -8638,6 +8708,7 @@ def test_listener_adl_never_enters_disablelist_durable_path(tmp_path) -> None:
             "Page 1 / 6"
         ),
     )
+    message.created_at = _ADL_REQUEST_TIME + timedelta(minutes=1)
     message.interaction_metadata = SimpleNamespace(
         name="adl", user=SimpleNamespace(id=456)
     )
@@ -8648,7 +8719,7 @@ def test_listener_adl_never_enters_disablelist_durable_path(tmp_path) -> None:
     importer.import_message.assert_called_once()
     assert importer.import_message.call_args.kwargs["detected_kind"] == "antidisable"
     assert "durable_disablelist_context" not in importer.import_message.call_args.kwargs
-    assert _durable_disablelist_counts(database_path) == (1, 1, 0, 0, 0, 1, 1)
+    assert _durable_disablelist_counts(database_path) == (2, 1, 0, 0, 1, 1, 1)
 
 
 _ADL_REQUEST_TIME = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
@@ -8883,3 +8954,325 @@ def test_listener_adl_receipt_failure_does_not_advance_pending_state(tmp_path) -
 
     assert _adl_durable_counts(database_path) == (0, 0, 0, 0, 0, 0)
     assert listener._pending_contexts == {}
+
+
+def test_listener_adl_response_binds_one_active_workflow_and_projects_same_scan(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    request = _adl_request_message()
+    response = _durable_antidisable_message()
+
+    asyncio.run(listener.handle_message(request))
+    workflow = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(request)
+    )
+    asyncio.run(listener.handle_bot_response(response))
+
+    binding = repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    )
+    assert workflow is not None
+    assert binding is not None
+    assert binding.harem_scan_id == workflow.harem_scan_id
+    assert _adl_response_counts(database_path)[:3] == (1, 1, 1)
+    with connect(database_path) as connection:
+        page = connection.execute(
+            "SELECT harem_scan_id, page_number FROM harem_scan_pages"
+        ).fetchone()
+        attribution = connection.execute(
+            "SELECT status, server_name, account_name "
+            "FROM discord_source_event_account_attributions"
+        ).fetchone()
+    assert tuple(page) == (workflow.harem_scan_id, 1)
+    assert tuple(attribution) == ("resolved", "Test Server", "user_a")
+
+
+def test_listener_adl_bound_update_skips_active_candidate_lookup_and_reuses_scan(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    request = _adl_request_message()
+    first = _durable_antidisable_message()
+    update = _durable_antidisable_message(
+        content=(
+            "ernieuuu's Antidisablelist (83/500)\n"
+            "2,614 antidisabled characters\n"
+            "Demon Slayer\n"
+            "Page 2 / 6"
+        ),
+        edited_at=datetime(2026, 8, 1, 12, 2, tzinfo=timezone.utc),
+    )
+    asyncio.run(listener.handle_message(request))
+    asyncio.run(listener.handle_bot_response(first))
+    workflow = repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(first)
+    )
+    repository.active_antidisable_workflows_for_channel = Mock(
+        side_effect=AssertionError("bound response queried active candidates")
+    )
+
+    asyncio.run(listener.handle_bot_response(update))
+
+    assert workflow is not None
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(first)
+    ).harem_scan_id == workflow.harem_scan_id
+    with connect(database_path) as connection:
+        pages = connection.execute(
+            "SELECT harem_scan_id, page_number FROM harem_scan_pages ORDER BY page_number"
+        ).fetchall()
+    assert [tuple(row) for row in pages] == [(workflow.harem_scan_id, 1), (workflow.harem_scan_id, 2)]
+
+
+def test_listener_adl_duplicate_create_reuses_binding_and_projection(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    response = _durable_antidisable_message()
+
+    asyncio.run(listener.handle_bot_response(response))
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert _adl_response_counts(database_path)[:3] == (1, 1, 1)
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is not None
+
+
+def test_listener_adl_duplicate_update_reuses_stable_binding_and_projection(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    response = _durable_antidisable_message()
+    update = _durable_antidisable_message(
+        content=(
+            "ernieuuu's Antidisablelist (83/500)\n"
+            "2,614 antidisabled characters\n"
+            "Demon Slayer\n"
+            "Page 2 / 6"
+        ),
+        edited_at=datetime(2026, 8, 1, 12, 2, tzinfo=timezone.utc),
+    )
+    asyncio.run(listener.handle_bot_response(response))
+    asyncio.run(listener.handle_bot_response(update))
+    asyncio.run(listener.handle_bot_response(update))
+
+    assert _adl_response_counts(database_path)[:3] == (1, 2, 2)
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is not None
+
+
+def test_listener_adl_two_active_workflows_remain_ambiguous(tmp_path) -> None:
+    listener, repository, database_path = _attribution_listener(
+        tmp_path,
+        "adl-ambiguous-users.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+    asyncio.run(listener.handle_message(_adl_request_message(1300, user_id=456)))
+    asyncio.run(listener.handle_message(_adl_request_message(1301, user_id=789)))
+
+    asyncio.run(listener.handle_bot_response(_durable_antidisable_message()))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    source_event = _adl_response_source_event(database_path, 1400)
+    assert source_event is not None
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT status FROM discord_source_events WHERE id = ?", source_event
+        ).fetchone()
+        attribution = connection.execute(
+            "SELECT status FROM discord_source_event_account_attributions WHERE source_event_id = ?",
+            source_event,
+        ).fetchone()
+    assert event[0] == "unresolved_attribution"
+    assert attribution[0] == "ambiguous"
+    assert len(repository.active_antidisable_workflows_for_channel(
+        "123", "900", datetime(2026, 8, 1, 12, 1, tzinfo=timezone.utc)
+    )) == 2
+
+
+def test_listener_adl_same_user_repeated_requests_remain_ambiguous(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message(1300)))
+    asyncio.run(listener.handle_message(_adl_request_message(1301)))
+
+    asyncio.run(listener.handle_bot_response(_durable_antidisable_message()))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert _adl_response_counts(database_path)[3] == 1
+
+
+def test_listener_adl_zero_candidates_remains_unresolved_without_projection(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_bot_response(_durable_antidisable_message()))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert _adl_response_counts(database_path)[3] == 1
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 0
+
+
+def test_listener_adl_expired_workflow_is_not_eligible(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    old = _ADL_REQUEST_TIME - timedelta(minutes=10)
+    request = _adl_request_message(created_at=old)
+    asyncio.run(listener.handle_message(request))
+    workflow = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(request)
+    )
+    response = _durable_antidisable_message()
+
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert workflow is not None
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is None
+
+
+def test_listener_adl_completed_workflow_is_not_eligible(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    request = _adl_request_message()
+    asyncio.run(listener.handle_message(request))
+    workflow = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(request)
+    )
+    assert workflow is not None
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE harem_scans SET completed_at = ? WHERE id = ?",
+            (
+                datetime(2026, 8, 1, 12, 1, tzinfo=timezone.utc).isoformat(),
+                workflow.harem_scan_id,
+            ),
+        )
+
+    response = _durable_antidisable_message()
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is None
+
+
+@pytest.mark.parametrize("scope", [(123, 901), (999, 900)])
+def test_listener_adl_response_never_binds_across_guild_or_channel(
+    tmp_path, scope
+) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    response = _durable_antidisable_message(guild_id=scope[0], channel_id=scope[1])
+
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is None
+
+
+def test_listener_adl_unbound_update_binds_one_candidate(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    response = _durable_antidisable_message(
+        edited_at=datetime(2026, 8, 1, 12, 2, tzinfo=timezone.utc)
+    )
+
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is not None
+    assert _adl_response_counts(database_path)[:3] == (1, 1, 1)
+
+
+def test_listener_adl_unbound_update_with_multiple_candidates_remains_ambiguous(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message(1300)))
+    asyncio.run(listener.handle_message(_adl_request_message(1301)))
+    response = _durable_antidisable_message(
+        edited_at=datetime(2026, 8, 1, 12, 2, tzinfo=timezone.utc)
+    )
+
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)
+    assert _adl_response_counts(database_path)[3] == 1
+
+
+def test_listener_adl_restart_recovers_bound_workflow_without_candidate_lookup(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    request = _adl_request_message()
+    response = _durable_antidisable_message()
+    asyncio.run(listener.handle_message(request))
+    asyncio.run(listener.handle_bot_response(response))
+    first = repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    )
+
+    restarted, restarted_repository, _ = _durable_listener(tmp_path)
+    restarted_repository.active_antidisable_workflows_for_channel = Mock(
+        side_effect=AssertionError("restart queried active candidates for bound response")
+    )
+    update = _durable_antidisable_message(
+        content=(
+            "ernieuuu's Antidisablelist (83/500)\n"
+            "2,614 antidisabled characters\n"
+            "Demon Slayer\n"
+            "Page 2 / 6"
+        ),
+        edited_at=datetime(2026, 8, 1, 12, 2, tzinfo=timezone.utc),
+    )
+
+    asyncio.run(restarted.handle_bot_response(update))
+
+    assert first is not None
+    assert restarted_repository.get_antidisable_workflow_by_response_message(
+        restarted._message_aggregate_key(response)
+    ) == first
+    assert _adl_response_counts(database_path)[:3] == (1, 2, 2)
+
+
+def test_listener_adl_binding_survives_projection_failure_and_retries_from_binding(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    response = _durable_antidisable_message()
+    coordinator = listener._importer._antidisable_page_projection_coordinator
+    original_coordinate = coordinator.coordinate_antidisable_page
+    coordinator.coordinate_antidisable_page = Mock(
+        side_effect=RuntimeError("projection unavailable")
+    )
+
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) is not None
+    assert _adl_response_counts(database_path)[:3] == (1, 0, 0)
+    coordinator.coordinate_antidisable_page = original_coordinate
+    restarted, restarted_repository, _ = _durable_listener(tmp_path)
+    restarted_repository.active_antidisable_workflows_for_channel = Mock(
+        side_effect=AssertionError("retry queried active candidates after durable binding")
+    )
+
+    asyncio.run(restarted.handle_bot_response(response))
+
+    assert _adl_response_counts(database_path)[:3] == (1, 1, 1)
+
+
+def test_listener_adl_unrelated_mudae_response_cannot_bind_by_candidate_count(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    asyncio.run(listener.handle_message(_adl_request_message()))
+    unrelated = _durable_roll_message(message_id=1401)
+    unrelated.interaction_metadata = None
+
+    asyncio.run(listener.handle_bot_response(unrelated))
+
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(unrelated)
+    ) is None
+    assert _adl_response_counts(database_path)[:3] == (0, 0, 0)

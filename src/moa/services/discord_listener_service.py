@@ -21,6 +21,7 @@ from moa.core.config import ConfigAccount, ConfigService
 from moa.database.sqlite import connect
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.models.discord_identity import MessageAggregateKey, SourcePlatform
 from moa.models.discord_message_mapping import build_message_receive_envelope
 from moa.repositories.discord_message_repository import (
     DiscordMessageProcessingConflictError,
@@ -32,6 +33,7 @@ from moa.repositories.discord_message_repository import (
 )
 from moa.services.automatic_import_service import (
     AutomaticImportService,
+    DurableAntidisablePageImportContext,
     DurableClaimImportContext,
     DurableDisableListImportContext,
     DurableInfoklImportContext,
@@ -649,6 +651,7 @@ class DiscordListenerService:
         "husbandog",
     }
     _DURABLE_IMPORT_KINDS = {
+        "antidisable",
         "bonus",
         "claim",
         "infokl",
@@ -1092,6 +1095,29 @@ class DiscordListenerService:
                     error,
                 )
                 return
+        durable_antidisable = False
+        durable_antidisable_scan_id: int | None = None
+        if self._discord_message_repository is not None:
+            structural_kind = self._resolve_message_kind("antidisable", raw_message)
+            if structural_kind == "antidisable":
+                durable_resolution = self._resolve_durable_antidisable_response(
+                    message,
+                    raw_message,
+                    persisted_attribution,
+                    received_event,
+                )
+                if durable_resolution is None:
+                    return
+                context, durable_antidisable_scan_id = durable_resolution
+                durable_antidisable = True
+                kind = structural_kind
+            else:
+                context = None
+                kind = None
+        else:
+            context = None
+            kind = None
+
         self._message_cache[message.id] = message
         if len(self._message_cache) > 2000:
             self._message_cache = dict(list(self._message_cache.items())[-1000:])
@@ -1099,21 +1125,22 @@ class DiscordListenerService:
         # arrive after another command (for example `$tu`) has replaced the
         # channel's latest-command context, so keep active scan context
         # independent from that per-channel command context.
-        context = self._context_from_active_scan(message, raw_message)
-        if context is None:
-            context = self._context_from_interaction(message, raw_message)
-        if context is None:
-            context = self._context_from_reaction_receipt(message, raw_message)
-        if context is None:
-            context = self._context_from_pending_workflow(message, raw_message)
-        if context is None:
-            context = self._context_from_active_roll(message, raw_message)
-        if context is not None and time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
-            context = self._context_from_active_roll(message, raw_message)
-        if context is None:
-            context = self._context_from_parsed_account(message, raw_message)
-        expected_kind = context.expected_kind if context is not None else None
-        kind = self._resolve_message_kind(expected_kind, raw_message)
+        if not durable_antidisable:
+            context = self._context_from_active_scan(message, raw_message)
+            if context is None:
+                context = self._context_from_interaction(message, raw_message)
+            if context is None:
+                context = self._context_from_reaction_receipt(message, raw_message)
+            if context is None:
+                context = self._context_from_pending_workflow(message, raw_message)
+            if context is None:
+                context = self._context_from_active_roll(message, raw_message)
+            if context is not None and time.monotonic() - context.captured_at > self._CONTEXT_TTL_SECONDS:
+                context = self._context_from_active_roll(message, raw_message)
+            if context is None:
+                context = self._context_from_parsed_account(message, raw_message)
+            expected_kind = context.expected_kind if context is not None else None
+            kind = self._resolve_message_kind(expected_kind, raw_message)
         attribution = self._resolve_and_record_server_attribution(
             message,
             raw_message,
@@ -1206,6 +1233,13 @@ class DiscordListenerService:
                 account=account_attribution.account_name or "",
                 discord_server_id=str(message.guild.id),
             )
+        elif durable_antidisable and received_event is not None:
+            durable_account_identity = self._record_durable_antidisable_account_attribution(
+                received_event,
+                context.identity,
+            )
+            if durable_account_identity is None:
+                return
         if context is None and kind != "infokl":
             if kind == "roll" and durable_account_identity is None:
                 self._warn_once_for_unattributed_roll(message)
@@ -1383,9 +1417,13 @@ class DiscordListenerService:
         durable_success_recorded = False
         try:
             scan_id = (
-                self._scan_id_for_page(kind, raw_message, import_identity)
-                if import_identity is not None
-                else None
+                durable_antidisable_scan_id
+                if durable_antidisable
+                else (
+                    self._scan_id_for_page(kind, raw_message, import_identity)
+                    if import_identity is not None
+                    else None
+                )
             )
             if kind in self._SCAN_KINDS:
                 self._scan_contexts[(int(message.guild.id), int(message.channel.id), kind)] = replace(
@@ -1566,6 +1604,23 @@ class DiscordListenerService:
                         source=source,
                         observed_at=observed_at,
                         finished_at=finished_at,
+                    )
+                elif kind == "antidisable":
+                    import_kwargs["durable_antidisable_page_context"] = (
+                        DurableAntidisablePageImportContext(
+                            source_event_id=received_event.source_event_id,
+                            attempt_id=(
+                                processing_attempt.attempt_id
+                                if processing_attempt is not None
+                                else None
+                            ),
+                            server=import_identity.server,
+                            account=import_identity.account,
+                            raw=raw_message,
+                            source=source,
+                            observed_at=observed_at,
+                            finished_at=finished_at,
+                        )
                     )
                 else:
                     raise RuntimeError(f"Unsupported durable import kind: {kind}")
@@ -2240,6 +2295,163 @@ class DiscordListenerService:
                 error,
             )
             return None
+
+    @staticmethod
+    def _message_aggregate_key(message: discord.Message) -> MessageAggregateKey:
+        return MessageAggregateKey(
+            SourcePlatform.DISCORD,
+            str(message.guild.id),
+            str(message.channel.id),
+            str(message.id),
+        )
+
+    def _resolve_durable_antidisable_response(
+        self,
+        message: discord.Message,
+        raw_message: str,
+        persisted_attribution: DiscordSourceEventServerAttribution | None,
+        received_event: ReceivedMessageEvent | None,
+    ) -> tuple[DiscordCommandContext, int] | None:
+        """Resolve one structurally valid `$adl` response through durable ownership."""
+        repository = self._discord_message_repository
+        if repository is None or received_event is None:
+            return None
+        response_key = self._message_aggregate_key(message)
+        workflow = repository.get_antidisable_workflow_by_response_message(response_key)
+        if workflow is None:
+            lookup_time = self._message_received_at(message)
+            candidates = repository.active_antidisable_workflows_for_channel(
+                str(message.guild.id),
+                str(message.channel.id),
+                lookup_time,
+            )
+            if len(candidates) != 1:
+                attribution = self._resolve_and_record_server_attribution(
+                    message,
+                    raw_message,
+                    "antidisable",
+                    None,
+                    persisted_attribution,
+                    received_event,
+                )
+                if attribution is not None:
+                    self._record_unresolved_antidisable_attribution(
+                        received_event,
+                        message.id,
+                        "ambiguous" if len(candidates) > 1 else "unresolved",
+                    )
+                return None
+            candidate = candidates[0]
+            try:
+                repository.bind_antidisable_response(
+                    scan_id=candidate.harem_scan_id,
+                    response_message_aggregate_key=response_key,
+                    bound_at=lookup_time,
+                )
+            except Exception as error:
+                # A concurrent/replayed delivery may have completed the binding
+                # between the candidate read and this write. Reload it; otherwise
+                # fail closed without selecting another candidate.
+                workflow = repository.get_antidisable_workflow_by_response_message(response_key)
+                if workflow is None:
+                    self._logger.warning(
+                        "Could not durably bind antidisable response %s: %s",
+                        message.id,
+                        error,
+                    )
+                    return None
+            else:
+                workflow = candidate
+
+        progress = self._catalog.harem_scan_progress(workflow.harem_scan_id)
+        if progress is None or progress.scan_kind != "antidisable":
+            self._logger.warning(
+                "Could not recover antidisable scan %s for response %s",
+                workflow.harem_scan_id,
+                message.id,
+            )
+            return None
+        identity = ConfigAccount(
+            server=progress.server_name,
+            account=progress.account_name,
+            discord_server_id=str(message.guild.id),
+            discord_user_id=workflow.requesting_user_id,
+        )
+        return (
+            DiscordCommandContext(
+                server_id=str(message.guild.id),
+                user_id=workflow.requesting_user_id,
+                identity=identity,
+                captured_at=time.monotonic(),
+                expected_kind="antidisable",
+                evidence_source="workflow",
+            ),
+            workflow.harem_scan_id,
+        )
+
+    def _record_durable_antidisable_account_attribution(
+        self,
+        received_event: ReceivedMessageEvent,
+        identity: ConfigAccount,
+    ) -> ConfigAccount | None:
+        """Persist account context recovered from the bound durable workflow."""
+        repository = self._discord_message_repository
+        if repository is None:
+            return None
+        try:
+            existing = repository.get_account_attribution(received_event.source_event_id)
+            if existing is not None and existing.status == "resolved":
+                if (
+                    existing.server_name is None
+                    or existing.account_name is None
+                    or existing.server_name.casefold() != identity.server.casefold()
+                    or existing.account_name.casefold() != identity.account.casefold()
+                ):
+                    self._logger.warning(
+                        "Durable antidisable response %s has conflicting account attribution",
+                        received_event.source_event_id,
+                    )
+                    return None
+            repository.record_account_attribution(
+                received_event.source_event_id,
+                status="resolved",
+                server_name=identity.server,
+                account_name=identity.account,
+                recorded_at=datetime.now(timezone.utc),
+            )
+            return identity
+        except Exception as error:
+            self._logger.warning(
+                "Could not record durable antidisable account attribution for source event %s: %s",
+                received_event.source_event_id,
+                error,
+            )
+            return None
+
+    def _record_unresolved_antidisable_attribution(
+        self,
+        received_event: ReceivedMessageEvent,
+        message_id: int,
+        attribution_status: Literal["unresolved", "ambiguous"],
+    ) -> None:
+        repository = self._discord_message_repository
+        if repository is None:
+            return
+        try:
+            repository.record_account_attribution(
+                received_event.source_event_id,
+                status=attribution_status,
+                server_name=None,
+                account_name=None,
+                recorded_at=datetime.now(timezone.utc),
+            )
+        except Exception as error:
+            self._logger.warning(
+                "Could not record unresolved antidisable account attribution for source event %s: %s",
+                received_event.source_event_id,
+                error,
+            )
+        self._record_unresolved_attribution(received_event, message_id, attribution_status)
 
     def _record_processing_failure(
         self,
