@@ -1,11 +1,19 @@
 import sqlite3
+from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 
 import pytest
 
 from moa.database.sqlite import connect
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
+from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import (
+    AntidisableResponseBinding,
+    AntidisableResponseBindingMutationResult,
+    AntidisableWorkflow,
+    AntidisableWorkflowMutationResult,
+    DiscordAntidisableWorkflowConflictError,
+    DiscordAntidisableWorkflowNotFoundError,
     DiscordMessageProcessingConflictError,
     DiscordMessageProcessingNotFoundError,
     DiscordMessageReceiveConflictError,
@@ -939,6 +947,75 @@ def test_resolved_server_attribution_conflicts_with_different_server(tmp_path) -
         )
 
 
+def begin_scan(
+    database_path,
+    *,
+    server: str = "Server",
+    account: str = "Account",
+    scan_kind: str = "antidisable",
+) -> int:
+    catalog = CatalogRepository(database_path)
+    if scan_kind == "antidisable":
+        return catalog.begin_antidisable_scan(server, account).id
+    return catalog.begin_harem_scan(server, account, scan_kind).id
+
+
+def complete_antidisable_scan(database_path, scan_id: int) -> None:
+    catalog = CatalogRepository(database_path)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE harem_scans SET expected_page_count = 0 WHERE id = ?",
+            (scan_id,),
+        )
+    catalog.complete_antidisable_scan(scan_id)
+
+
+def seed_message(
+    repository: DiscordMessageRepository,
+    *,
+    guild_id: str = "guild-1",
+    channel_id: str = "channel-1",
+    message_id: str = "message-1",
+    payload_hash: str = "hash-1",
+    marker: str | None = "revision-1",
+) -> MessageAggregateKey:
+    message = aggregate(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        message_id=message_id,
+    )
+    receive(
+        repository,
+        message=message,
+        message_revision=revision(message, payload_hash=payload_hash, marker=marker),
+        event_key=f"event-{guild_id}-{channel_id}-{message_id}-{payload_hash}",
+    )
+    return message
+
+
+def create_workflow(
+    repository: DiscordMessageRepository,
+    database_path,
+    *,
+    scan_id: int | None = None,
+    request_message: MessageAggregateKey | None = None,
+    requesting_user_id: str = "user-1",
+    created_at: datetime = datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+    expires_at: datetime = datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+) -> AntidisableWorkflowMutationResult:
+    if scan_id is None:
+        scan_id = begin_scan(database_path)
+    if request_message is None:
+        request_message = seed_message(repository)
+    return repository.create_antidisable_workflow(
+        scan_id=scan_id,
+        request_message_aggregate_key=request_message,
+        requesting_user_id=requesting_user_id,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+
+
 @pytest.mark.parametrize("status", ["unresolved", "ambiguous"])
 def test_resolved_server_attribution_cannot_be_downgraded(tmp_path, status: str) -> None:
     database_path = tmp_path / "messages.db"
@@ -1546,3 +1623,541 @@ def test_caller_owned_attribution_read_seams_use_current_transaction_without_wri
         )
         assert after == before
         connection.rollback()
+
+
+@pytest.mark.parametrize(
+    "result_type",
+    [
+        AntidisableWorkflow,
+        AntidisableWorkflowMutationResult,
+        AntidisableResponseBinding,
+        AntidisableResponseBindingMutationResult,
+    ],
+)
+def test_antidisable_workflow_value_objects_are_frozen_and_slotted(result_type) -> None:
+    assert is_dataclass(result_type)
+    assert result_type.__dataclass_params__.frozen is True
+    assert hasattr(result_type, "__slots__")
+    assert all(field.name for field in fields(result_type))
+
+
+def test_antidisable_workflow_creation_replay_and_reconstruction_are_idempotent(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository)
+
+    first = create_workflow(
+        repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+    )
+    assert isinstance(first, AntidisableWorkflowMutationResult)
+    assert isinstance(first.workflow, AntidisableWorkflow)
+    assert first.created is True
+    assert first.replayed is False
+    assert first.workflow.harem_scan_id == scan_id
+    assert first.workflow.request_message_aggregate_key == request_message
+
+    restarted_repository = DiscordMessageRepository(database_path)
+    replay = create_workflow(
+        restarted_repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+    )
+    assert replay.created is False
+    assert replay.replayed is True
+    assert replay.workflow == first.workflow
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 1
+
+
+def test_antidisable_workflow_creation_conflicts_do_not_overwrite_identity(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first_scan_id = begin_scan(database_path)
+    second_scan_id = begin_scan(database_path, account="Account 2")
+    first_request = seed_message(repository, message_id="request-1")
+    second_request = seed_message(repository, message_id="request-2", payload_hash="hash-2")
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=first_scan_id,
+        request_message=first_request,
+    )
+
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match="different request aggregate",
+    ):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=first_scan_id,
+            request_message=second_request,
+        )
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match="already attached to another antidisable scan",
+    ):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=second_scan_id,
+            request_message=first_request,
+        )
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match="conflicting immutable data",
+    ):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=first_scan_id,
+            request_message=first_request,
+            requesting_user_id="different-user",
+        )
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 1
+        assert tuple(
+            connection.execute(
+                "SELECT harem_scan_id, request_message_aggregate_id "
+                "FROM discord_antidisable_workflows"
+            ).fetchone()
+        ) == (first_scan_id, 1)
+
+
+def test_antidisable_workflow_creation_rejects_invalid_lifecycle_identity_and_times(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    request_message = seed_message(repository)
+
+    with pytest.raises(DiscordAntidisableWorkflowNotFoundError, match="scan 999 was not found"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=999,
+            request_message=request_message,
+        )
+
+    wrong_kind_scan_id = begin_scan(database_path, scan_kind="keys")
+    with pytest.raises(ValueError, match="not an antidisable scan"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=wrong_kind_scan_id,
+            request_message=request_message,
+        )
+
+    completed_scan_id = begin_scan(database_path, account="Completed")
+    complete_antidisable_scan(database_path, completed_scan_id)
+    with pytest.raises(ValueError, match="already completed"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=completed_scan_id,
+            request_message=request_message,
+        )
+
+    missing_request_scan_id = begin_scan(database_path, account="Missing Request")
+    with pytest.raises(DiscordAntidisableWorkflowNotFoundError, match="Request message aggregate"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=missing_request_scan_id,
+            request_message=aggregate(message_id="missing-request"),
+        )
+
+    valid_scan_id = begin_scan(database_path, account="Validation")
+    with pytest.raises(ValueError, match="requesting_user_id must not be blank"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=valid_scan_id,
+            request_message=request_message,
+            requesting_user_id=" ",
+        )
+    with pytest.raises(ValueError, match="created_at must be timezone-aware"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=valid_scan_id,
+            request_message=request_message,
+            created_at=datetime(2026, 7, 18, 1, 0),
+        )
+    with pytest.raises(ValueError, match="expires_at must be strictly after created_at"):
+        create_workflow(
+            repository,
+            database_path,
+            scan_id=valid_scan_id,
+            request_message=request_message,
+            expires_at=datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 0
+
+
+def test_antidisable_workflow_request_lookup_uses_stable_aggregate_identity(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository)
+    created = create_workflow(
+        repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+    )
+
+    assert repository.get_antidisable_workflow_by_request_message(request_message) == created.workflow
+    assert repository.get_antidisable_workflow_by_request_message(
+        aggregate(message_id="missing")
+    ) is None
+    restarted_repository = DiscordMessageRepository(database_path)
+    assert (
+        restarted_repository.get_antidisable_workflow_by_request_message(request_message)
+        == created.workflow
+    )
+
+
+def test_active_antidisable_workflows_return_all_compatible_candidates_in_deterministic_order(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    lookup_time = datetime(2026, 7, 18, 6, 0, tzinfo=timezone.utc)
+    assert repository.active_antidisable_workflows_for_channel(
+        "guild-1", "channel-1", lookup_time
+    ) == ()
+
+    first = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="First"),
+        request_message=seed_message(repository, message_id="request-first"),
+        requesting_user_id="user-1",
+        created_at=datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    second = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Second"),
+        request_message=seed_message(repository, message_id="request-second", payload_hash="hash-2"),
+        requesting_user_id="user-2",
+        created_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    third = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Third"),
+        request_message=seed_message(repository, message_id="request-third", payload_hash="hash-3"),
+        requesting_user_id="user-1",
+        created_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    other_channel = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Other Channel"),
+        request_message=seed_message(
+            repository, channel_id="channel-2", message_id="request-other-channel", payload_hash="hash-4"
+        ),
+        created_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    other_guild = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Other Guild"),
+        request_message=seed_message(
+            repository, guild_id="guild-2", message_id="request-other-guild", payload_hash="hash-5"
+        ),
+        created_at=datetime(2026, 7, 18, 1, 45, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Expired"),
+        request_message=seed_message(repository, message_id="request-expired", payload_hash="hash-6"),
+        created_at=datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 6, 0, tzinfo=timezone.utc),
+    )
+    completed = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Completed"),
+        request_message=seed_message(repository, message_id="request-completed", payload_hash="hash-7"),
+        created_at=datetime(2026, 7, 18, 4, 30, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    complete_antidisable_scan(database_path, completed.workflow.harem_scan_id)
+
+    candidates = repository.active_antidisable_workflows_for_channel(
+        "guild-1", "channel-1", lookup_time
+    )
+    assert tuple(candidate.harem_scan_id for candidate in candidates) == (
+        first.workflow.harem_scan_id,
+        second.workflow.harem_scan_id,
+        third.workflow.harem_scan_id,
+    )
+    assert tuple(candidate.requesting_user_id for candidate in candidates) == (
+        "user-1",
+        "user-2",
+        "user-1",
+    )
+    assert repository.active_antidisable_workflows_for_channel(
+        "guild-1", "channel-2", lookup_time
+    ) == (other_channel.workflow,)
+    assert repository.active_antidisable_workflows_for_channel(
+        "guild-2", "channel-1", lookup_time
+    ) == (other_guild.workflow,)
+    assert repository.active_antidisable_workflows_for_channel(
+        "guild-3", "channel-3", lookup_time
+    ) == ()
+
+
+def test_antidisable_response_binding_supports_multiple_responses_replay_and_lookup(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository, message_id="request")
+    workflow = create_workflow(
+        repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    response_one = seed_message(repository, message_id="response-1", payload_hash="response-hash-1")
+    response_two = seed_message(repository, message_id="response-2", payload_hash="response-hash-2")
+    assert repository.get_antidisable_workflow_by_response_message(response_one) is None
+
+    first = repository.bind_antidisable_response(
+        scan_id=scan_id,
+        response_message_aggregate_key=response_one,
+        bound_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    second = repository.bind_antidisable_response(
+        scan_id=scan_id,
+        response_message_aggregate_key=response_two,
+        bound_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+    replay = DiscordMessageRepository(database_path).bind_antidisable_response(
+        scan_id=scan_id,
+        response_message_aggregate_key=response_one,
+        bound_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    assert isinstance(first.binding, AntidisableResponseBinding)
+    assert first.created is True
+    assert second.created is True
+    assert replay.created is False
+    assert replay.replayed is True
+    assert replay.binding == first.binding
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match="conflicting immutable data",
+    ):
+        repository.bind_antidisable_response(
+            scan_id=scan_id,
+            response_message_aggregate_key=response_one,
+            bound_at=datetime(2026, 7, 18, 2, 5, tzinfo=timezone.utc),
+        )
+    assert repository.get_antidisable_workflow_by_response_message(response_one) == workflow.workflow
+    assert repository.get_antidisable_workflow_by_response_message(response_two) == workflow.workflow
+    assert repository.get_antidisable_workflow_by_response_message(
+        aggregate(message_id="unbound")
+    ) is None
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT completed_at FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] is None
+
+
+def test_antidisable_response_binding_revisions_remain_one_aggregate_binding(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    seed_message(repository, message_id="request")
+    request_message = aggregate(message_id="request")
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    response_message = seed_message(repository, message_id="response", payload_hash="response-hash-1")
+    repository.bind_antidisable_response(
+        scan_id=scan_id,
+        response_message_aggregate_key=response_message,
+        bound_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    receive(
+        repository,
+        message=response_message,
+        message_revision=revision(response_message, payload_hash="response-hash-2", marker="revision-2"),
+        event_key="event-response-revision-2",
+    )
+
+    restarted_repository = DiscordMessageRepository(database_path)
+    assert restarted_repository.get_antidisable_workflow_by_response_message(response_message) is not None
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_message_revisions WHERE aggregate_id = "
+            "(SELECT id FROM discord_message_aggregates WHERE message_id = 'response')"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 1
+
+
+def test_antidisable_response_binding_rejects_duplicate_response_ownership(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first_scan_id = begin_scan(database_path, account="First")
+    second_scan_id = begin_scan(database_path, account="Second")
+    first_request = seed_message(repository, message_id="request-1")
+    second_request = seed_message(repository, message_id="request-2", payload_hash="hash-2")
+    response_message = seed_message(repository, message_id="response", payload_hash="response-hash")
+    create_workflow(repository, database_path, scan_id=first_scan_id, request_message=first_request)
+    create_workflow(repository, database_path, scan_id=second_scan_id, request_message=second_request)
+    repository.bind_antidisable_response(
+        scan_id=first_scan_id,
+        response_message_aggregate_key=response_message,
+        bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match=f"already bound to workflow {first_scan_id}",
+    ):
+        repository.bind_antidisable_response(
+            scan_id=second_scan_id,
+            response_message_aggregate_key=response_message,
+            bound_at=datetime(2026, 7, 18, 1, 31, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT harem_scan_id, COUNT(*) FROM discord_antidisable_response_bindings "
+                "GROUP BY response_message_aggregate_id"
+            ).fetchone()
+        ) == (first_scan_id, 1)
+
+
+@pytest.mark.parametrize(
+    ("guild_id", "channel_id"),
+    [("guild-2", "channel-1"), ("guild-1", "channel-2")],
+)
+def test_antidisable_response_binding_rejects_cross_guild_or_channel(
+    tmp_path, guild_id: str, channel_id: str
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository, message_id="request")
+    create_workflow(repository, database_path, scan_id=scan_id, request_message=request_message)
+    response_message = seed_message(
+        repository,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        message_id="response",
+        payload_hash="response-hash",
+    )
+
+    with pytest.raises(
+        DiscordAntidisableWorkflowConflictError,
+        match="outside the workflow request scope",
+    ):
+        repository.bind_antidisable_response(
+            scan_id=scan_id,
+            response_message_aggregate_key=response_message,
+            bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+        )
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 0
+
+
+def test_antidisable_response_binding_rejects_missing_completed_and_expired_workflows(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    response_message = seed_message(repository, message_id="response")
+    with pytest.raises(DiscordAntidisableWorkflowNotFoundError, match="workflow 999 was not found"):
+        repository.bind_antidisable_response(
+            scan_id=999,
+            response_message_aggregate_key=response_message,
+            bound_at=datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+        )
+
+    expired_scan_id = begin_scan(database_path, account="Expired")
+    expired_request = seed_message(repository, message_id="request-expired", payload_hash="hash-expired")
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=expired_scan_id,
+        request_message=expired_request,
+        expires_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    with pytest.raises(ValueError, match="expired at bound_at"):
+        repository.bind_antidisable_response(
+            scan_id=expired_scan_id,
+            response_message_aggregate_key=response_message,
+            bound_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+        )
+
+    completed_scan_id = begin_scan(database_path, account="Completed")
+    completed_request = seed_message(repository, message_id="request-completed", payload_hash="hash-completed")
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=completed_scan_id,
+        request_message=completed_request,
+        expires_at=datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc),
+    )
+    complete_antidisable_scan(database_path, completed_scan_id)
+    with pytest.raises(ValueError, match="already completed"):
+        repository.bind_antidisable_response(
+            scan_id=completed_scan_id,
+            response_message_aggregate_key=response_message,
+            bound_at=datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+        )
+
+
+def test_antidisable_response_binding_rejects_missing_response_without_writes(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository, message_id="request")
+    create_workflow(repository, database_path, scan_id=scan_id, request_message=request_message)
+
+    with pytest.raises(DiscordAntidisableWorkflowNotFoundError, match="Response message aggregate"):
+        repository.bind_antidisable_response(
+            scan_id=scan_id,
+            response_message_aggregate_key=aggregate(message_id="missing-response"),
+            bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+        )
+    assert repository.get_antidisable_workflow_by_response_message(
+        aggregate(message_id="missing-response")
+    ) is None
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 0

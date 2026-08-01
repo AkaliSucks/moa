@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 from moa.database.sqlite import connect
-from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey
+from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -51,6 +51,14 @@ class DiscordSourceEventAccountAttributionValidationError(ValueError):
 
 class DiscordSourceEventAccountAttributionConflictError(RuntimeError):
     """Raised when an immutable account attribution conflicts with a new one."""
+
+
+class DiscordAntidisableWorkflowNotFoundError(RuntimeError):
+    """Raised when a durable antidisable workflow identity is missing."""
+
+
+class DiscordAntidisableWorkflowConflictError(RuntimeError):
+    """Raised when durable antidisable workflow ownership conflicts."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +119,54 @@ class DiscordSourceEventAccountAttribution:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class AntidisableWorkflow:
+    """The durable workflow identity and its explicit request context."""
+
+    harem_scan_id: int
+    request_message_aggregate_key: MessageAggregateKey
+    requesting_user_id: str
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AntidisableWorkflowMutationResult:
+    """The workflow after create or exact replay."""
+
+    workflow: AntidisableWorkflow
+    created: bool
+
+    @property
+    def replayed(self) -> bool:
+        """Whether this call returned an existing idempotent workflow."""
+
+        return not self.created
+
+
+@dataclass(frozen=True, slots=True)
+class AntidisableResponseBinding:
+    """The durable association between one workflow and one response aggregate."""
+
+    harem_scan_id: int
+    response_message_aggregate_key: MessageAggregateKey
+    bound_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AntidisableResponseBindingMutationResult:
+    """The response binding after create or exact replay."""
+
+    binding: AntidisableResponseBinding
+    created: bool
+
+    @property
+    def replayed(self) -> bool:
+        """Whether this call returned an existing idempotent binding."""
+
+        return not self.created
+
+
 class DiscordMessageRepository:
     """Persist Discord message aggregates, revisions, and source events."""
 
@@ -119,6 +175,158 @@ class DiscordMessageRepository:
         # The current migration bootstrap is owned by CatalogRepository.  Reuse
         # it without exposing any catalog repository methods here.
         CatalogRepository(database_path)
+
+    def create_antidisable_workflow(
+        self,
+        *,
+        scan_id: int,
+        request_message_aggregate_key: MessageAggregateKey,
+        requesting_user_id: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> AntidisableWorkflowMutationResult:
+        """Create one durable antidisable workflow in a repository-owned transaction."""
+        with self._connection() as connection:
+            return self._create_antidisable_workflow_with_connection(
+                connection,
+                scan_id=scan_id,
+                request_message_aggregate_key=request_message_aggregate_key,
+                requesting_user_id=requesting_user_id,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+
+    def get_antidisable_workflow_by_request_message(
+        self, request_message_aggregate_key: MessageAggregateKey
+    ) -> AntidisableWorkflow | None:
+        """Return the workflow identified by one stable request aggregate."""
+        self._validate_message_aggregate_key(request_message_aggregate_key, "request_message_aggregate_key")
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    w.harem_scan_id,
+                    w.request_message_aggregate_id,
+                    request.platform AS request_platform,
+                    request.guild_id AS request_guild_id,
+                    request.channel_id AS request_channel_id,
+                    request.message_id AS request_message_id,
+                    w.requesting_user_id,
+                    w.created_at,
+                    w.expires_at
+                FROM discord_antidisable_workflows AS w
+                JOIN harem_scans AS scan ON scan.id = w.harem_scan_id
+                JOIN discord_message_aggregates AS request
+                  ON request.id = w.request_message_aggregate_id
+                WHERE scan.scan_kind = 'antidisable'
+                  AND request.platform = ?
+                  AND request.guild_id = ?
+                  AND request.channel_id = ?
+                  AND request.message_id = ?
+                """,
+                self._aggregate_key_values(request_message_aggregate_key),
+            ).fetchone()
+            return self._antidisable_workflow_result(row)
+
+    def active_antidisable_workflows_for_channel(
+        self,
+        guild_id: str,
+        channel_id: str,
+        lookup_time: datetime,
+    ) -> tuple[AntidisableWorkflow, ...]:
+        """Return every active workflow in one Discord guild/channel."""
+        self._validate_scope_identity(guild_id, "guild_id")
+        self._validate_scope_identity(channel_id, "channel_id")
+        normalized_lookup_time = self._normalize_processing_datetime(lookup_time, "lookup_time")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    w.harem_scan_id,
+                    w.request_message_aggregate_id,
+                    request.platform AS request_platform,
+                    request.guild_id AS request_guild_id,
+                    request.channel_id AS request_channel_id,
+                    request.message_id AS request_message_id,
+                    w.requesting_user_id,
+                    w.created_at,
+                    w.expires_at
+                FROM discord_antidisable_workflows AS w
+                JOIN harem_scans AS scan ON scan.id = w.harem_scan_id
+                JOIN discord_message_aggregates AS request
+                  ON request.id = w.request_message_aggregate_id
+                WHERE scan.scan_kind = 'antidisable'
+                  AND scan.completed_at IS NULL
+                  AND request.platform = ?
+                  AND request.guild_id = ?
+                  AND request.channel_id = ?
+                  AND w.expires_at > ?
+                ORDER BY w.created_at, w.harem_scan_id
+                """,
+                (
+                    SourcePlatform.DISCORD.value,
+                    guild_id,
+                    channel_id,
+                    normalized_lookup_time.isoformat(),
+                ),
+            ).fetchall()
+            return tuple(
+                workflow
+                for row in rows
+                if (workflow := self._antidisable_workflow_result(row)) is not None
+            )
+
+    def bind_antidisable_response(
+        self,
+        *,
+        scan_id: int,
+        response_message_aggregate_key: MessageAggregateKey,
+        bound_at: datetime,
+    ) -> AntidisableResponseBindingMutationResult:
+        """Bind one response aggregate in a repository-owned transaction."""
+        with self._connection() as connection:
+            return self._bind_antidisable_response_with_connection(
+                connection,
+                scan_id=scan_id,
+                response_message_aggregate_key=response_message_aggregate_key,
+                bound_at=bound_at,
+            )
+
+    def get_antidisable_workflow_by_response_message(
+        self, response_message_aggregate_key: MessageAggregateKey
+    ) -> AntidisableWorkflow | None:
+        """Return the workflow durably bound to one stable response aggregate."""
+        self._validate_message_aggregate_key(response_message_aggregate_key, "response_message_aggregate_key")
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    w.harem_scan_id,
+                    w.request_message_aggregate_id,
+                    request.platform AS request_platform,
+                    request.guild_id AS request_guild_id,
+                    request.channel_id AS request_channel_id,
+                    request.message_id AS request_message_id,
+                    w.requesting_user_id,
+                    w.created_at,
+                    w.expires_at
+                FROM discord_antidisable_response_bindings AS binding
+                JOIN discord_antidisable_workflows AS w
+                  ON w.harem_scan_id = binding.harem_scan_id
+                JOIN harem_scans AS scan ON scan.id = w.harem_scan_id
+                JOIN discord_message_aggregates AS request
+                  ON request.id = w.request_message_aggregate_id
+                JOIN discord_message_aggregates AS response
+                  ON response.id = binding.response_message_aggregate_id
+                WHERE scan.scan_kind = 'antidisable'
+                  AND response.platform = ?
+                  AND response.guild_id = ?
+                  AND response.channel_id = ?
+                  AND response.message_id = ?
+                """,
+                self._aggregate_key_values(response_message_aggregate_key),
+            ).fetchone()
+            return self._antidisable_workflow_result(row)
 
     def receive_message(
         self,
@@ -673,6 +881,380 @@ class DiscordMessageRepository:
                     "Inserted Discord account attribution could not be reloaded"
                 )
             return result
+
+    def _create_antidisable_workflow_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        scan_id: int,
+        request_message_aggregate_key: MessageAggregateKey,
+        requesting_user_id: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> AntidisableWorkflowMutationResult:
+        """Create one workflow without taking ownership of the transaction."""
+        self._validate_processing_identity(scan_id=scan_id)
+        self._validate_message_aggregate_key(
+            request_message_aggregate_key, "request_message_aggregate_key"
+        )
+        self._validate_requesting_user_id(requesting_user_id)
+        normalized_created_at = self._normalize_processing_datetime(created_at, "created_at")
+        normalized_expires_at = self._normalize_processing_datetime(expires_at, "expires_at")
+        if normalized_expires_at <= normalized_created_at:
+            raise ValueError("expires_at must be strictly after created_at")
+
+        scan = connection.execute(
+            "SELECT id, scan_kind, completed_at FROM harem_scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+        if scan is None:
+            raise DiscordAntidisableWorkflowNotFoundError(
+                f"Antidisable scan {scan_id} was not found"
+            )
+        if str(scan["scan_kind"]) != "antidisable":
+            raise ValueError(f"Harem scan {scan_id} is not an antidisable scan")
+        if scan["completed_at"] is not None:
+            raise ValueError(f"Antidisable scan {scan_id} is already completed")
+
+        request = self._message_aggregate_row(connection, request_message_aggregate_key)
+        if request is None:
+            raise DiscordAntidisableWorkflowNotFoundError(
+                "Request message aggregate was not found"
+            )
+        request_aggregate_id = int(request["id"])
+        created_at_value = normalized_created_at.isoformat()
+        expires_at_value = normalized_expires_at.isoformat()
+
+        existing_by_scan = self._antidisable_workflow_row(connection, scan_id)
+        if existing_by_scan is not None:
+            if int(existing_by_scan["request_message_aggregate_id"]) != request_aggregate_id:
+                raise DiscordAntidisableWorkflowConflictError(
+                    f"Antidisable scan {scan_id} is already attached to a different request aggregate"
+                )
+            if not self._antidisable_workflow_values_match(
+                existing_by_scan,
+                requesting_user_id=requesting_user_id,
+                created_at=created_at_value,
+                expires_at=expires_at_value,
+            ):
+                raise DiscordAntidisableWorkflowConflictError(
+                    f"Antidisable workflow {scan_id} has conflicting immutable data"
+                )
+            workflow = self._antidisable_workflow_result(existing_by_scan)
+            assert workflow is not None
+            return AntidisableWorkflowMutationResult(workflow=workflow, created=False)
+
+        existing_by_request = connection.execute(
+            """
+            SELECT harem_scan_id
+            FROM discord_antidisable_workflows
+            WHERE request_message_aggregate_id = ?
+            """,
+            (request_aggregate_id,),
+        ).fetchone()
+        if existing_by_request is not None:
+            raise DiscordAntidisableWorkflowConflictError(
+                "Request message aggregate is already attached to another antidisable scan"
+            )
+
+        try:
+            connection.execute(
+                """
+                INSERT INTO discord_antidisable_workflows (
+                    harem_scan_id, request_message_aggregate_id, requesting_user_id,
+                    created_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    scan_id,
+                    request_aggregate_id,
+                    requesting_user_id,
+                    created_at_value,
+                    expires_at_value,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            existing_by_scan = self._antidisable_workflow_row(connection, scan_id)
+            if existing_by_scan is not None:
+                if int(existing_by_scan["request_message_aggregate_id"]) != request_aggregate_id:
+                    raise DiscordAntidisableWorkflowConflictError(
+                        f"Antidisable scan {scan_id} is already attached to a different request aggregate"
+                    )
+                if not self._antidisable_workflow_values_match(
+                    existing_by_scan,
+                    requesting_user_id=requesting_user_id,
+                    created_at=created_at_value,
+                    expires_at=expires_at_value,
+                ):
+                    raise DiscordAntidisableWorkflowConflictError(
+                        f"Antidisable workflow {scan_id} has conflicting immutable data"
+                    )
+                workflow = self._antidisable_workflow_result(existing_by_scan)
+                assert workflow is not None
+                return AntidisableWorkflowMutationResult(workflow=workflow, created=False)
+            existing_by_request = connection.execute(
+                """
+                SELECT harem_scan_id
+                FROM discord_antidisable_workflows
+                WHERE request_message_aggregate_id = ?
+                """,
+                (request_aggregate_id,),
+            ).fetchone()
+            if existing_by_request is not None:
+                raise DiscordAntidisableWorkflowConflictError(
+                    "Request message aggregate is already attached to another antidisable scan"
+                )
+            raise
+
+        workflow = self._antidisable_workflow_result(
+            self._antidisable_workflow_row(connection, scan_id)
+        )
+        if workflow is None:
+            raise RuntimeError("Inserted antidisable workflow could not be reloaded")
+        return AntidisableWorkflowMutationResult(workflow=workflow, created=True)
+
+    def _bind_antidisable_response_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        scan_id: int,
+        response_message_aggregate_key: MessageAggregateKey,
+        bound_at: datetime,
+    ) -> AntidisableResponseBindingMutationResult:
+        """Bind one response aggregate without taking ownership of the transaction."""
+        self._validate_processing_identity(scan_id=scan_id)
+        self._validate_message_aggregate_key(
+            response_message_aggregate_key, "response_message_aggregate_key"
+        )
+        normalized_bound_at = self._normalize_processing_datetime(bound_at, "bound_at")
+        workflow_row = self._antidisable_workflow_row(connection, scan_id)
+        if workflow_row is None:
+            raise DiscordAntidisableWorkflowNotFoundError(
+                f"Antidisable workflow {scan_id} was not found"
+            )
+        if str(workflow_row["scan_kind"]) != "antidisable":
+            raise ValueError(f"Harem scan {scan_id} is not an antidisable scan")
+        if workflow_row["completed_at"] is not None:
+            raise ValueError(f"Antidisable scan {scan_id} is already completed")
+        expires_at = datetime.fromisoformat(str(workflow_row["expires_at"]))
+        if expires_at <= normalized_bound_at:
+            raise ValueError(f"Antidisable workflow {scan_id} is expired at bound_at")
+
+        response = self._message_aggregate_row(connection, response_message_aggregate_key)
+        if response is None:
+            raise DiscordAntidisableWorkflowNotFoundError(
+                "Response message aggregate was not found"
+            )
+        if (
+            str(response["platform"]) != str(workflow_row["request_platform"])
+            or str(response["guild_id"]) != str(workflow_row["request_guild_id"])
+            or str(response["channel_id"]) != str(workflow_row["request_channel_id"])
+        ):
+            raise DiscordAntidisableWorkflowConflictError(
+                "Response message aggregate is outside the workflow request scope"
+            )
+
+        response_aggregate_id = int(response["id"])
+        bound_at_value = normalized_bound_at.isoformat()
+        existing_binding = connection.execute(
+            """
+            SELECT harem_scan_id, bound_at
+            FROM discord_antidisable_response_bindings
+            WHERE response_message_aggregate_id = ?
+            """,
+            (response_aggregate_id,),
+        ).fetchone()
+        if existing_binding is not None:
+            existing_scan_id = int(existing_binding["harem_scan_id"])
+            if existing_scan_id != scan_id:
+                raise DiscordAntidisableWorkflowConflictError(
+                    f"Response message aggregate is already bound to workflow {existing_scan_id}"
+                )
+            if str(existing_binding["bound_at"]) != bound_at_value:
+                raise DiscordAntidisableWorkflowConflictError(
+                    f"Antidisable response binding {scan_id}/{response_aggregate_id} has conflicting immutable data"
+                )
+            binding = self._antidisable_response_binding_result(
+                connection, scan_id, response_aggregate_id
+            )
+            if binding is None:
+                raise RuntimeError("Existing antidisable response binding could not be reloaded")
+            return AntidisableResponseBindingMutationResult(binding=binding, created=False)
+
+        try:
+            connection.execute(
+                """
+                INSERT INTO discord_antidisable_response_bindings (
+                    harem_scan_id, response_message_aggregate_id, bound_at
+                ) VALUES (?, ?, ?)
+                """,
+                (scan_id, response_aggregate_id, bound_at_value),
+            )
+        except sqlite3.IntegrityError:
+            existing_binding = connection.execute(
+                """
+                SELECT harem_scan_id, bound_at
+                FROM discord_antidisable_response_bindings
+                WHERE response_message_aggregate_id = ?
+                """,
+                (response_aggregate_id,),
+            ).fetchone()
+            if existing_binding is not None:
+                existing_scan_id = int(existing_binding["harem_scan_id"])
+                if existing_scan_id != scan_id:
+                    raise DiscordAntidisableWorkflowConflictError(
+                        f"Response message aggregate is already bound to workflow {existing_scan_id}"
+                    )
+                if str(existing_binding["bound_at"]) != bound_at_value:
+                    raise DiscordAntidisableWorkflowConflictError(
+                        f"Antidisable response binding {scan_id}/{response_aggregate_id} has conflicting immutable data"
+                    )
+                binding = self._antidisable_response_binding_result(
+                    connection, scan_id, response_aggregate_id
+                )
+                if binding is None:
+                    raise RuntimeError("Existing antidisable response binding could not be reloaded")
+                return AntidisableResponseBindingMutationResult(binding=binding, created=False)
+            raise
+
+        binding = self._antidisable_response_binding_result(
+            connection, scan_id, response_aggregate_id
+        )
+        if binding is None:
+            raise RuntimeError("Inserted antidisable response binding could not be reloaded")
+        return AntidisableResponseBindingMutationResult(binding=binding, created=True)
+
+    @staticmethod
+    def _validate_message_aggregate_key(value: MessageAggregateKey, field_name: str) -> None:
+        if not isinstance(value, MessageAggregateKey):
+            raise TypeError(f"{field_name} must be a MessageAggregateKey")
+
+    @staticmethod
+    def _validate_requesting_user_id(value: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError("requesting_user_id must be a string")
+        if not value.strip():
+            raise ValueError("requesting_user_id must not be blank")
+
+    @staticmethod
+    def _validate_scope_identity(value: str, field_name: str) -> None:
+        if not isinstance(value, str):
+            raise TypeError(f"{field_name} must be a string")
+        if not value.strip():
+            raise ValueError(f"{field_name} must not be blank")
+
+    @staticmethod
+    def _aggregate_key_values(key: MessageAggregateKey) -> tuple[str, str, str, str]:
+        return (key.platform.value, key.guild_id, key.channel_id, key.message_id)
+
+    @staticmethod
+    def _message_aggregate_row(
+        connection: sqlite3.Connection, key: MessageAggregateKey
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, platform, guild_id, channel_id, message_id
+            FROM discord_message_aggregates
+            WHERE platform = ? AND guild_id = ? AND channel_id = ? AND message_id = ?
+            """,
+            DiscordMessageRepository._aggregate_key_values(key),
+        ).fetchone()
+
+    @staticmethod
+    def _antidisable_workflow_row(
+        connection: sqlite3.Connection, scan_id: int
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT
+                w.harem_scan_id,
+                w.request_message_aggregate_id,
+                request.platform AS request_platform,
+                request.guild_id AS request_guild_id,
+                request.channel_id AS request_channel_id,
+                request.message_id AS request_message_id,
+                w.requesting_user_id,
+                w.created_at,
+                w.expires_at,
+                scan.scan_kind,
+                scan.completed_at
+            FROM discord_antidisable_workflows AS w
+            JOIN harem_scans AS scan ON scan.id = w.harem_scan_id
+            JOIN discord_message_aggregates AS request
+              ON request.id = w.request_message_aggregate_id
+            WHERE w.harem_scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _antidisable_workflow_values_match(
+        row: sqlite3.Row,
+        *,
+        requesting_user_id: str,
+        created_at: str,
+        expires_at: str,
+    ) -> bool:
+        return (
+            str(row["requesting_user_id"]) == requesting_user_id
+            and str(row["created_at"]) == created_at
+            and str(row["expires_at"]) == expires_at
+        )
+
+    @staticmethod
+    def _antidisable_workflow_result(
+        row: sqlite3.Row | None,
+    ) -> AntidisableWorkflow | None:
+        if row is None:
+            return None
+        return AntidisableWorkflow(
+            harem_scan_id=int(row["harem_scan_id"]),
+            request_message_aggregate_key=MessageAggregateKey(
+                SourcePlatform(str(row["request_platform"])),
+                str(row["request_guild_id"]),
+                str(row["request_channel_id"]),
+                str(row["request_message_id"]),
+            ),
+            requesting_user_id=str(row["requesting_user_id"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            expires_at=datetime.fromisoformat(str(row["expires_at"])),
+        )
+
+    @staticmethod
+    def _antidisable_response_binding_result(
+        connection: sqlite3.Connection,
+        scan_id: int,
+        response_aggregate_id: int,
+    ) -> AntidisableResponseBinding | None:
+        row = connection.execute(
+            """
+            SELECT
+                binding.harem_scan_id,
+                response.platform AS response_platform,
+                response.guild_id AS response_guild_id,
+                response.channel_id AS response_channel_id,
+                response.message_id AS response_message_id,
+                binding.bound_at
+            FROM discord_antidisable_response_bindings AS binding
+            JOIN discord_message_aggregates AS response
+              ON response.id = binding.response_message_aggregate_id
+            WHERE binding.harem_scan_id = ?
+              AND binding.response_message_aggregate_id = ?
+            """,
+            (scan_id, response_aggregate_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return AntidisableResponseBinding(
+            harem_scan_id=int(row["harem_scan_id"]),
+            response_message_aggregate_key=MessageAggregateKey(
+                SourcePlatform(str(row["response_platform"])),
+                str(row["response_guild_id"]),
+                str(row["response_channel_id"]),
+                str(row["response_message_id"]),
+            ),
+            bound_at=datetime.fromisoformat(str(row["bound_at"])),
+        )
 
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)

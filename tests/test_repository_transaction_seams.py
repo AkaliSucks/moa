@@ -350,6 +350,29 @@ def _receive_and_begin(repository: DiscordMessageRepository):
     return received.source_event_id, attempt.attempt_id
 
 
+def _receive_request(repository: DiscordMessageRepository) -> MessageAggregateKey:
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD,
+        "guild-1",
+        "channel-1",
+        "request-message",
+    )
+    repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(
+            aggregate_key, "request-payload-hash", "request-revision"
+        ),
+        event_key="request-event",
+        event_kind="message_create",
+        raw_text="request",
+        payload_json='{"content":"request"}',
+        payload_capture_version="capture-1",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    return aggregate_key
+
+
 def _counts(connection: sqlite3.Connection) -> dict[str, int]:
     tables = (
         "import_events",
@@ -4301,6 +4324,101 @@ def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path)
 
     catalog.complete_antidisable_scan(scan.id)
     assert catalog.antidisable_series("Server", "Account") == ("Series A", "Series B", "Series C")
+
+
+def test_antidisable_scan_and_workflow_helpers_commit_atomically_on_one_connection(
+    tmp_path,
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    request_message = _receive_request(discord)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        scan_id = catalog._begin_antidisable_scan_with_connection(
+            connection,
+            server="Server",
+            account="Account",
+            observed_at=OBSERVED_AT,
+        )
+        workflow_result = discord._create_antidisable_workflow_with_connection(
+            connection,
+            scan_id=scan_id,
+            request_message_aggregate_key=request_message,
+            requesting_user_id="known-user",
+            created_at=OBSERVED_AT,
+            expires_at=FINISHED_AT,
+        )
+        assert connection.in_transaction is True
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0] == 1
+        assert workflow_result.created is True
+        with connect(database_path) as observer:
+            assert observer.execute(
+                "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0] == 0
+            assert observer.execute(
+                "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+                (scan_id,),
+            ).fetchone()[0] == 0
+        connection.commit()
+
+    with connect(database_path) as observer:
+        assert observer.execute(
+            "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == 1
+        assert observer.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0] == 1
+
+
+def test_antidisable_scan_and_workflow_helpers_rollback_atomically_on_one_connection(
+    tmp_path,
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    request_message = _receive_request(discord)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        scan_id = catalog._begin_antidisable_scan_with_connection(
+            connection,
+            server="Server",
+            account="Account",
+            observed_at=OBSERVED_AT,
+        )
+        discord._create_antidisable_workflow_with_connection(
+            connection,
+            scan_id=scan_id,
+            request_message_aggregate_key=request_message,
+            requesting_user_id="known-user",
+            created_at=OBSERVED_AT,
+            expires_at=FINISHED_AT,
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0] == 1
+        connection.rollback()
+
+    with connect(database_path) as observer:
+        assert observer.execute(
+            "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == 0
+        assert observer.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan_id,),
+        ).fetchone()[0] == 0
+        assert observer.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert observer.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert observer.execute("SELECT COUNT(*) FROM discord_message_aggregates").fetchone()[0] == 1
 
 
 def test_antidisable_duplicate_and_invalid_pages_keep_existing_rejections(tmp_path) -> None:
