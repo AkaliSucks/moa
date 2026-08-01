@@ -14,6 +14,7 @@ import discord
 import pytest
 
 from moa.database.sqlite import connect
+from moa.models.discord_message_mapping import build_message_receive_envelope
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.core.config import ConfigAccount, ConfigService, MOAConfig
@@ -8648,3 +8649,237 @@ def test_listener_adl_never_enters_disablelist_durable_path(tmp_path) -> None:
     assert importer.import_message.call_args.kwargs["detected_kind"] == "antidisable"
     assert "durable_disablelist_context" not in importer.import_message.call_args.kwargs
     assert _durable_disablelist_counts(database_path) == (1, 1, 0, 0, 0, 1, 1)
+
+
+_ADL_REQUEST_TIME = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
+
+
+def _adl_request_message(
+    message_id: int = 1300,
+    *,
+    user_id: int = 456,
+    channel_id: int = 900,
+    content: str = "$adl",
+    created_at: datetime = _ADL_REQUEST_TIME,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=channel_id),
+        author=SimpleNamespace(bot=False, id=user_id),
+        content=content,
+        created_at=created_at,
+        edited_at=None,
+        interaction_metadata=None,
+    )
+
+
+def _adl_request_aggregate(message) -> object:
+    return build_message_receive_envelope(
+        guild_id=str(message.guild.id),
+        channel_id=str(message.channel.id),
+        message_id=str(message.id),
+        raw_text=message.content,
+        source_revision_at=None,
+        received_at=_ADL_REQUEST_TIME,
+    ).aggregate_key
+
+
+def _adl_durable_counts(database_path):
+    with connect(database_path) as connection:
+        return tuple(
+            connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM discord_message_aggregates), "
+                "(SELECT COUNT(*) FROM discord_source_events), "
+                "(SELECT COUNT(*) FROM harem_scans WHERE scan_kind = 'antidisable'), "
+                "(SELECT COUNT(*) FROM discord_antidisable_workflows), "
+                "(SELECT COUNT(*) FROM server_contexts), "
+                "(SELECT COUNT(*) FROM account_contexts)"
+            ).fetchone()
+        )
+
+
+def test_listener_adl_request_receipt_precedes_durable_workflow_start(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    order: list[str] = []
+    original_receive = repository.receive_message
+    original_lookup = repository.get_antidisable_workflow_by_request_message
+    original_scan = listener._catalog._repository._begin_antidisable_scan_with_connection
+    original_workflow = repository._create_antidisable_workflow_with_connection
+
+    def receive_message(**kwargs):
+        order.append("receipt")
+        return original_receive(**kwargs)
+
+    def lookup(*args, **kwargs):
+        order.append("lookup")
+        return original_lookup(*args, **kwargs)
+
+    def begin_scan(*args, **kwargs):
+        order.append("scan")
+        return original_scan(*args, **kwargs)
+
+    def create_workflow(*args, **kwargs):
+        order.append("workflow")
+        return original_workflow(*args, **kwargs)
+
+    repository.receive_message = receive_message
+    repository.get_antidisable_workflow_by_request_message = lookup
+    listener._catalog._repository._begin_antidisable_scan_with_connection = begin_scan
+    repository._create_antidisable_workflow_with_connection = create_workflow
+    message = _adl_request_message()
+
+    asyncio.run(listener.handle_message(message))
+
+    assert order == ["receipt", "lookup", "scan", "workflow"]
+    assert _adl_durable_counts(database_path) == (1, 1, 1, 1, 1, 1)
+    assert repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(message)
+    ) is not None
+
+
+def test_listener_adl_request_starts_durable_scan_and_workflow(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _adl_request_message()
+
+    asyncio.run(listener.handle_message(message))
+
+    workflow = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(message)
+    )
+    assert workflow is not None
+    assert workflow.requesting_user_id == "456"
+    assert workflow.created_at == _ADL_REQUEST_TIME
+    assert workflow.expires_at == _ADL_REQUEST_TIME + timedelta(minutes=5)
+    assert workflow.expires_at > _ADL_REQUEST_TIME
+    with connect(database_path) as connection:
+        scan = connection.execute(
+            "SELECT id, completed_at FROM harem_scans WHERE scan_kind = 'antidisable'"
+        ).fetchone()
+    assert scan[0] == workflow.harem_scan_id
+    assert scan[1] is None
+    assert listener._scan_ids[("test server", "user_a", "antidisable")] == scan[0]
+
+
+def test_listener_adl_scan_and_workflow_roll_back_together(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository._create_antidisable_workflow_with_connection = Mock(
+        side_effect=RuntimeError("workflow start failed")
+    )
+
+    asyncio.run(listener.handle_message(_adl_request_message()))
+
+    assert _adl_durable_counts(database_path) == (1, 1, 0, 0, 0, 0)
+    assert listener._pending_contexts == {}
+
+
+def test_listener_adl_receipt_survives_start_failure_and_retry(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    original_workflow = repository._create_antidisable_workflow_with_connection
+    repository._create_antidisable_workflow_with_connection = Mock(
+        side_effect=RuntimeError("workflow start failed")
+    )
+    message = _adl_request_message()
+
+    asyncio.run(listener.handle_message(message))
+    assert _adl_durable_counts(database_path) == (1, 1, 0, 0, 0, 0)
+
+    repository._create_antidisable_workflow_with_connection = original_workflow
+    asyncio.run(listener.handle_message(message))
+
+    assert _adl_durable_counts(database_path) == (1, 1, 1, 1, 1, 1)
+    assert _receipt_rows(database_path, "discord_source_events")[0]["delivery_count"] == 2
+
+
+def test_listener_adl_duplicate_delivery_reuses_durable_workflow(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _adl_request_message()
+
+    asyncio.run(listener.handle_message(message))
+    asyncio.run(listener.handle_message(message))
+
+    workflow = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(message)
+    )
+    assert workflow is not None
+    assert _adl_durable_counts(database_path) == (1, 1, 1, 1, 1, 1)
+
+
+def test_listener_adl_reconstruction_reuses_durable_workflow(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    message = _adl_request_message()
+    asyncio.run(listener.handle_message(message))
+    first = repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(message)
+    )
+
+    restarted_listener, restarted_repository, _ = _durable_listener(tmp_path)
+    asyncio.run(restarted_listener.handle_message(message))
+    second = restarted_repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(message)
+    )
+
+    assert first == second
+    assert _adl_durable_counts(database_path) == (1, 1, 1, 1, 1, 1)
+
+
+def test_listener_adl_distinct_requests_from_same_user_create_distinct_workflows(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_adl_request_message(1300)))
+    asyncio.run(listener.handle_message(_adl_request_message(1301)))
+
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT harem_scan_id, request_message_aggregate_id, requesting_user_id "
+            "FROM discord_antidisable_workflows ORDER BY harem_scan_id"
+        ).fetchall()
+    assert len(rows) == 2
+    assert [row[2] for row in rows] == ["456", "456"]
+    assert rows[0][0] != rows[1][0]
+    assert repository.get_antidisable_workflow_by_request_message(
+        _adl_request_aggregate(_adl_request_message(1300))
+    ) is not None
+
+
+def test_listener_adl_requests_from_two_users_sharing_channel_both_persist(tmp_path) -> None:
+    listener, repository, database_path = _attribution_listener(
+        tmp_path,
+        "adl-two-users.json",
+        (
+            ("Test Server", "user_a", "primary", "456"),
+            ("Test Server", "user_b", "alt", "789"),
+        ),
+    )
+
+    asyncio.run(listener.handle_message(_adl_request_message(1300, user_id=456)))
+    asyncio.run(listener.handle_message(_adl_request_message(1301, user_id=789)))
+
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT requesting_user_id FROM discord_antidisable_workflows "
+            "ORDER BY harem_scan_id"
+        ).fetchall()
+    assert [row[0] for row in rows] == ["456", "789"]
+    assert _adl_durable_counts(database_path) == (2, 2, 2, 2, 1, 2)
+    assert listener._pending_contexts[('123', 900, '456')].identity.account == "user_a"
+    assert listener._pending_contexts[('123', 900, '789')].identity.account == "user_b"
+
+
+def test_listener_adl_start_does_not_run_for_unrelated_prefix_command(tmp_path) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_adl_request_message(content="$wa")))
+
+    assert _adl_durable_counts(database_path) == (0, 0, 0, 0, 0, 0)
+
+
+def test_listener_adl_receipt_failure_does_not_advance_pending_state(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    repository.receive_message = Mock(side_effect=RuntimeError("receive unavailable"))
+
+    asyncio.run(listener.handle_message(_adl_request_message()))
+
+    assert _adl_durable_counts(database_path) == (0, 0, 0, 0, 0, 0)
+    assert listener._pending_contexts == {}

@@ -11,13 +11,14 @@ import re
 import time
 import warnings
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
 import discord
 
 from moa.core.config import ConfigAccount, ConfigService
+from moa.database.sqlite import connect
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.models.discord_message_mapping import build_message_receive_envelope
@@ -835,6 +836,11 @@ class DiscordListenerService:
             ),
             evidence_source="command_author",
         )
+        if expected_kind == "antidisable" and self._discord_message_repository is not None:
+            durable_context = self._start_antidisable_workflow(message, context, content)
+            if durable_context is None:
+                return
+            context = durable_context
         self._remember_context(message.channel.id, context)
         self._command_contexts[message.id] = context
         if len(self._command_contexts) > 2000:
@@ -2099,25 +2105,30 @@ class DiscordListenerService:
             attribution_status,
         )
 
-    def _receive_message(
-        self, message: discord.Message, raw_message: str
-    ) -> ReceivedMessageEvent | None:
-        """Persist an accepted message revision before downstream processing."""
+    def _receive_message_record(
+        self,
+        message: discord.Message,
+        raw_message: str,
+        *,
+        received_at: datetime | None = None,
+    ) -> tuple[ReceivedMessageEvent, Any] | None:
+        """Persist one accepted message revision and retain its stable envelope."""
         repository = self._discord_message_repository
         if repository is None:
             return None
         try:
+            durable_received_at = received_at or datetime.now(timezone.utc)
             envelope = build_message_receive_envelope(
                 guild_id=str(message.guild.id),
                 channel_id=str(message.channel.id),
                 message_id=str(message.id),
                 raw_text=raw_message,
                 source_revision_at=self._source_revision_at(message),
-                received_at=datetime.now(timezone.utc),
+                received_at=durable_received_at,
                 payload_json=None,
                 payload_capture_version=None,
             )
-            return repository.receive_message(
+            received_event = repository.receive_message(
                 aggregate_key=envelope.aggregate_key,
                 revision_key=envelope.revision_key,
                 event_key=envelope.event_key,
@@ -2128,6 +2139,7 @@ class DiscordListenerService:
                 source_observed_at=envelope.source_observed_at,
                 received_at=envelope.received_at,
             )
+            return received_event, envelope
         except Exception as error:  # Keep callback stability while refusing downstream work.
             self._logger.warning(
                 "Could not durably receive Discord message "
@@ -2135,6 +2147,96 @@ class DiscordListenerService:
                 getattr(getattr(message, "guild", None), "id", None),
                 getattr(getattr(message, "channel", None), "id", None),
                 getattr(message, "id", None),
+                error,
+            )
+            return None
+
+    def _receive_message(
+        self, message: discord.Message, raw_message: str
+    ) -> ReceivedMessageEvent | None:
+        """Persist an accepted message revision before downstream processing."""
+        received_record = self._receive_message_record(message, raw_message)
+        return received_record[0] if received_record is not None else None
+
+    @staticmethod
+    def _message_received_at(message: discord.Message) -> datetime:
+        """Use Discord's message time when available, otherwise the receive time."""
+        created_at = getattr(message, "created_at", None)
+        if isinstance(created_at, datetime) and created_at.utcoffset() is not None:
+            return created_at.astimezone(timezone.utc)
+        return datetime.now(timezone.utc)
+
+    def _start_antidisable_workflow(
+        self,
+        message: discord.Message,
+        context: DiscordCommandContext,
+        raw_message: str,
+    ) -> DiscordCommandContext | None:
+        """Durably receive one `$adl` request and create its workflow atomically."""
+        received_at = self._message_received_at(message)
+        received_record = self._receive_message_record(
+            message,
+            raw_message,
+            received_at=received_at,
+        )
+        if received_record is None:
+            return None
+        _received_event, envelope = received_record
+        repository = self._discord_message_repository
+        catalog_repository = getattr(self._catalog, "_repository", None)
+        if repository is None or catalog_repository is None:
+            self._logger.warning(
+                "Could not start durable antidisable workflow for Discord message %s: "
+                "required repositories are unavailable",
+                message.id,
+            )
+            return None
+        try:
+            workflow = repository.get_antidisable_workflow_by_request_message(
+                envelope.aggregate_key
+            )
+            if workflow is None:
+                database_path = getattr(repository, "_database_path", None)
+                connection = connect(database_path)
+                try:
+                    connection.execute("BEGIN")
+                    scan_id = catalog_repository._begin_antidisable_scan_with_connection(
+                        connection,
+                        server=context.identity.server,
+                        account=context.identity.account,
+                        observed_at=received_at,
+                    )
+                    workflow_result = repository._create_antidisable_workflow_with_connection(
+                        connection,
+                        scan_id=scan_id,
+                        request_message_aggregate_key=envelope.aggregate_key,
+                        requesting_user_id=context.user_id,
+                        created_at=received_at,
+                        expires_at=received_at
+                        + timedelta(seconds=self._CONTEXT_TTL_SECONDS),
+                    )
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.close()
+                workflow = workflow_result.workflow
+            scan_key = (
+                context.identity.server.casefold(),
+                context.identity.account.casefold(),
+                "antidisable",
+            )
+            self._scan_ids[scan_key] = workflow.harem_scan_id
+            refreshed_context = replace(context, captured_at=time.monotonic())
+            self._scan_contexts[
+                (int(message.guild.id), int(message.channel.id), "antidisable")
+            ] = refreshed_context
+            return refreshed_context
+        except Exception as error:
+            self._logger.warning(
+                "Could not start durable antidisable workflow for Discord message %s: %s",
+                message.id,
                 error,
             )
             return None
