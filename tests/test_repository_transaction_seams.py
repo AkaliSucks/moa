@@ -3947,6 +3947,167 @@ def test_public_antidisable_import_preserves_result_and_stored_values(tmp_path) 
         ]
 
 
+def test_antidisable_scan_start_helper_visibility_and_commit(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        scan_id = catalog._begin_antidisable_scan_with_connection(
+            connection,
+            server=" Server ",
+            account=" Account ",
+            observed_at=OBSERVED_AT,
+        )
+        assert scan_id > 0
+        assert connection.in_transaction is True
+        scan = connection.execute(
+            """
+            SELECT harem_scans.id, server_contexts.name, account_contexts.name,
+                   harem_scans.expected_page_count, harem_scans.completed_at,
+                   harem_scans.scan_kind, harem_scans.started_at
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            WHERE harem_scans.id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+        assert tuple(scan) == (
+            scan_id,
+            "Server",
+            "Account",
+            None,
+            None,
+            "antidisable",
+            OBSERVED_AT.isoformat(),
+        )
+        assert _antidisable_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "harem_scans": 1,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        with connect(database_path) as observer:
+            assert _antidisable_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "harem_scans": 0,
+                "harem_scan_pages": 0,
+                "antidisable_series_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.commit()
+
+    with connect(database_path) as observer:
+        assert _antidisable_counts(observer) == {
+            "import_events": 0,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "harem_scans": 1,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        assert observer.execute(
+            "SELECT account_context_id FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] > 0
+
+
+def test_antidisable_scan_start_helper_external_rollback_removes_new_rows(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        scan_id = catalog._begin_antidisable_scan_with_connection(
+            connection,
+            server="Server",
+            account="Account",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        with connect(database_path) as observer:
+            assert _antidisable_counts(observer) == {
+                "import_events": 0,
+                "server_contexts": 0,
+                "account_contexts": 0,
+                "harem_scans": 0,
+                "harem_scan_pages": 0,
+                "antidisable_series_observations": 0,
+                "discord_projection_links": 0,
+                "discord_source_events": 0,
+                "discord_source_event_server_attributions": 0,
+                "discord_source_event_account_attributions": 0,
+                "discord_processing_attempts": 0,
+            }
+        connection.rollback()
+
+    with connect(database_path) as observer:
+        assert _antidisable_counts(observer) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "harem_scans": 0,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+
+def test_public_antidisable_scan_start_preserves_result_and_commits(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    scan = catalog.begin_antidisable_scan(" Server ", " Account ")
+
+    assert scan.id > 0
+    assert scan.server_name == "Server"
+    assert scan.account_name == "Account"
+    assert scan.expected_page_count is None
+    assert scan.imported_pages == ()
+    assert scan.completed_at is None
+    assert scan.scan_kind == "antidisable"
+    with connect(database_path) as connection:
+        assert _antidisable_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "harem_scans": 1,
+            "harem_scan_pages": 0,
+            "antidisable_series_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+        assert connection.execute(
+            "SELECT scan_kind FROM harem_scans WHERE id = ?", (scan.id,)
+        ).fetchone()[0] == "antidisable"
+
+
 def test_antidisable_helper_uses_supplied_connection_and_returns_actual_ids(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 

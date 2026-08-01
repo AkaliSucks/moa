@@ -2382,17 +2382,33 @@ class CatalogRepository:
         """Start a complete multi-page `$adl` scan."""
         observed_at = datetime.now(timezone.utc)
         with self._connection() as connection:
-            server_id = self._upsert_server(connection, server_name, observed_at)
-            account_id = self._upsert_account(connection, server_id, account_name, observed_at)
-            cursor = connection.execute(
-                "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at, scan_kind) "
-                "VALUES (?, NULL, ?, 'antidisable')",
-                (account_id, observed_at.isoformat()),
+            scan_id = self._begin_antidisable_scan_with_connection(
+                connection,
+                server=server_name,
+                account=account_name,
+                observed_at=observed_at,
             )
-            scan_id = int(cursor.lastrowid)
         progress = self.harem_scan_progress(scan_id)
         assert progress is not None
         return progress
+
+    def _begin_antidisable_scan_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        server: str,
+        account: str,
+        observed_at: datetime,
+    ) -> int:
+        """Start one antidisable scan without taking transaction ownership."""
+        server_id = self._upsert_server(connection, server, observed_at)
+        account_id = self._upsert_account(connection, server_id, account, observed_at)
+        cursor = connection.execute(
+            "INSERT INTO harem_scans (account_context_id, expected_page_count, started_at, scan_kind) "
+            "VALUES (?, NULL, ?, 'antidisable')",
+            (account_id, observed_at.isoformat()),
+        )
+        return int(cursor.lastrowid)
 
     def antidisable_series(
         self, server_name: str, account_name: str
