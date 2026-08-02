@@ -352,6 +352,101 @@ def test_diagnostic_capture_component_paths_and_digests_are_structural(tmp_path)
     assert "same" not in output_path.read_text(encoding="utf-8")
 
 
+def test_diagnostic_capture_component_emoji_identity_is_sanitized_and_nested(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    assert capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "500",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "300"},
+                "components": [
+                    {
+                        "type": 1,
+                        "components": [
+                            {"type": 2, "custom_id": "same", "emoji": {"id": "987654321012345678", "name": "synthetic-variant-a", "animated": True}},
+                            {"type": 2, "custom_id": "other", "emoji": {"id": "876543210123456789", "name": "synthetic-variant-b"}},
+                            {"type": 2, "custom_id": "unicode", "emoji": {"name": "🔵", "animated": True}},
+                            {"type": 2, "custom_id": "none"},
+                            {"type": 2, "custom_id": "same-position", "emoji": {"id": "987654321012345678", "name": "synthetic-variant-a", "animated": True}},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    capture.close()
+
+    leaves = json.loads(output_path.read_text(encoding="utf-8"))["message"]["components"][0]["components"]
+    assert leaves[0]["path"] == [0, 0]
+    assert leaves[4]["path"] == [0, 4]
+    assert leaves[0]["path"] != leaves[4]["path"]
+    assert leaves[0]["emoji"] == {
+        "animated": True,
+        "id_sha256": hashlib.sha256(b"custom-id:987654321012345678").hexdigest(),
+        "kind": "custom",
+        "name_length": len("synthetic-variant-a"),
+        "name_sha256": hashlib.sha256(b"custom-name:synthetic-variant-a").hexdigest(),
+    }
+    assert leaves[0]["emoji"]["id_sha256"] != leaves[1]["emoji"]["id_sha256"]
+    assert leaves[0]["emoji"]["name_sha256"] != leaves[1]["emoji"]["name_sha256"]
+    assert leaves[0]["custom_id_sha256"] != leaves[4]["custom_id_sha256"]
+    assert leaves[0]["emoji"]["id_sha256"] == leaves[4]["emoji"]["id_sha256"]
+    assert leaves[0]["emoji"]["name_sha256"] == leaves[4]["emoji"]["name_sha256"]
+    assert leaves[0]["emoji"]["kind"] == leaves[4]["emoji"]["kind"]
+    assert leaves[0]["emoji"]["name_length"] == leaves[4]["emoji"]["name_length"]
+    assert leaves[0]["emoji"]["animated"] == leaves[4]["emoji"]["animated"]
+    assert leaves[2]["emoji"] == {
+        "name_length": len("🔵"),
+        "name_sha256": hashlib.sha256("unicode:🔵".encode()).hexdigest(),
+        "kind": "unicode",
+    }
+    assert "animated" not in leaves[2]["emoji"]
+    assert "emoji" not in leaves[3]
+    serialized = output_path.read_text(encoding="utf-8")
+    for raw_value in ("987654321012345678", "876543210123456789", "synthetic-variant-a", "synthetic-variant-b"):
+        assert raw_value not in serialized
+    assert all("semantic" not in leaf["emoji"] for leaf in leaves[:3])
+
+
+def test_diagnostic_capture_component_emoji_identity_tracks_visible_state(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+
+    def snapshot(emoji, *, disabled=False):
+        return capture.capture_gateway_payload(
+            {
+                "t": "MESSAGE_UPDATE",
+                "d": {
+                    "id": "500",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "components": [{"type": 1, "components": [{"type": 2, "custom_id": "stable", "disabled": disabled, "emoji": emoji}]}],
+                },
+            }
+        )
+
+    assert snapshot({"id": "111111111111111111", "name": "question"})
+    assert snapshot({"id": "222222222222222222", "name": "synthetic-revealed"})
+    assert snapshot({"id": "222222222222222222", "name": "synthetic-revealed"}, disabled=True)
+    assert snapshot(None)
+    capture.close()
+
+    records = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    components = [record["message"]["components"][0]["components"][0] for record in records]
+    assert all(component["path"] == [0, 0] for component in components)
+    assert all(component["custom_id_sha256"] == components[0]["custom_id_sha256"] for component in components)
+    assert components[0]["emoji"]["id_sha256"] != components[1]["emoji"]["id_sha256"]
+    assert components[0]["emoji"]["name_sha256"] != components[1]["emoji"]["name_sha256"]
+    assert components[1]["emoji"] == components[2]["emoji"]
+    assert components[1]["disabled"] is False
+    assert components[2]["disabled"] is True
+    assert "emoji" not in components[3]
+
+
 def test_diagnostic_capture_closes_after_encoding_failure(tmp_path) -> None:
     capture, output_path = _diagnostic_capture(tmp_path)
     capture._open_output()

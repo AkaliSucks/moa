@@ -419,7 +419,33 @@ class DiscordEventCaptureService:
                 else None,
                 "values_sha256": self._safe_digests(value.get("values")),
                 "disabled": value.get("disabled") if isinstance(value.get("disabled"), bool) else None,
+                "emoji": self._emoji_record(value.get("emoji")),
                 "components": self._components_record(value.get("components"), path),
+            }
+        )
+
+    @classmethod
+    def _emoji_record(cls, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        emoji_id = cls._id(value.get("id"))
+        emoji_name = value.get("name")
+        if emoji_id is None and not isinstance(emoji_name, str):
+            return None
+        kind = "custom" if emoji_id is not None else "unicode"
+        return cls._without_none(
+            {
+                "kind": kind,
+                "id_sha256": cls._safe_digest(f"custom-id:{emoji_id}") if emoji_id is not None else None,
+                "name_sha256": cls._safe_digest(
+                    f"custom-name:{emoji_name}" if kind == "custom" else f"unicode:{emoji_name}"
+                )
+                if isinstance(emoji_name, str)
+                else None,
+                "name_length": len(emoji_name) if isinstance(emoji_name, str) else None,
+                "animated": value.get("animated")
+                if kind == "custom" and isinstance(value.get("animated"), bool)
+                else None,
             }
         )
 
