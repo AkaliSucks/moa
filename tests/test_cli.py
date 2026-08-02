@@ -10,6 +10,9 @@ from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import AutomaticImportService
+from moa.services.antidisable_page_projection_coordinator import (
+    AntidisablePageProjectionCoordinator,
+)
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
@@ -490,6 +493,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     player_bonus_coordinators: list[PlayerBonusProjectionCoordinator] = []
     disablelist_coordinators: list[DisableListProjectionCoordinator] = []
     wishlist_coordinators: list[WishlistProjectionCoordinator] = []
+    antidisable_coordinators: list[AntidisablePageProjectionCoordinator] = []
 
     class RecordingCatalogRepository(CatalogRepository):
         def __init__(self, *args, **kwargs):
@@ -548,6 +552,13 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             wishlist_coordinators.append(self)
             super().__init__(*repositories)
 
+    class RecordingAntidisablePageProjectionCoordinator(
+        AntidisablePageProjectionCoordinator
+    ):
+        def __init__(self, *repositories):
+            antidisable_coordinators.append(self)
+            super().__init__(*repositories)
+
     class FakeListener:
         def __init__(self, **kwargs):
             listeners.append(self)
@@ -598,6 +609,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         "WishlistProjectionCoordinator",
         RecordingWishlistProjectionCoordinator,
     )
+    monkeypatch.setattr(
+        main,
+        "AntidisablePageProjectionCoordinator",
+        RecordingAntidisablePageProjectionCoordinator,
+    )
 
     result = CliRunner().invoke(
         main.app,
@@ -621,6 +637,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     player_bonus_coordinator = importer._player_bonus_projection_coordinator
     disablelist_coordinator = importer._disablelist_projection_coordinator
     wishlist_coordinator = importer._wishlist_projection_coordinator
+    antidisable_coordinator = importer._antidisable_page_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
@@ -642,6 +659,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert isinstance(player_bonus_coordinator, PlayerBonusProjectionCoordinator)
     assert isinstance(disablelist_coordinator, DisableListProjectionCoordinator)
     assert isinstance(wishlist_coordinator, WishlistProjectionCoordinator)
+    assert isinstance(antidisable_coordinator, AntidisablePageProjectionCoordinator)
     assert kakera_coordinators == [kakera_coordinator]
     assert kakeraloot_coordinators == [kakeraloot_coordinator]
     assert timer_coordinators == [timer_coordinator]
@@ -650,6 +668,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert player_bonus_coordinators == [player_bonus_coordinator]
     assert disablelist_coordinators == [disablelist_coordinator]
     assert wishlist_coordinators == [wishlist_coordinator]
+    assert antidisable_coordinators == [antidisable_coordinator]
     assert catalog_service._repository._database_path == database_path
     assert discord_repository._database_path == database_path
     assert coordinator._catalog is catalog_service._repository
@@ -691,6 +710,10 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     assert disablelist_coordinator._catalog is catalog_service._repository
     assert disablelist_coordinator._discord is discord_repository
     assert disablelist_coordinator._database_path == database_path
+    assert antidisable_coordinator._catalog is catalog_service._repository
+    assert antidisable_coordinator._discord is discord_repository
+    assert antidisable_coordinator._database_path == database_path
+    assert importer._antidisable_page_projection_coordinator is antidisable_coordinator
     assert timer_coordinators[0]._catalog is catalog_service._repository
     assert timer_coordinators[0]._discord is discord_repository
     assert captured["catalog_service"] is importer._catalog
