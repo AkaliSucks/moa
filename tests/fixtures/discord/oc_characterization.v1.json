@@ -1,0 +1,215 @@
+{
+  "annotation_schema_version": 1,
+  "annotation_kind": "operator_characterization",
+  "structural_fixture": "oc_structural_capture.v1.json",
+  "pre_state": {
+    "evidence": "pre-command $tu capture",
+    "oc_remaining": 1,
+    "ot_remaining": 0,
+    "sphere_stock": 1614,
+    "post_use_oc_remaining": "unknown; no post-use $tu was captured"
+  },
+  "initial_workflow": {
+    "evidence": "captured Mudae instruction text and structural board",
+    "board": {
+      "rows": 5,
+      "columns": 5,
+      "initial_visual": "hidden/question"
+    },
+    "clicks_allowed": 5,
+    "time_limit_minutes": 2,
+    "instructions": [
+      {
+        "visual": "Red",
+        "rule": "1 Red, never at center"
+      },
+      {
+        "visual": "Orange",
+        "rule": "2 Orange, always next to Red"
+      },
+      {
+        "visual": "Yellow",
+        "rule": "3 Yellow, always diagonal to Red"
+      },
+      {
+        "visual": "Green",
+        "rule": "4 Green, in same row or column as Red"
+      },
+      {
+        "visual": "Teal",
+        "rule": "Teal, in same row, column, or diagonal as Red"
+      },
+      {
+        "visual": "Blue",
+        "rule": "Blue, never in same row, column, or diagonal as Red"
+      }
+    ]
+  },
+  "semantic_visual_aliases": {
+    "evidence": "safe opaque hashes from admitted structural fixture",
+    "visuals": {
+      "hidden/question": {
+        "kind": "custom",
+        "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+        "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254",
+        "name_length": 3
+      },
+      "Red": {
+        "kind": "custom",
+        "id_sha256": "3e64b4c4b45f51d24a831efb97de48a960793f3e299b3a2f94c129c96003fe6e",
+        "name_sha256": "c37025507bdaffde3d4f667af6a8155ed87978b45dff6518e0c53842652d1164",
+        "name_length": 2
+      },
+      "Orange": {
+        "kind": "custom",
+        "id_sha256": "f8666d54fd7b9e30230a10013b4ea078ce03fe9816a3d0ed6c5b41b5e07d900f",
+        "name_sha256": "622331044bf2986cd8c1eb8e1f17d95280f2ce81a9f6f412b97abafd5bd02c38",
+        "name_length": 3
+      },
+      "Yellow": {
+        "kind": "custom",
+        "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+        "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0",
+        "name_length": 3
+      },
+      "Green": {
+        "kind": "custom",
+        "id_sha256": "50356ac444db86d80759ca5494ae84639a42546212b7be361cf5fc3396afdc30",
+        "name_sha256": "3b1a7edf886cf0fdfe5b2ad1d1910cf24663a1812b5e55fe50b307951ebdeffa",
+        "name_length": 3
+      },
+      "Teal": {
+        "kind": "custom",
+        "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+        "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19",
+        "name_length": 3
+      },
+      "Blue": {
+        "kind": "custom",
+        "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+        "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b",
+        "name_length": 3
+      }
+    }
+  },
+  "actions": [
+    {
+      "action": 1,
+      "coordinate": "R4C4",
+      "transition": "hidden/question -> Blue",
+      "reward": 10,
+      "provenance": "operator-observed"
+    },
+    {
+      "action": 2,
+      "coordinate": "R2C2",
+      "transition": "hidden/question -> Green",
+      "reward": 35,
+      "provenance": "operator-observed"
+    },
+    {
+      "action": 3,
+      "coordinate": "R2C1",
+      "transition": "hidden/question -> Blue",
+      "reward": 10,
+      "provenance": "operator-observed"
+    },
+    {
+      "action": 4,
+      "coordinate": "R5C2",
+      "transition": "hidden/question -> Red",
+      "reward": 150,
+      "provenance": "operator-observed"
+    },
+    {
+      "action": 5,
+      "coordinate": "R5C1",
+      "transition": "hidden/question -> Orange",
+      "reward": 90,
+      "terminal_action": true,
+      "provenance": "operator-observed"
+    }
+  ],
+  "final_stock": 1909,
+  "observed_total_gain": 295,
+  "final_click_provenance": {
+    "coordinate": "R5C1",
+    "status": "operator-observed",
+    "structural_inference": "not inferred from terminal all-disabled state"
+  },
+  "final_board": {
+    "basis": "operator-observed final board",
+    "rows": [
+      ["Blue", "Teal", "Blue", "Blue", "Blue"],
+      ["Blue", "Green", "Blue", "Blue", "Yellow"],
+      ["Blue", "Green", "Blue", "Yellow", "Blue"],
+      ["Teal", "Green", "Yellow", "Blue", "Blue"],
+      ["Orange", "Red", "Orange", "Teal", "Green"]
+    ],
+    "counts": {
+      "Red": 1,
+      "Orange": 2,
+      "Yellow": 3,
+      "Green": 4,
+      "Teal": 3,
+      "Blue": 12
+    }
+  },
+  "count_provenance": {
+    "mudae_stated_fixed": {
+      "Red": 1,
+      "Orange": 2,
+      "Yellow": 3,
+      "Green": 4
+    },
+    "capture_realized_only": {
+      "Teal": 3,
+      "Blue": 12
+    }
+  },
+  "candidate_reasoning": {
+    "basis": "operator reasoning trail; not production solver behavior",
+    "initial": {
+      "count": 24,
+      "excluded": "R3C3",
+      "description": "all 25 cells except center R3C3"
+    },
+    "after_R4C4_Blue": {
+      "constraint": "apply no-same-row/column/diagonal constraint"
+    },
+    "after_R2C2_Green": ["R1C2", "R2C1", "R2C3", "R2C5", "R3C2", "R5C2"],
+    "after_R2C1_Blue": ["R5C2"],
+    "red_click": {
+      "coordinate": "R5C2",
+      "certainty": "operator certainty",
+      "terminal_inference": false
+    }
+  },
+  "opening_strategy": {
+    "preferred_squares": ["R2C2", "R2C4", "R4C2", "R4C4"],
+    "symmetry": "symmetry-equivalent under currently known row/column/diagonal geometry",
+    "operator_view": "good starting locations",
+    "globally_optimal": false,
+    "capture_used": "R4C4"
+  },
+  "orange_ambiguity": {
+    "captured_wording": "Orange is always next to Red.",
+    "unresolved_semantics": [
+      "orthogonally adjacent only",
+      "all eight neighboring cells",
+      "another Mudae-specific relation"
+    ],
+    "capture_observation": {
+      "red": "R5C2",
+      "orange": ["R5C1", "R5C3"]
+    },
+    "compatible_with": "orthogonal adjacency",
+    "universal_definition_proven": false
+  },
+  "generalization_boundaries": [
+    "No post-use $tu count was captured.",
+    "Teal=3 and Blue=12 are realized counts for this capture only.",
+    "Terminal disablement does not identify the final clicked coordinate.",
+    "No production semantic alias registry, solver, payout, or recommendation is established."
+  ]
+}
