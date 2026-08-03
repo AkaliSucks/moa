@@ -1,0 +1,207 @@
+{
+  "annotation_schema_version": 1,
+  "coordinate_convention": "R{row}C{column}; rows and columns are 1-based human coordinates.",
+  "source_fixture": "oh_structural_capture.v1.json",
+  "structural_facts": {
+    "board_shape": [
+      5,
+      5
+    ],
+    "board_snapshot_count": 7,
+    "terminal_board_all_disabled": true,
+    "final_click_inferred_from_terminal_transition": false
+  },
+  "operator_observed_facts": {
+    "initial_state": {
+      "revealed_unclaimed": [
+        {
+          "coordinate": "R2C3",
+          "emoji": "Purple"
+        }
+      ],
+      "all_other_cells": "hidden",
+      "invested_spheres_reward": 60,
+      "ordinary_click_allowance": 5
+    },
+    "actions": [
+      {
+        "action": 0,
+        "coordinate": "R2C3",
+        "emoji": "Purple",
+        "pre_state": "revealed/unclaimed",
+        "post_state": "claimed",
+        "reward": 5,
+        "additional_or_free_claim_behavior_observed": true
+      },
+      {
+        "action": 1,
+        "coordinate": "R1C1",
+        "emoji": "Blue",
+        "pre_state": "hidden",
+        "post_state": "claimed",
+        "reward": 10,
+        "reveals": [
+          {
+            "coordinate": "R1C5",
+            "emoji": "Blue"
+          },
+          {
+            "coordinate": "R2C1",
+            "emoji": "Yellow"
+          },
+          {
+            "coordinate": "R5C5",
+            "emoji": "Teal"
+          }
+        ],
+        "still_hidden_after_action": [
+          "R1C2"
+        ]
+      },
+      {
+        "action": 2,
+        "coordinate": "R1C5",
+        "emoji": "Blue",
+        "pre_state": "revealed/unclaimed",
+        "post_state": "claimed",
+        "reward": 10,
+        "reveals": [
+          {
+            "coordinate": "R1C3",
+            "emoji": "Teal"
+          },
+          {
+            "coordinate": "R3C3",
+            "emoji": "Light"
+          },
+          {
+            "coordinate": "R5C3",
+            "emoji": "Teal"
+          }
+        ],
+        "reveal_targets_remained_unclaimed": true
+      },
+      {
+        "action": 3,
+        "coordinate": "R3C3",
+        "emoji": "Light",
+        "pre_state": "revealed/unclaimed",
+        "post_state": "claimed",
+        "observed_decomposition": [
+          "Blue",
+          "Teal",
+          "Blue",
+          "Teal",
+          "Teal"
+        ],
+        "total_reward": 80,
+        "decomposition_scope": "observed for capture #3 only",
+        "universal_light_component_rule": false
+      },
+      {
+        "action": 4,
+        "coordinate": "R2C1",
+        "emoji": "Yellow",
+        "pre_state": "revealed/unclaimed",
+        "post_state": "claimed",
+        "reward": 55
+      },
+      {
+        "action": 5,
+        "coordinate": "R1C2",
+        "emoji": "Blue",
+        "pre_state": "hidden",
+        "post_state": "claimed",
+        "reward": 10,
+        "terminal_action": true
+      }
+    ],
+    "final_click_provenance": {
+      "coordinate": "R1C2",
+      "status": "operator_observed",
+      "structurally_inferred": false,
+      "structural_fact": "final board snapshot is all disabled"
+    },
+    "reward_observations": {
+      "separate_invested_spheres_reward": 60,
+      "action_rewards": [
+        {
+          "action": 0,
+          "emoji": "Purple",
+          "reward": 5,
+          "free_claim_behavior_observed": true
+        },
+        {
+          "action": 1,
+          "emoji": "Blue",
+          "reward": 10
+        },
+        {
+          "action": 2,
+          "emoji": "Blue",
+          "reward": 10
+        },
+        {
+          "action": 3,
+          "emoji": "Light",
+          "reward": 80
+        },
+        {
+          "action": 4,
+          "emoji": "Yellow",
+          "reward": 55
+        },
+        {
+          "action": 5,
+          "emoji": "Blue",
+          "reward": 10
+        }
+      ],
+      "final_stock": 1614
+    }
+  },
+  "semantic_emoji_aliases": {
+    "hidden/question": {
+      "operator_label": "hidden/question",
+      "kind": "custom",
+      "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+      "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254",
+      "name_length": 3
+    },
+    "Purple": {
+      "operator_label": "Purple",
+      "kind": "custom",
+      "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+      "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe",
+      "name_length": 3
+    },
+    "Blue": {
+      "operator_label": "Blue",
+      "kind": "custom",
+      "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+      "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b",
+      "name_length": 3
+    },
+    "Teal": {
+      "operator_label": "Teal",
+      "kind": "custom",
+      "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+      "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19",
+      "name_length": 3
+    },
+    "Yellow": {
+      "operator_label": "Yellow",
+      "kind": "custom",
+      "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+      "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0",
+      "name_length": 3
+    },
+    "Light": {
+      "operator_label": "Light",
+      "kind": "custom",
+      "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+      "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9",
+      "name_length": 3
+    }
+  }
+}

@@ -1,0 +1,3273 @@
+{
+  "fixture_schema_version": 1,
+  "provenance": {
+    "contains_message_content": false,
+    "contains_raw_discord_ids": false,
+    "contains_timestamps": false,
+    "limitations": [
+      "no_interaction_evidence",
+      "no_reward_message_content",
+      "final_click_not_inferred"
+    ],
+    "sanitization": "deterministic_purpose_specific_gate",
+    "source_kind": "authorized_oh_structural_only_diagnostic_capture"
+  },
+  "records": [
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_CREATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 1
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_CREATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 2
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 3
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 4
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 5
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 6
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 7
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 8
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 9
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 10
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 11
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "b2cd9c92f821fd331964149061b00f99efc606469ff1b9b16f1ac72c92ab2497",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "39ec8463ec7eacc3f341236ea7c7417e71cf93741812d5234119017b8268e254"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": false,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 12
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "reward_message_1",
+        "author": "mudae",
+        "components": [],
+        "type": 0
+      },
+      "sequence": 13
+    },
+    {
+      "channel": "channel_1",
+      "event": "MESSAGE_UPDATE",
+      "guild": "guild_1",
+      "message": {
+        "alias": "board_message_1",
+        "author": "mudae",
+        "components": [
+          {
+            "components": [
+              {
+                "custom_id_length": 39,
+                "custom_id_sha256": "9c0ad7692b8fc6c842c85f546472812ad40ceddae8c4002518aeaf8a701ebf4e",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "d5f31bfc2d882f1a7ae31501399e0fe7e5ca40c8bcdbfbc0870b937b5382e4ad",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "c557a17b31e134100abb7fd0db0637ebda21a57e5906e574f5978d77145ef4bd",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  0,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0c5f476675443a8083fddd3f1bb60276771d5522cf9d4d0f6d80f1e9268cbbdc",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "e37727c682106381f5e8d87f7afb57cc93e41c75aa70b089477d4e86c7032db7",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  0,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              0
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "0de44d74842edb98c2ab8efb173cf51a7a19c5a3b6e8183ba292006949d9e933",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  1,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a5609f5367d6cc69ebd012c65b9d63aae1de6720c96e8cd0bf9622f07b164d53",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "af3728d8da739041ee42239ba4f5b0c0989b11ce4846221d5752e8491d8f97e6",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "e16af11bc52b72c4190330c76a7438802b5307b05cfbff2b232b94cbe3d65ace"
+                },
+                "path": [
+                  1,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "a3e493dfc3260a4ef1c8bc1bd67d80b6cb20f83041dc198da99c4d1d83a8edc9",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "1efc6d99be498978e113944e647946c5897dc457657f14a7c35569cb35301819",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "8620d24b28d979fbc43cf9768b5dbd8ae29d235b18a9e216573b7fd26a505bfe"
+                },
+                "path": [
+                  1,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "3868b16a7503d1f7691689c649ee525c1fb2bc87ac605c407ff4147b42d7b97b",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  1,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 41,
+                "custom_id_sha256": "47eeb06e46435e7fa9e26fb0e6460c4e13694e2ce79c5d2c411888c2f8dce3f3",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  1,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              1
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "2574d01d12278067b19b507867679ef6584ba8bd4a6b453a9abc5256d124652f",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  2,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f9d1bf5884bed03b78f3b2186cf85146e0fed4fc0dd6e8dac36e8ba3eb0331ce",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "7d9b0892044a291c10f4b4b2833fde1ab44f8fd2d373f9a60ea0576e630b8ad5",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "2924b8f19927f1b826cfe6a191c37500f93c9f205993349a9531fc2dccc3a0c0"
+                },
+                "path": [
+                  2,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "42643d5a2ddc2f0ffb43ba2bbd7528352e9da690e7ee61e16e950564a2a006fb",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  2,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "74fd0f436a58ce537a8a1b36c2784a50761f2b3d4695cc3f33f26774357caccb",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  2,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "8324e4052562d3d1e9708eb0d67870719a6bbead4313685a2f0de4e3e8975133",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  2,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              2
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "f66191cec116f943c57b30833fa0b65a062a069574e7b418d8ed613537073e36",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "af3728d8da739041ee42239ba4f5b0c0989b11ce4846221d5752e8491d8f97e6",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "e16af11bc52b72c4190330c76a7438802b5307b05cfbff2b232b94cbe3d65ace"
+                },
+                "path": [
+                  3,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cd9140afddf4cbbf55c22a14999037cdae9e9d74df541a4e9fd88494679a44e6",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "86d17270a8b3dbea5f77ba741f7dac78c0f1eeb049af5accbe2af6c413341964",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "cc07c7228d91647cf50ba71600162a7b223615aa682b30ea83766d899543e9e9"
+                },
+                "path": [
+                  3,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "b8bc32434b50fee5d24954e528589b6538d7e8a53689d71f3c823e4896fb9c51",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  3,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "1dba1bcf23d1bf0794f32fc7a2095651d7f4e424c8dc5292c79dae5c78987569",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  3,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "d5970faf742cec6cb488b42b6ea6935632a7808a0bd62a56b482a1a7ff72200f",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "f8666d54fd7b9e30230a10013b4ea078ce03fe9816a3d0ed6c5b41b5e07d900f",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "622331044bf2986cd8c1eb8e1f17d95280f2ce81a9f6f412b97abafd5bd02c38"
+                },
+                "path": [
+                  3,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              3
+            ],
+            "type": 1
+          },
+          {
+            "components": [
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "87ed5d3e2a247792fa5cfb134ba105e786f0e884db6aeda2a559d91890f55785",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  0
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "398f7f6fa505f8c95ff1002f3fd723c7f936f6ca53abb2074efe7d1ec7611f58",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  4,
+                  1
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "cfeb8c226c2b269869247139bfb21a5093dd6baa4dabb690de7cc859e096dbcb",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  2
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "423762f3bdfdc34dbf57132f1f5e76d4005f52a5b0387bb9b60c3c71fde38d85",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "9f80f4e31b9a256fb7060256cf11d620f0f5b61c94dda92aed73eb14e3f69932",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "7fca018d9bef713e870f5ac4b9480262283da3fd2c01323665480ff39d32b73b"
+                },
+                "path": [
+                  4,
+                  3
+                ],
+                "type": 2
+              },
+              {
+                "custom_id_length": 42,
+                "custom_id_sha256": "0da983f25ebdd4048f0380ec53d255515367c562781c12b7e866fe4c82c714a5",
+                "disabled": true,
+                "emoji": {
+                  "id_sha256": "6773dff8bbd4b09ff6e6aefac0a3c6f5acd520d4b3e829c00f8af32a93154ae8",
+                  "kind": "custom",
+                  "name_length": 3,
+                  "name_sha256": "9ef2e8bd40c2152eb364615b14b25a0ee8ce8190ab6f84c0e36bd315d7403d19"
+                },
+                "path": [
+                  4,
+                  4
+                ],
+                "type": 2
+              }
+            ],
+            "path": [
+              4
+            ],
+            "type": 1
+          }
+        ],
+        "type": 0
+      },
+      "sequence": 14
+    }
+  ],
+  "source_schema_version": "moa.discord-event-capture.v1"
+}
