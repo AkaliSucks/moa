@@ -14,6 +14,7 @@ from moa.services.ourosphere_board_service import (
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "discord" / "oh_structural_capture.v1.json"
+OC_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "discord" / "oc_structural_capture.v1.json"
 EXPECTED_COORDINATES = {(row, column) for row in range(5) for column in range(5)}
 SERVICE = OuroHuntBoardService()
 
@@ -32,6 +33,14 @@ def _board_snapshots() -> list[dict[str, Any]]:
 
 def _boards() -> list[OuroHuntBoard]:
     return [SERVICE.project(snapshot) for snapshot in _board_snapshots()]
+
+
+def _oc_fixture() -> dict[str, Any]:
+    return json.loads(OC_FIXTURE_PATH.read_text(encoding="utf-8"))
+
+
+def _oc_boards() -> list[OuroHuntBoard]:
+    return [SERVICE.project(record["message"]) for record in _oc_fixture()["records"]]
 
 
 def _synthetic_snapshot(cell_count: int = 25) -> dict[str, Any]:
@@ -202,3 +211,29 @@ def test_malformed_visual_identity_hash_is_rejected() -> None:
 
     with pytest.raises(OuroHuntBoardProjectionError, match="SHA-256"):
         SERVICE.project(snapshot)
+
+
+def test_oc_fixture_discovers_and_projects_six_structural_boards() -> None:
+    boards = _oc_boards()
+
+    assert len(boards) == 6
+    assert all(len(board.cells) == 25 for board in boards)
+    assert all(board.coordinates == tuple(sorted(EXPECTED_COORDINATES)) for board in boards)
+    assert all(not board.is_terminal for board in boards[:-1])
+    assert boards[-1].is_terminal
+    identities = {cell.coordinate: cell.component_identity for cell in boards[0].cells}
+    assert all(
+        {cell.coordinate: cell.component_identity for cell in board.cells} == identities
+        for board in boards[1:]
+    )
+
+
+def test_oc_fixture_compare_represents_nonterminal_action_transition() -> None:
+    before, after = _oc_boards()[:2]
+    transition = SERVICE.compare(before, after)
+    changed = [cell for cell in transition.cells if cell.visual_changed or cell.disabled_changed]
+
+    assert len(changed) == 1
+    assert changed[0].visual_changed
+    assert changed[0].disabled_before is False
+    assert changed[0].disabled_after is True
