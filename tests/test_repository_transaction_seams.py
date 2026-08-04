@@ -43,6 +43,10 @@ from moa.services.sphere_result_projection_coordinator import (
     SphereResultProjectionCoordinator,
     SphereResultProjectionResult,
 )
+from moa.services.wishlist_projection_coordinator import (
+    WishlistProjectionCoordinator,
+    WishlistProjectionResult,
+)
 
 
 ROLL = RollObservation(
@@ -355,6 +359,24 @@ def _receive_and_begin(repository: DiscordMessageRepository):
 
 
 def _record_sphere_result_attribution(
+    repository: DiscordMessageRepository, source_event_id: int
+) -> None:
+    repository.record_server_attribution(
+        source_event_id,
+        status="resolved",
+        server_name="Server",
+        recorded_at=OBSERVED_AT,
+    )
+    repository.record_account_attribution(
+        source_event_id,
+        status="resolved",
+        server_name="Server",
+        account_name="Account",
+        recorded_at=OBSERVED_AT,
+    )
+
+
+def _record_wishlist_attribution(
     repository: DiscordMessageRepository, source_event_id: int
 ) -> None:
     repository.record_server_attribution(
@@ -3302,6 +3324,159 @@ def test_public_wishlist_wrapper_preserves_result_and_stored_values(tmp_path) ->
         assert observation["import_event_id"] == result.import_event_id
         assert tuple(server) == (server["id"], "Server", "server")
         assert tuple(account) == (account["id"], "Account", "account")
+
+
+def test_public_wishlist_wrapper_rolls_back_helper_failure_and_remains_usable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original_helper = catalog._import_wishlist_with_connection
+
+    def fail_after_write(connection: sqlite3.Connection, **kwargs):
+        original_helper(connection, **kwargs)
+        raise RuntimeError("forced wishlist import failure")
+
+    monkeypatch.setattr(catalog, "_import_wishlist_with_connection", fail_after_write)
+
+    with pytest.raises(RuntimeError, match="forced wishlist import failure"):
+        catalog.import_wishlist(
+            WISHLIST, "Server", "Account", "failed payload", "discord"
+        )
+
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "wishlist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+    monkeypatch.setattr(catalog, "_import_wishlist_with_connection", original_helper)
+    result = catalog.import_wishlist(
+        WISHLIST, "Server", "Account", "successful payload", "discord"
+    )
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection)["wishlist_observations"] == 1
+
+
+def test_wishlist_coordinator_runner_commits_without_public_wrapper_nesting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    coordinator = WishlistProjectionCoordinator(catalog, discord)
+    assert catalog._database_path == coordinator._database_path == database_path
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_wishlist_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        catalog,
+        "import_wishlist",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinator called public wishlist wrapper")
+        ),
+    )
+
+    result = coordinator.coordinate_wishlist(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        state=WISHLIST,
+        server=" Server ",
+        account=" Account ",
+        raw="wishlist payload",
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    assert result == WishlistProjectionResult(
+        imported_count=1,
+        import_event_id=result.import_event_id,
+        wishlist_observation_id=result.wishlist_observation_id,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("wishlist_observations", result.wishlist_observation_id),
+    )
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "wishlist_observations": 1,
+            "discord_projection_links": 1,
+            "discord_source_events": 1,
+            "discord_source_event_server_attributions": 1,
+            "discord_source_event_account_attributions": 1,
+            "discord_processing_attempts": 1,
+        }
+        assert connection.execute(
+            "SELECT status FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "succeeded"
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0] == "succeeded"
+        assert connection.execute(
+            "SELECT state FROM discord_projection_links WHERE source_event_id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "completed"
+
+
+def test_wishlist_coordinator_runner_rolls_back_partial_projection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    coordinator = WishlistProjectionCoordinator(catalog, discord)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_wishlist_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        coordinator,
+        "_complete_projection_link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced wishlist projection failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="forced wishlist projection failure"):
+        coordinator.coordinate_wishlist(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            state=WISHLIST,
+            server="Server",
+            account="Account",
+            raw="wishlist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        )
+
+    with connect(database_path) as connection:
+        assert _wishlist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "wishlist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 1,
+            "discord_source_event_server_attributions": 1,
+            "discord_source_event_account_attributions": 1,
+            "discord_processing_attempts": 1,
+        }
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0] == "processing"
 
 
 def test_wishlist_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
