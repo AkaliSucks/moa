@@ -18,12 +18,12 @@ def test_connection_factory_current_effective_pragmas(tmp_path) -> None:
 
     assert values == {
         "foreign_keys": 1,
-        "journal_mode": "delete",
+        "journal_mode": "wal",
         "busy_timeout": 5000,
     }
 
 
-def test_rollback_journal_writer_commit_is_blocked_by_active_reader(tmp_path) -> None:
+def test_wal_writer_commit_preserves_active_reader_snapshot(tmp_path) -> None:
     database_path = tmp_path / "contention.db"
 
     with connect(database_path) as seed_connection:
@@ -33,24 +33,20 @@ def test_rollback_journal_writer_commit_is_blocked_by_active_reader(tmp_path) ->
     reader = connect(database_path)
     writer = connect(database_path)
     try:
-        assert _pragma_value(reader, "journal_mode") == "delete"
-        assert _pragma_value(writer, "journal_mode") == "delete"
+        assert _pragma_value(reader, "journal_mode") == "wal"
+        assert _pragma_value(writer, "journal_mode") == "wal"
         assert _pragma_value(writer, "busy_timeout") == 5000
 
         reader.execute("BEGIN")
         assert reader.execute("SELECT value FROM values_table").fetchone()[0] == 1
 
-        writer.execute("PRAGMA busy_timeout = 0")
-        assert _pragma_value(writer, "busy_timeout") == 0
         writer.execute("BEGIN IMMEDIATE")
         writer.execute("UPDATE values_table SET value = 2")
+        writer.commit()
 
-        try:
-            writer.commit()
-        except sqlite3.OperationalError as error:
-            assert "locked" in str(error).casefold()
-        else:
-            raise AssertionError("writer commit unexpectedly succeeded while reader was active")
+        assert reader.execute("SELECT value FROM values_table").fetchone()[0] == 1
+        reader.rollback()
+        assert reader.execute("SELECT value FROM values_table").fetchone()[0] == 2
     finally:
         writer.rollback()
         reader.rollback()
