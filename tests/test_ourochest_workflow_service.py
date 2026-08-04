@@ -7,12 +7,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from moa.models.ourochest_workflow import (
     OurochestWorkflowStatus,
     OurochestWorkflowState,
 )
 from moa.models.ourosphere import OuroHuntBoard, OuroHuntVisualIdentity
 from moa.services.ourochest_workflow_service import (
+    OurochestActiveReplaceKind,
     OurochestBindKind,
     OurochestWorkflowService,
     WORKFLOW_TTL_SECONDS,
@@ -46,6 +49,25 @@ def _boards() -> list[OuroHuntBoard]:
 def _service() -> tuple[FakeClock, OurochestWorkflowService]:
     clock = FakeClock()
     return clock, OurochestWorkflowService(clock=clock)
+
+
+def _active_workflow(
+    service: OurochestWorkflowService,
+    *,
+    guild_id: str = "guild-a",
+    channel_id: str = "channel-a",
+    user_id: str = "user-a",
+    board_message_id: str = "message-a",
+) -> OurochestWorkflowState:
+    service.create_pending(guild_id, channel_id, user_id)
+    result = service.bind_initial_board(
+        guild_id,
+        channel_id,
+        board_message_id,
+        _boards()[0],
+    )
+    assert result.workflow is not None
+    return result.workflow
 
 
 def test_pending_creation_preserves_scope_and_has_no_active_state() -> None:
@@ -322,3 +344,215 @@ def test_service_uses_only_ids_and_domain_board_objects() -> None:
     assert result.kind is OurochestBindKind.BOUND
     assert result.workflow is not None
     assert result.workflow.board_message_id == 4
+
+
+def test_active_replacement_accepts_coordinator_like_progress() -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    updated = replace(
+        active,
+        last_board=_boards()[1],
+        red_candidates=((0, 0),),
+    )
+
+    result = service.replace_active(active, updated)
+
+    assert result.kind is OurochestActiveReplaceKind.REPLACED
+    assert service.get_active("guild-a", "channel-a", "message-a") == updated
+    assert updated.expires_at == active.expires_at
+
+
+def test_active_replacement_reports_missing_without_creating_state() -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    service.remove_active("guild-a", "channel-a", "message-a")
+    updated = replace(active, red_candidates=((0, 0),))
+
+    result = service.replace_active(active, updated)
+
+    assert result.kind is OurochestActiveReplaceKind.MISSING
+    assert service.get_active("guild-a", "channel-a", "message-a") is None
+
+
+def test_active_replacement_reports_stale_and_preserves_current_state() -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    current = replace(active, red_candidates=((0, 0),))
+    assert service.replace_active(active, current).kind is OurochestActiveReplaceKind.REPLACED
+    proposed = replace(active, red_candidates=((0, 1),))
+
+    result = service.replace_active(active, proposed)
+
+    assert result.kind is OurochestActiveReplaceKind.STALE
+    assert service.get_active("guild-a", "channel-a", "message-a") == current
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("guild_id", "guild-b"),
+        ("channel_id", "channel-b"),
+        ("initiating_user_id", "user-b"),
+        ("board_message_id", "message-b"),
+        ("created_at", 99.0),
+        ("bound_at", 101.0),
+        ("expires_at", 221.0),
+    ],
+)
+def test_active_replacement_rejects_immutable_metadata_changes(
+    field_name: str,
+    value: object,
+) -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    updated = replace(active, **{field_name: value})
+
+    with pytest.raises(ValueError, match=field_name):
+        service.replace_active(active, updated)
+
+    assert service.get_active("guild-a", "channel-a", "message-a") == active
+
+
+def test_active_replacement_rejects_wrong_workflow_kind() -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    updated = replace(active, red_candidates=((0, 0),))
+    object.__setattr__(updated, "workflow_kind", "not-ourochest")
+
+    with pytest.raises(ValueError, match="workflow_kind"):
+        service.replace_active(active, updated)
+
+    assert service.get_active("guild-a", "channel-a", "message-a") == active
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        OurochestWorkflowStatus.PENDING_BOARD,
+        OurochestWorkflowStatus.TERMINAL,
+        OurochestWorkflowStatus.UNSUPPORTED,
+        OurochestWorkflowStatus.MALFORMED,
+        OurochestWorkflowStatus.CONTRADICTION,
+    ],
+)
+def test_active_replacement_rejects_non_active_updated_state(
+    status: OurochestWorkflowStatus,
+) -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    if status is OurochestWorkflowStatus.PENDING_BOARD:
+        updated = service.create_pending("guild-b", "channel-b", "user-b")
+    else:
+        candidates = () if status is OurochestWorkflowStatus.CONTRADICTION else active.red_candidates
+        updated = replace(active, status=status, red_candidates=candidates)
+
+    with pytest.raises(ValueError, match="updated must be an ACTIVE"):
+        service.replace_active(active, updated)
+
+    assert service.get_active("guild-a", "channel-a", "message-a") == active
+
+
+def test_active_replacement_rejects_non_active_expected_state() -> None:
+    _, service = _service()
+    pending = service.create_pending("guild-a", "channel-a", "user-a")
+    active = _active_workflow(service)
+    updated = replace(active, red_candidates=((0, 0),))
+
+    with pytest.raises(ValueError, match="expected must be an ACTIVE"):
+        service.replace_active(pending, updated)
+
+    assert service.get_active("guild-a", "channel-a", "message-a") == active
+
+
+def test_active_replacement_expiry_returns_missing_without_resurrection() -> None:
+    clock, service = _service()
+    active = _active_workflow(service)
+    updated = replace(active, red_candidates=((0, 0),))
+    clock.advance(active.expires_at - clock.value)
+
+    result = service.replace_active(active, updated)
+
+    assert result.kind is OurochestActiveReplaceKind.MISSING
+    assert service.get_active("guild-a", "channel-a", "message-a") is None
+
+
+def test_active_replacement_does_not_refresh_expiry() -> None:
+    clock, service = _service()
+    active = _active_workflow(service)
+    updated = replace(active, red_candidates=((0, 0),))
+
+    assert service.replace_active(active, updated).kind is OurochestActiveReplaceKind.REPLACED
+    clock.advance(active.expires_at - clock.value)
+
+    assert service.get_active("guild-a", "channel-a", "message-a") is None
+
+
+def test_has_active_for_owner_matches_exact_scope() -> None:
+    _, service = _service()
+    _active_workflow(service, guild_id="guild-a", channel_id="channel-a", user_id="user-a")
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is True
+
+
+def test_has_active_for_owner_rejects_same_owner_in_different_channel() -> None:
+    _, service = _service()
+    _active_workflow(service, guild_id="guild-a", channel_id="channel-b", user_id="user-a")
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is False
+
+
+def test_has_active_for_owner_rejects_same_owner_in_different_guild() -> None:
+    _, service = _service()
+    _active_workflow(service, guild_id="guild-b", channel_id="channel-a", user_id="user-a")
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is False
+
+
+def test_has_active_for_owner_rejects_different_owner() -> None:
+    _, service = _service()
+    _active_workflow(service, guild_id="guild-a", channel_id="channel-a", user_id="user-b")
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is False
+
+
+def test_has_active_for_owner_ignores_expired_entries_without_refreshing_expiry() -> None:
+    clock, service = _service()
+    active = _active_workflow(service)
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is True
+    clock.advance(active.expires_at - clock.value)
+
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is False
+    assert service.get_active("guild-a", "channel-a", "message-a") is None
+
+
+def test_has_active_for_owner_handles_multiple_owned_active_entries() -> None:
+    _, service = _service()
+    first = _active_workflow(service)
+    second = _active_workflow(
+        service,
+        board_message_id="message-b",
+    )
+
+    assert first.initiating_user_id == second.initiating_user_id == "user-a"
+    assert service.has_active_for_owner("guild-a", "channel-a", "user-a") is True
+    assert service.get_active("guild-a", "channel-a", "message-a") == first
+    assert service.get_active("guild-a", "channel-a", "message-b") == second
+
+
+def test_replacement_preserves_unrelated_active_entry_and_removal_regression() -> None:
+    _, service = _service()
+    active = _active_workflow(service)
+    unrelated = _active_workflow(
+        service,
+        guild_id="guild-b",
+        channel_id="channel-b",
+        user_id="user-b",
+        board_message_id="message-b",
+    )
+    updated = replace(active, red_candidates=((0, 0),))
+
+    assert service.replace_active(active, updated).kind is OurochestActiveReplaceKind.REPLACED
+    assert service.get_active("guild-b", "channel-b", "message-b") == unrelated
+    assert service.remove_active("guild-a", "channel-a", "message-a") == updated
+    assert service.remove_active("guild-a", "channel-a", "message-a") is None
