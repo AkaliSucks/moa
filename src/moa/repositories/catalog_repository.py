@@ -2200,8 +2200,11 @@ class CatalogRepository:
     ) -> WishlistImportResult:
         """Store a complete account-scoped `$wl` snapshot."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_wishlist_with_connection(
+
+        def import_with_connection(
+            connection: sqlite3.Connection,
+        ) -> _WishlistImportConnectionResult:
+            return self._import_wishlist_with_connection(
                 connection,
                 state=wishlist,
                 server=server_name,
@@ -2210,6 +2213,8 @@ class CatalogRepository:
                 source=source,
                 observed_at=observed_at,
             )
+
+        imported = run_write_transaction(self._database_path, import_with_connection)
         return WishlistImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
