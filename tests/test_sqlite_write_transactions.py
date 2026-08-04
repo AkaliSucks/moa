@@ -153,20 +153,117 @@ def test_commit_failure_rolls_back_and_propagates_original_exception(
         ).fetchone()[0] == 0
 
 
-def test_begin_failure_does_not_invoke_callback_or_leak_transaction(
+def test_external_writer_release_during_busy_wait_commits_callback_once(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    database_path = tmp_path / "begin-failure.db"
+    database_path = tmp_path / "external-writer-release.db"
+    _create_values_table(database_path)
+    real_connect = sqlite_module.connect
+    begin_attempted = threading.Event()
+    callback_entered = threading.Event()
+    callback_count = 0
+    configured_busy_timeouts: list[int] = []
+    failures: list[BaseException] = []
+
+    class BeginObservedConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def execute(self, sql: str):
+            if sql == "BEGIN IMMEDIATE":
+                begin_attempted.set()
+            return self._connection.execute(sql)
+
+    def connect_with_observed_begin(path: Path | None = None):
+        connection = real_connect(path)
+        configured_busy_timeouts.append(
+            connection.execute("PRAGMA busy_timeout").fetchone()[0]
+        )
+        return BeginObservedConnection(connection)
+
+    monkeypatch.setattr(sqlite_module, "connect", connect_with_observed_begin)
+    independent_writer = real_connect(database_path)
+    independent_writer.execute("BEGIN IMMEDIATE")
+    independent_writer.execute("INSERT INTO values_table (value) VALUES (1)")
+
+    def callback(connection: sqlite3.Connection) -> None:
+        nonlocal callback_count
+        callback_count += 1
+        callback_entered.set()
+        connection.execute("INSERT INTO values_table (value) VALUES (2)")
+
+    def run_contending_transaction() -> None:
+        try:
+            run_write_transaction(database_path, callback)
+        except BaseException as exc:
+            failures.append(exc)
+
+    runner_thread = _start_thread(run_contending_transaction)
+    try:
+        assert begin_attempted.wait(_THREAD_TIMEOUT), "runner did not attempt BEGIN"
+        assert not callback_entered.is_set(), "callback entered while writer held lock"
+        independent_writer.commit()
+    finally:
+        if independent_writer.in_transaction:
+            independent_writer.rollback()
+        independent_writer.close()
+    _join_thread(runner_thread)
+
+    assert configured_busy_timeouts == [5000]
+    assert failures == []
+    assert callback_count == 1
+    with real_connect(database_path) as verification_connection:
+        assert [
+            row[0]
+            for row in verification_connection.execute(
+                "SELECT value FROM values_table ORDER BY value"
+            ).fetchall()
+        ] == [1, 2]
+
+
+def test_busy_timeout_exhaustion_does_not_invoke_callback_or_leak_transaction(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "busy-timeout-exhaustion.db"
     _create_values_table(database_path)
     real_connect = sqlite_module.connect
     callback_count = 0
+    begin_failure_transaction_states: list[bool] = []
+    close_transaction_states: list[bool] = []
 
-    def connect_without_busy_wait(path: Path | None = None) -> sqlite3.Connection:
+    with real_connect(database_path) as policy_connection:
+        assert policy_connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+    class ShortBusyTimeoutConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def execute(self, sql: str):
+            try:
+                return self._connection.execute(sql)
+            except sqlite3.OperationalError:
+                if sql == "BEGIN IMMEDIATE":
+                    begin_failure_transaction_states.append(
+                        self._connection.in_transaction
+                    )
+                raise
+
+        def close(self) -> None:
+            close_transaction_states.append(self._connection.in_transaction)
+            self._connection.close()
+
+    def connect_with_short_busy_wait(path: Path | None = None):
         connection = real_connect(path)
-        connection.execute("PRAGMA busy_timeout = 0")
-        return connection
+        connection.execute("PRAGMA busy_timeout = 50")
+        return ShortBusyTimeoutConnection(connection)
 
-    monkeypatch.setattr(sqlite_module, "connect", connect_without_busy_wait)
+    monkeypatch.setattr(sqlite_module, "connect", connect_with_short_busy_wait)
     independent_writer = real_connect(database_path)
     try:
         independent_writer.execute("BEGIN IMMEDIATE")
@@ -181,6 +278,8 @@ def test_begin_failure_does_not_invoke_callback_or_leak_transaction(
         assert raised.value.sqlite_errorcode == sqlite3.SQLITE_BUSY
         assert raised.value.sqlite_errorname == "SQLITE_BUSY"
         assert callback_count == 0
+        assert begin_failure_transaction_states == [False]
+        assert close_transaction_states == [False]
     finally:
         independent_writer.rollback()
         independent_writer.close()
@@ -191,6 +290,13 @@ def test_begin_failure_does_not_invoke_callback_or_leak_transaction(
             "INSERT INTO values_table (value) VALUES (1)"
         ),
     )
+    with real_connect(database_path) as verification_connection:
+        assert [
+            row[0]
+            for row in verification_connection.execute(
+                "SELECT value FROM values_table"
+            ).fetchall()
+        ] == [1]
 
 
 def test_non_busy_operational_error_is_not_retried(tmp_path) -> None:
