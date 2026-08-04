@@ -39,6 +39,10 @@ from moa.repositories.catalog_repository import (
     _WishlistImportConnectionResult,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.disablelist_projection_coordinator import (
+    DisableListProjectionCoordinator,
+    DisableListProjectionResult,
+)
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
     ProfileProjectionResult,
@@ -3819,6 +3823,163 @@ def test_public_disablelist_wrapper_preserves_result_and_stored_values(tmp_path)
         assert observation["import_event_id"] == result.import_event_id
         assert tuple(server) == (server["id"], "Server", "server")
         assert tuple(account) == (account["id"], "Account", "account")
+
+
+def test_public_disablelist_wrapper_rolls_back_helper_failure_and_remains_usable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original_helper = catalog._import_disablelist_with_connection
+
+    def fail_after_write(connection: sqlite3.Connection, **kwargs):
+        original_helper(connection, **kwargs)
+        raise RuntimeError("forced disablelist import failure")
+
+    monkeypatch.setattr(catalog, "_import_disablelist_with_connection", fail_after_write)
+
+    with pytest.raises(RuntimeError, match="forced disablelist import failure"):
+        catalog.import_disablelist(
+            DISABLELIST, "Server", "Account", "failed payload", "discord"
+        )
+
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "disablelist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+    monkeypatch.setattr(catalog, "_import_disablelist_with_connection", original_helper)
+    result = catalog.import_disablelist(
+        DISABLELIST, "Server", "Account", "successful payload", "discord"
+    )
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection)["disablelist_observations"] == 1
+
+
+def test_disablelist_coordinator_runner_commits_without_public_wrapper_nesting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    coordinator = DisableListProjectionCoordinator(catalog, discord)
+    assert catalog._database_path == coordinator._database_path == database_path
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_account_scoped_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        catalog,
+        "import_disablelist",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinator called public disablelist wrapper")
+        ),
+    )
+
+    result = coordinator.coordinate_disablelist(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        state=DISABLELIST,
+        server=" Server ",
+        account=" Account ",
+        raw="disablelist payload",
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+    assert result == DisableListProjectionResult(
+        imported_count=1,
+        import_event_id=result.import_event_id,
+        disablelist_observation_id=result.disablelist_observation_id,
+        replay_skipped=False,
+        durable_success_recorded=True,
+        projection_target=("disablelist_observations", result.disablelist_observation_id),
+    )
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection) == {
+            "import_events": 1,
+            "server_contexts": 1,
+            "account_contexts": 1,
+            "disablelist_observations": 1,
+            "discord_projection_links": 1,
+            "discord_source_events": 1,
+            "discord_source_event_server_attributions": 1,
+            "discord_source_event_account_attributions": 1,
+            "discord_processing_attempts": 1,
+        }
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == ("succeeded", result.import_event_id)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0] == "succeeded"
+        assert tuple(
+            connection.execute(
+                "SELECT state, projection_table, projection_row_id FROM discord_projection_links WHERE source_event_id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == ("completed", "disablelist_observations", result.disablelist_observation_id)
+
+
+def test_disablelist_coordinator_runner_rolls_back_partial_projection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    coordinator = DisableListProjectionCoordinator(catalog, discord)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_account_scoped_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        coordinator,
+        "_complete_projection_link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced disablelist projection failure")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="forced disablelist projection failure"):
+        coordinator.coordinate_disablelist(
+            source_event_id=source_event_id,
+            attempt_id=attempt_id,
+            state=DISABLELIST,
+            server="Server",
+            account="Account",
+            raw="disablelist payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+            finished_at=FINISHED_AT,
+        )
+
+    with connect(database_path) as connection:
+        assert _disablelist_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "disablelist_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 1,
+            "discord_source_event_server_attributions": 1,
+            "discord_source_event_account_attributions": 1,
+            "discord_processing_attempts": 1,
+        }
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts WHERE id = ?",
+            (attempt_id,),
+        ).fetchone()[0] == "processing"
 
 
 def test_disablelist_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:

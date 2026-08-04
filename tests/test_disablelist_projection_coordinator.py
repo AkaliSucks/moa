@@ -132,11 +132,52 @@ def test_replay_reconstructs_without_inserts(tmp_path):
     first = _coordinate(coordinator, source_event_id, attempt_id)
     with connect(path) as connection:
         before = _counts(connection)
+        before_event = tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id, updated_at FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+        )
+        before_attempt = tuple(
+            connection.execute(
+                "SELECT status, retryable, finished_at, failure_code, failure_detail FROM discord_processing_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+        )
+        before_link = tuple(
+            connection.execute(
+                "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
+                (source_event_id,),
+            ).fetchone()
+        )
     replay = DisableListProjectionCoordinator(catalog, discord)
     result = _coordinate(replay, source_event_id, None)
     assert (result.imported_count, result.replay_skipped, result.import_event_id, result.disablelist_observation_id) == (0, True, first.import_event_id, first.disablelist_observation_id)
+    assert result.projection_target == (
+        "disablelist_observations",
+        first.disablelist_observation_id,
+    )
+    assert result.durable_success_recorded is True
     with connect(path) as connection:
         assert _counts(connection) == before
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id, updated_at FROM discord_source_events WHERE id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == before_event
+        assert tuple(
+            connection.execute(
+                "SELECT status, retryable, finished_at, failure_code, failure_detail FROM discord_processing_attempts WHERE id = ?",
+                (attempt_id,),
+            ).fetchone()
+        ) == before_attempt
+        assert tuple(
+            connection.execute(
+                "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
+                (source_event_id,),
+            ).fetchone()
+        ) == before_link
 
 
 @pytest.mark.parametrize("mutation", ("scalar", "limit", "boolean", "entries", "target_table", "target_row", "legacy_kind"))
