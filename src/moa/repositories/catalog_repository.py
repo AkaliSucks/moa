@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from moa.database.sqlite import connect
+from moa.database.sqlite import connect, run_write_transaction
 from moa.database.migrations import (
     CATALOG_MIGRATIONS,
     run_migrations,
@@ -578,8 +578,11 @@ class CatalogRepository:
     ) -> SphereResultImportResult:
         """Store one account-scoped `$oq` sphere payout."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_sphere_result_with_connection(
+
+        def import_with_connection(
+            connection: sqlite3.Connection,
+        ) -> _SphereResultImportConnectionResult:
+            return self._import_sphere_result_with_connection(
                 connection,
                 state=state,
                 server=server_name,
@@ -588,6 +591,8 @@ class CatalogRepository:
                 source=source,
                 observed_at=observed_at,
             )
+
+        imported = run_write_transaction(self._database_path, import_with_connection)
         return SphereResultImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
