@@ -2980,8 +2980,9 @@ class CatalogRepository:
     ) -> TimerStateImportResult:
         """Store one short-lived account action snapshot from `$tu`."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_timer_state_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_timer_state_with_connection(
                 connection,
                 state=state,
                 server=server_name,
@@ -2989,7 +2990,8 @@ class CatalogRepository:
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return TimerStateImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
@@ -3289,8 +3291,9 @@ class CatalogRepository:
     ) -> ProfileImportResult:
         """Store one account-scoped `$profile` progress snapshot."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_profile_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_profile_with_connection(
                 connection,
                 profile=snapshot,
                 server=server_name,
@@ -3298,7 +3301,8 @@ class CatalogRepository:
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return ProfileImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
@@ -3513,15 +3517,17 @@ class CatalogRepository:
     ) -> ServerSettingsImportResult:
         """Store a complete server-scoped `$settings` snapshot."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_server_settings_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_server_settings_with_connection(
                 connection,
                 settings=settings,
                 server=server_name,
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return ServerSettingsImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
