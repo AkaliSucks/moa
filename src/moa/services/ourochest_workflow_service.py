@@ -57,6 +57,28 @@ class OurochestBindResult:
             raise ValueError(f"{kind.value} must not carry workflow state")
 
 
+class OurochestActiveReplaceKind(str, Enum):
+    """Explicit outcome of an active compare-and-replace operation."""
+
+    REPLACED = "replaced"
+    MISSING = "missing"
+    STALE = "stale"
+
+
+@dataclass(frozen=True, slots=True)
+class OurochestActiveReplaceResult:
+    """Immutable result of one exact active workflow replacement attempt."""
+
+    kind: OurochestActiveReplaceKind
+
+    def __post_init__(self) -> None:
+        try:
+            kind = OurochestActiveReplaceKind(self.kind)
+        except (TypeError, ValueError) as error:
+            raise ValueError("kind must be an OurochestActiveReplaceKind") from error
+        object.__setattr__(self, "kind", kind)
+
+
 class OurochestWorkflowService:
     """Own separate exact-scope pending and board-bound in-memory indexes."""
 
@@ -185,6 +207,58 @@ class OurochestWorkflowService:
             return None
         return state
 
+    def replace_active(
+        self,
+        expected: OurochestWorkflowState,
+        updated: OurochestWorkflowState,
+    ) -> OurochestActiveReplaceResult:
+        """Compare and replace one exact, currently indexed ACTIVE workflow."""
+
+        self._validate_active_state(expected, "expected")
+        self._validate_active_state(updated, "updated")
+        self._validate_replacement_invariants(expected, updated)
+
+        assert expected.board_message_id is not None
+        active_key = (
+            expected.guild_id,
+            expected.channel_id,
+            expected.board_message_id,
+        )
+        now = self._now()
+        current = self._active.get(active_key)
+        if current is not None and self._expired(current, now):
+            self._active.pop(active_key, None)
+            current = None
+        if current is None:
+            return OurochestActiveReplaceResult(OurochestActiveReplaceKind.MISSING)
+        if current != expected:
+            return OurochestActiveReplaceResult(OurochestActiveReplaceKind.STALE)
+        self._active[active_key] = updated
+        return OurochestActiveReplaceResult(OurochestActiveReplaceKind.REPLACED)
+
+    def has_active_for_owner(
+        self,
+        guild_id: WorkflowIdentifier,
+        channel_id: WorkflowIdentifier,
+        user_id: WorkflowIdentifier,
+    ) -> bool:
+        """Return whether one exact owner scope has any live ACTIVE workflow."""
+
+        self._validate_scope(guild_id, channel_id, user_id)
+        now = self._now()
+        for key, state in tuple(self._active.items()):
+            if self._expired(state, now):
+                self._active.pop(key, None)
+                continue
+            if (
+                state.status is OurochestWorkflowStatus.ACTIVE
+                and state.guild_id == guild_id
+                and state.channel_id == channel_id
+                and state.initiating_user_id == user_id
+            ):
+                return True
+        return False
+
     def remove_active(
         self,
         guild_id: WorkflowIdentifier,
@@ -208,6 +282,35 @@ class OurochestWorkflowService:
         if isinstance(now, bool) or not isinstance(now, (int, float)):
             raise TypeError("clock must return a finite number")
         return float(now)
+
+    @staticmethod
+    def _validate_active_state(
+        state: OurochestWorkflowState,
+        field_name: str,
+    ) -> None:
+        if not isinstance(state, OurochestWorkflowState):
+            raise TypeError(f"{field_name} must be an OurochestWorkflowState")
+        if state.status is not OurochestWorkflowStatus.ACTIVE:
+            raise ValueError(f"{field_name} must be an ACTIVE workflow")
+
+    @staticmethod
+    def _validate_replacement_invariants(
+        expected: OurochestWorkflowState,
+        updated: OurochestWorkflowState,
+    ) -> None:
+        identity_fields = (
+            "guild_id",
+            "channel_id",
+            "initiating_user_id",
+            "workflow_kind",
+            "board_message_id",
+            "created_at",
+            "bound_at",
+            "expires_at",
+        )
+        for field_name in identity_fields:
+            if getattr(updated, field_name) != getattr(expected, field_name):
+                raise ValueError(f"updated {field_name} must match expected")
 
     @staticmethod
     def _pending_key(
