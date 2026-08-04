@@ -33,6 +33,8 @@ from moa.services.discord_listener_service import (
     DiscordListenerService,
     _MOADiagnosticDiscordClient,
 )
+from moa.services.ourochest_workflow_service import OurochestWorkflowService
+from moa.services.ourosphere_board_service import OuroHuntBoardService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import (
@@ -1293,6 +1295,173 @@ def test_listener_ignores_unsupported_commands_without_creating_context(tmp_path
     asyncio.run(listener.handle_message(message))
 
     assert 789 not in listener._contexts
+
+
+def _ourochest_listener(tmp_path, workflow_service=None):
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    service = workflow_service or OurochestWorkflowService()
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        ourochest_workflow_service=service,
+    )
+    return listener, service
+
+
+def _ourochest_message(content: str, *, guild_id: int = 123, channel_id: int = 789):
+    return SimpleNamespace(
+        id=987,
+        guild=SimpleNamespace(id=guild_id),
+        channel=SimpleNamespace(id=channel_id),
+        author=SimpleNamespace(bot=False, id=456),
+        content=content,
+    )
+
+
+def _ourochest_board():
+    fixture_path = Path(__file__).parent / "fixtures" / "discord" / "oc_structural_capture.v1.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return OuroHuntBoardService().project(fixture["records"][0]["message"])
+
+
+def _active_ourochest(service, *, guild_id="123", channel_id="789", user_id="456"):
+    service.create_pending(guild_id, channel_id, user_id)
+    result = service.bind_initial_board(guild_id, channel_id, "board-1", _ourochest_board())
+    assert result.workflow is not None
+    return result.workflow
+
+
+def test_listener_oc_creates_dedicated_pending_without_generic_context(tmp_path) -> None:
+    listener, workflow = _ourochest_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert workflow.get_active("123", "789", "board-1") is None
+    assert listener._contexts == {}
+    assert listener._pending_contexts == {}
+    assert listener._command_contexts == {}
+
+
+def test_listener_ourochest_creates_dedicated_pending_without_generic_context(tmp_path) -> None:
+    listener, workflow = _ourochest_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$ourochest")))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert listener._contexts == {}
+    assert listener._pending_contexts == {}
+    assert listener._command_contexts == {}
+
+
+def test_listener_ourochest_prefix_matching_is_case_insensitive(tmp_path) -> None:
+    listener, workflow = _ourochest_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$OuroChest")))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+@pytest.mark.parametrize("command", ["/oc", "/ourochest", "$ocx", "$ourochests"])
+def test_listener_rejects_non_dedicated_ourochest_command_forms(tmp_path, command: str) -> None:
+    listener, workflow = _ourochest_listener(tmp_path)
+
+    asyncio.run(listener.handle_message(_ourochest_message(command)))
+
+    assert workflow.get_pending("123", "789", "456") is None
+    assert listener._contexts == {}
+    assert listener._pending_contexts == {}
+
+
+def test_listener_repeated_unbound_ourochest_command_replaces_pending(tmp_path) -> None:
+    now = [10.0]
+    workflow = OurochestWorkflowService(clock=lambda: now[0])
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+    first = workflow.get_pending("123", "789", "456")
+    now[0] = 20.0
+    asyncio.run(listener.handle_message(_ourochest_message("$ourochest")))
+    second = workflow.get_pending("123", "789", "456")
+
+    assert first is not None and second is not None
+    assert second.created_at == 20.0
+    assert second.expires_at > first.expires_at
+
+
+def test_listener_active_ourochest_owner_blocks_new_pending(tmp_path) -> None:
+    workflow = OurochestWorkflowService()
+    active = _active_ourochest(workflow)
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+
+    assert workflow.get_pending("123", "789", "456") is None
+    assert workflow.get_active("123", "789", "board-1") == active
+    assert listener._contexts == {}
+
+
+def test_listener_active_ourochest_owner_in_other_channel_does_not_block(tmp_path) -> None:
+    workflow = OurochestWorkflowService()
+    _active_ourochest(workflow, channel_id="900")
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc", channel_id=789)))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_active_ourochest_owner_in_other_guild_does_not_block(tmp_path) -> None:
+    workflow = OurochestWorkflowService()
+    _active_ourochest(workflow, guild_id="999")
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc", guild_id=123)))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_other_users_active_ourochest_does_not_block(tmp_path) -> None:
+    workflow = OurochestWorkflowService()
+    _active_ourochest(workflow, user_id="999")
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_expired_active_ourochest_does_not_block(tmp_path) -> None:
+    now = [0.0]
+    workflow = OurochestWorkflowService(clock=lambda: now[0])
+    _active_ourochest(workflow)
+    now[0] = 121.0
+    listener, _ = _ourochest_listener(tmp_path, workflow)
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+
+    assert workflow.get_active("123", "789", "board-1") is None
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_ourochest_preserves_unrelated_generic_context(tmp_path) -> None:
+    listener, workflow = _ourochest_listener(tmp_path)
+    generic = _ourochest_message("$wa")
+    asyncio.run(listener.handle_message(generic))
+    before_contexts = dict(listener._pending_contexts)
+    before_latest = listener._contexts[789]
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert listener._pending_contexts == before_contexts
+    assert listener._contexts[789] is before_latest
 
 
 def _listener_with_two_configured_users(tmp_path):
