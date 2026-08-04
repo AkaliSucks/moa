@@ -50,6 +50,7 @@ from moa.services.automatic_import_service import (
     DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.ourochest_workflow_service import OurochestWorkflowService
 
 
 @dataclass(frozen=True)
@@ -718,6 +719,7 @@ class DiscordListenerService:
         profile_name: str | None = None,
         status_text: str = _DEFAULT_STATUS_TEXT,
         logger: logging.Logger | None = None,
+        ourochest_workflow_service: OurochestWorkflowService | None = None,
     ) -> None:
         self._config = config_service or ConfigService()
         self._catalog = catalog_service or CatalogService()
@@ -736,6 +738,7 @@ class DiscordListenerService:
         self._profile_name = profile_name
         self._status_text = self._normalize_status_text(status_text)
         self._logger = logger or logging.getLogger("moa.discord")
+        self._ourochest_workflow = ourochest_workflow_service or OurochestWorkflowService()
         self._contexts: dict[int, DiscordCommandContext] = {}
         self._pending_contexts: dict[tuple[str, int, str], DiscordCommandContext] = {}
         self._command_contexts: dict[int, DiscordCommandContext] = {}
@@ -837,6 +840,26 @@ class DiscordListenerService:
                 return
             if self._track_transaction_input(message, identity, content):
                 return
+            return
+        if self._ourochest_command_kind(command) is not None:
+            guild_id = getattr(message.guild, "id", None)
+            channel_id = getattr(message.channel, "id", None)
+            user_id = getattr(message.author, "id", None)
+            if guild_id is None or channel_id is None or user_id is None:
+                return
+            guild_id = str(guild_id)
+            channel_id = str(channel_id)
+            user_id = str(user_id)
+            if self._ourochest_workflow.has_active_for_owner(
+                guild_id, channel_id, user_id
+            ):
+                self._logger.info(
+                    "Ignoring Ourochest command with an active workflow for %s / %s",
+                    guild_id,
+                    user_id,
+                )
+                return
+            self._ourochest_workflow.create_pending(guild_id, channel_id, user_id)
             return
         expected_kind = self._expected_kind_for_command(command)
         if expected_kind is None:
@@ -3173,6 +3196,15 @@ class DiscordListenerService:
             return "disablelist"
         if normalized in DiscordListenerService._ROLL_COMMANDS:
             return "roll"
+        return None
+
+    @staticmethod
+    def _ourochest_command_kind(command: str) -> str | None:
+        """Recognize only the exact prefix forms for the dedicated Ourochest route."""
+        if not command.startswith("$"):
+            return None
+        if command[1:].casefold() in {"oc", "ourochest"}:
+            return "ourochest"
         return None
 
     def _track_divorce_confirmation(
