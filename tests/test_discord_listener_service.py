@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 import time
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +15,7 @@ import pytest
 
 from moa.database.sqlite import connect
 from moa.models.discord_message_mapping import build_message_receive_envelope
+from moa.models.ourochest_workflow import OurochestWorkflowStatus
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.core.config import ConfigAccount, ConfigService, MOAConfig
@@ -33,7 +34,16 @@ from moa.services.discord_listener_service import (
     DiscordListenerService,
     _MOADiagnosticDiscordClient,
 )
-from moa.services.ourochest_workflow_service import OurochestWorkflowService
+from moa.services.discord_component_board_adapter import DiscordComponentBoardProjectionError
+from moa.services.ourochest_workflow_service import (
+    OurochestActiveReplaceKind,
+    OurochestActiveReplaceResult,
+    OurochestWorkflowService,
+)
+from moa.services.ourochest_transition_service import (
+    OurochestTransitionKind,
+    OurochestTransitionResult,
+)
 from moa.services.ourosphere_board_service import OuroHuntBoardService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
@@ -1462,6 +1472,411 @@ def test_listener_ourochest_preserves_unrelated_generic_context(tmp_path) -> Non
     assert workflow.get_pending("123", "789", "456") is not None
     assert listener._pending_contexts == before_contexts
     assert listener._contexts[789] is before_latest
+
+
+def _ourochest_boards():
+    fixture_path = Path(__file__).parent / "fixtures" / "discord" / "oc_structural_capture.v1.json"
+    fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return tuple(
+        OuroHuntBoardService().project(record["message"])
+        for record in fixture["records"]
+    )
+
+
+def _ourochest_component_listener(
+    tmp_path,
+    *,
+    workflow=None,
+    adapter=None,
+    transition=None,
+    coordinator=None,
+):
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    service = workflow or OurochestWorkflowService()
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+        ourochest_workflow_service=service,
+        ourochest_component_adapter=adapter,
+        ourochest_transition_service=transition,
+        ourochest_workflow_coordinator=coordinator,
+    )
+    listener._mudae_user_id = 999
+    return listener, service
+
+
+def _ourochest_component_message(
+    message_id: int = 900,
+    *,
+    guild_id: int = 123,
+    channel_id: int = 789,
+    author_id: int = 999,
+    content: str = "",
+    components: object = "synthetic-components",
+):
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=guild_id),
+        channel=SimpleNamespace(id=channel_id),
+        author=SimpleNamespace(bot=True, id=author_id),
+        content=content,
+        embeds=(),
+        components=components,
+    )
+
+
+def _start_component_workflow(tmp_path, adapter, *, message_id: int = 900):
+    if adapter.project.side_effect is None:
+        adapter.project.return_value = _ourochest_boards()[0]
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+    initial = _ourochest_component_message(message_id)
+    asyncio.run(listener.handle_bot_response(initial))
+    active = workflow.get_active("123", "789", str(message_id))
+    assert active is not None
+    return listener, workflow, initial, active
+
+
+def test_listener_component_only_initial_board_binds_without_text(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.return_value = boards[0]
+    transition = Mock()
+    coordinator = Mock()
+    listener, workflow = _ourochest_component_listener(
+        tmp_path,
+        adapter=adapter,
+        transition=transition,
+        coordinator=coordinator,
+    )
+
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    active = workflow.get_active("123", "789", "900")
+    assert active is not None
+    assert active.status is OurochestWorkflowStatus.ACTIVE
+    assert len(active.red_candidates or ()) == 24
+    assert workflow.get_pending("123", "789", "456") is None
+    transition.interpret.assert_not_called()
+    coordinator.advance.assert_not_called()
+
+
+def test_listener_component_board_requires_configured_mudae_identity(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.return_value = boards[0]
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    asyncio.run(listener.handle_message(_ourochest_message("$oc")))
+    listener._mudae_user_id = None
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert adapter.project.call_count == 0
+
+    listener._mudae_user_id = 999
+    asyncio.run(
+        listener.handle_bot_response(_ourochest_component_message(author_id=998))
+    )
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert adapter.project.call_count == 0
+
+
+def test_listener_component_board_without_pending_does_not_bind(tmp_path) -> None:
+    adapter = Mock()
+    adapter.project.return_value = _ourochest_boards()[0]
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    assert workflow.get_active("123", "789", "900") is None
+    assert adapter.project.call_count == 1
+
+
+def test_listener_component_board_with_two_pending_users_is_ambiguous(tmp_path) -> None:
+    adapter = Mock()
+    adapter.project.return_value = _ourochest_boards()[0]
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    workflow.create_pending("123", "789", "456")
+    workflow.create_pending("123", "789", "999")
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    assert workflow.get_active("123", "789", "900") is None
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert workflow.get_pending("123", "789", "999") is not None
+
+
+def test_listener_ineligible_component_board_preserves_pending(tmp_path) -> None:
+    adapter = Mock()
+    adapter.project.return_value = _ourochest_boards()[1]
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    workflow.create_pending("123", "789", "456")
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    assert workflow.get_active("123", "789", "900") is None
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_unbound_adapter_failure_preserves_pending(tmp_path) -> None:
+    adapter = Mock()
+    adapter.project.side_effect = DiscordComponentBoardProjectionError("not a board")
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    workflow.create_pending("123", "789", "456")
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message()))
+
+    assert workflow.get_pending("123", "789", "456") is not None
+    assert workflow.get_active("123", "789", "900") is None
+
+
+def test_listener_active_update_uses_stored_last_board_not_edit_before(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = [boards[0], boards[1]]
+    transition = Mock()
+    transition.interpret.return_value = OurochestTransitionResult(
+        OurochestTransitionKind.NO_CHANGE
+    )
+    coordinator = Mock()
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+    listener._ourochest_transition = transition
+    listener._ourochest_coordinator = coordinator
+    coordinator.advance.return_value = SimpleNamespace(
+        status=OurochestWorkflowStatus.ACTIVE,
+        workflow=active,
+    )
+    before = _ourochest_component_message(initial.id, content="untrusted before")
+    after = _ourochest_component_message(initial.id, content="")
+
+    asyncio.run(listener.handle_message_edit(before, after))
+
+    transition.interpret.assert_called_once_with(active.last_board, boards[1])
+    coordinator.advance.assert_called_once()
+    assert workflow.get_active("123", "789", "900") == active
+
+
+def test_listener_active_update_advances_capture_sequence_and_removes_terminal(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = list(boards)
+    listener, workflow, initial, _ = _start_component_workflow(tmp_path, adapter=adapter)
+    counts = []
+    unique_red = []
+    for board_index in range(1, len(boards)):
+        after = _ourochest_component_message(initial.id)
+        asyncio.run(listener.handle_message_edit(initial, after))
+        current = workflow.get_active("123", "789", "900")
+        if current is None:
+            break
+        counts.append(len(current.red_candidates or ()))
+        unique_red.append(
+            current.red_candidates[0] if current.red_candidates and len(current.red_candidates) == 1 else None
+        )
+
+    assert counts == [10, 6, 1, 1]
+    assert unique_red[2] == (4, 1)
+    assert workflow.get_active("123", "789", "900") is None
+
+
+def test_listener_duplicate_full_edit_keeps_active_state_and_expiry(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = [boards[0], boards[0]]
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+
+    asyncio.run(listener.handle_message_edit(initial, _ourochest_component_message(initial.id)))
+
+    assert workflow.get_active("123", "789", "900") == active
+    assert workflow.get_active("123", "789", "900").expires_at == active.expires_at
+
+
+@pytest.mark.parametrize(
+    "message_kwargs",
+    [
+        {"message_id": 901},
+        {"channel_id": 790},
+        {"guild_id": 124},
+        {"author_id": 998},
+    ],
+)
+def test_listener_wrong_exact_scope_or_author_does_not_advance(tmp_path, message_kwargs) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = [boards[0], boards[1]]
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(**message_kwargs)))
+
+    assert workflow.get_active("123", "789", "900") == active
+    expected_calls = 1 if message_kwargs.get("author_id") == 998 else 2
+    assert len(adapter.project.mock_calls) == expected_calls
+
+
+@pytest.mark.parametrize(
+    ("replacement_kind", "expected_active"),
+    [
+        (OurochestActiveReplaceKind.STALE, True),
+        (OurochestActiveReplaceKind.MISSING, False),
+    ],
+)
+def test_listener_active_replacement_outcomes_do_not_resurrect(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: OurochestActiveReplaceKind,
+    expected_active: bool,
+) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = [boards[0], boards[1]]
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+    transition = Mock()
+    transition.interpret.return_value = OurochestTransitionResult(
+        OurochestTransitionKind.NO_CHANGE
+    )
+    coordinator = Mock()
+    updated = replace(active, last_board=boards[1], red_candidates=((0, 0),))
+    coordinator.advance.return_value = SimpleNamespace(
+        status=OurochestWorkflowStatus.ACTIVE,
+        workflow=updated,
+    )
+    listener._ourochest_transition = transition
+    listener._ourochest_coordinator = coordinator
+
+    def replacement(_expected, _updated):
+        if replacement_kind is OurochestActiveReplaceKind.MISSING:
+            workflow.remove_active("123", "789", "900")
+        return OurochestActiveReplaceResult(replacement_kind)
+
+    monkeypatch.setattr(workflow, "replace_active", replacement)
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(initial.id)))
+
+    assert (workflow.get_active("123", "789", "900") is not None) is expected_active
+    if replacement_kind is OurochestActiveReplaceKind.STALE:
+        assert workflow.get_active("123", "789", "900") == active
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        OurochestWorkflowStatus.TERMINAL,
+        OurochestWorkflowStatus.UNSUPPORTED,
+        OurochestWorkflowStatus.MALFORMED,
+        OurochestWorkflowStatus.CONTRADICTION,
+    ],
+)
+def test_listener_stopped_coordinator_result_removes_active(tmp_path, status) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    adapter.project.side_effect = [boards[0], boards[1]]
+    coordinator = Mock()
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+    stopped = replace(
+        active,
+        status=status,
+        red_candidates=() if status is OurochestWorkflowStatus.CONTRADICTION else active.red_candidates,
+    )
+    coordinator.advance.return_value = SimpleNamespace(status=status, workflow=stopped)
+    listener._ourochest_coordinator = coordinator
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(initial.id)))
+
+    assert workflow.get_active("123", "789", "900") is None
+
+
+def test_listener_bound_adapter_failure_removes_exact_active(tmp_path) -> None:
+    adapter = Mock()
+    listener, workflow, initial, active = _start_component_workflow(
+        tmp_path,
+        adapter=adapter,
+    )
+    adapter.project.side_effect = DiscordComponentBoardProjectionError("malformed")
+
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(initial.id)))
+
+    assert workflow.get_active("123", "789", "900") is None
+    assert workflow.get_pending("123", "789", "456") is None
+
+
+def test_listener_active_and_pending_workflows_route_by_exact_board_message(tmp_path) -> None:
+    boards = _ourochest_boards()
+    adapter = Mock()
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    workflow.create_pending("123", "789", "456")
+    first = workflow.bind_initial_board("123", "789", "900", boards[0]).workflow
+    workflow.create_pending("123", "789", "999")
+    adapter.project.return_value = boards[1]
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(900)))
+    updated_first = workflow.get_active("123", "789", "900")
+    assert updated_first is not None
+    assert updated_first.initiating_user_id == first.initiating_user_id
+    assert len(updated_first.red_candidates or ()) == 10
+
+    adapter.project.return_value = boards[0]
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(901)))
+    second = workflow.get_active("123", "789", "901")
+    assert second is not None
+    assert second.initiating_user_id == "999"
+    assert workflow.get_active("123", "789", "900").initiating_user_id == "456"
+
+    adapter.project.return_value = boards[1]
+    asyncio.run(listener.handle_bot_response(_ourochest_component_message(901)))
+    updated_first = workflow.get_active("123", "789", "900")
+    updated_second = workflow.get_active("123", "789", "901")
+    assert updated_first is not None and len(updated_first.red_candidates or ()) == 10
+    assert updated_second is not None and len(updated_second.red_candidates or ()) == 10
+
+
+def test_listener_raw_edit_bypasses_ourochest_components_and_does_not_fetch(tmp_path) -> None:
+    adapter = Mock()
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+    adapter.reset_mock()
+    listener._message_cache[initial.id] = initial
+    listener._client = SimpleNamespace(
+        get_channel=lambda _channel_id: (_ for _ in ()).throw(AssertionError("no REST fetch"))
+    )
+
+    asyncio.run(listener.handle_raw_message_edit(SimpleNamespace(channel_id=789, message_id=900)))
+
+    assert adapter.project.call_count == 0
+    assert workflow.get_active("123", "789", "900") == active
+
+
+def test_listener_raw_edit_cache_miss_does_not_mutate_ourochest_state(tmp_path) -> None:
+    adapter = Mock()
+    listener, workflow = _ourochest_component_listener(tmp_path, adapter=adapter)
+    workflow.create_pending("123", "789", "456")
+    listener._client = SimpleNamespace(
+        get_channel=lambda _channel_id: (_ for _ in ()).throw(AssertionError("no REST fetch"))
+    )
+
+    asyncio.run(listener.handle_raw_message_edit(SimpleNamespace(channel_id=789, message_id=900)))
+
+    assert adapter.project.call_count == 0
+    assert workflow.get_pending("123", "789", "456") is not None
+
+
+def test_listener_reward_message_does_not_advance_or_bind_board_workflow(tmp_path) -> None:
+    adapter = Mock()
+    listener, workflow, initial, active = _start_component_workflow(tmp_path, adapter=adapter)
+    adapter.project.side_effect = DiscordComponentBoardProjectionError("reward is not a board")
+
+    asyncio.run(
+        listener.handle_bot_response(
+            _ourochest_component_message(901, content="Ourochest reward")
+        )
+    )
+
+    assert workflow.get_active("123", "789", "900") == active
+    assert workflow.get_active("123", "789", "901") is None
 
 
 def _listener_with_two_configured_users(tmp_path):

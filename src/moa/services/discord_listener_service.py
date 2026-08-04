@@ -50,7 +50,21 @@ from moa.services.automatic_import_service import (
     DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
-from moa.services.ourochest_workflow_service import OurochestWorkflowService
+from moa.models.ourochest_workflow import (
+    OurochestWorkflowState,
+    OurochestWorkflowStatus,
+)
+from moa.services.discord_component_board_adapter import (
+    DiscordComponentBoardAdapter,
+    DiscordComponentBoardProjectionError,
+)
+from moa.services.ourochest_transition_service import OurochestTransitionService
+from moa.services.ourochest_workflow_coordinator import OurochestWorkflowCoordinator
+from moa.services.ourochest_workflow_service import (
+    OurochestActiveReplaceKind,
+    OurochestBindKind,
+    OurochestWorkflowService,
+)
 
 
 @dataclass(frozen=True)
@@ -720,6 +734,9 @@ class DiscordListenerService:
         status_text: str = _DEFAULT_STATUS_TEXT,
         logger: logging.Logger | None = None,
         ourochest_workflow_service: OurochestWorkflowService | None = None,
+        ourochest_component_adapter: DiscordComponentBoardAdapter | None = None,
+        ourochest_transition_service: OurochestTransitionService | None = None,
+        ourochest_workflow_coordinator: OurochestWorkflowCoordinator | None = None,
     ) -> None:
         self._config = config_service or ConfigService()
         self._catalog = catalog_service or CatalogService()
@@ -739,6 +756,15 @@ class DiscordListenerService:
         self._status_text = self._normalize_status_text(status_text)
         self._logger = logger or logging.getLogger("moa.discord")
         self._ourochest_workflow = ourochest_workflow_service or OurochestWorkflowService()
+        self._ourochest_component_adapter = (
+            ourochest_component_adapter or DiscordComponentBoardAdapter()
+        )
+        self._ourochest_transition = (
+            ourochest_transition_service or OurochestTransitionService()
+        )
+        self._ourochest_coordinator = (
+            ourochest_workflow_coordinator or OurochestWorkflowCoordinator()
+        )
         self._contexts: dict[int, DiscordCommandContext] = {}
         self._pending_contexts: dict[tuple[str, int, str], DiscordCommandContext] = {}
         self._command_contexts: dict[int, DiscordCommandContext] = {}
@@ -998,7 +1024,10 @@ class DiscordListenerService:
         """
         cached_message = self._message_cache.get(payload.message_id)
         if cached_message is not None:
-            await self.handle_bot_response(cached_message)
+            await self.handle_bot_response(
+                cached_message,
+                process_ourochest_components=False,
+            )
 
     async def handle_message_edit(
         self,
@@ -1118,11 +1147,18 @@ class DiscordListenerService:
         emoji = getattr(payload, "emoji", "")
         return str(getattr(emoji, "name", None) or emoji)
 
-    async def handle_bot_response(self, message: discord.Message) -> None:
+    async def handle_bot_response(
+        self,
+        message: discord.Message,
+        *,
+        process_ourochest_components: bool = True,
+    ) -> None:
         """Import one bot-authored Mudae response when a configured context exists."""
         if message.guild is None or not message.author.bot:
             return
         if self._mudae_user_id is not None and message.author.id != self._mudae_user_id:
+            return
+        if process_ourochest_components and self._handle_ourochest_component_message(message):
             return
         raw_message = self.extract_message_text(message)
         if not raw_message:
@@ -1757,6 +1793,86 @@ class DiscordListenerService:
                     processing_attempt.attempt_id,
                     error,
                 )
+
+    def _handle_ourochest_component_message(self, message: discord.Message) -> bool:
+        """Process one fully materialized normal Mudae component message for `$oc`."""
+        if self._mudae_user_id is None or message.author.id != self._mudae_user_id:
+            return False
+
+        guild_id = str(message.guild.id)
+        channel_id = str(message.channel.id)
+        board_message_id = str(message.id)
+        active = self._ourochest_workflow.get_active(
+            guild_id,
+            channel_id,
+            board_message_id,
+        )
+        if active is not None:
+            return self._handle_ourochest_active_board(message, active)
+
+        try:
+            board = self._ourochest_component_adapter.project(message)
+        except DiscordComponentBoardProjectionError:
+            return False
+
+        result = self._ourochest_workflow.bind_initial_board(
+            guild_id,
+            channel_id,
+            board_message_id,
+            board,
+        )
+        if result.kind is OurochestBindKind.BOUND:
+            return True
+        if result.kind is not OurochestBindKind.ALREADY_BOUND:
+            return False
+
+        active = self._ourochest_workflow.get_active(
+            guild_id,
+            channel_id,
+            board_message_id,
+        )
+        if active is None:
+            return False
+        return self._handle_ourochest_active_board(message, active)
+
+    def _handle_ourochest_active_board(
+        self,
+        message: discord.Message,
+        active: OurochestWorkflowState,
+    ) -> bool:
+        """Advance or stop one exact active Ourochest board binding."""
+        try:
+            current_board = self._ourochest_component_adapter.project(message)
+        except DiscordComponentBoardProjectionError:
+            self._ourochest_workflow.remove_active(
+                str(message.guild.id),
+                str(message.channel.id),
+                str(message.id),
+            )
+            return True
+
+        if active.last_board is None:
+            raise ValueError("active Ourochest workflow must retain last_board")
+        transition = self._ourochest_transition.interpret(active.last_board, current_board)
+        result = self._ourochest_coordinator.advance(active, current_board, transition)
+        if result.status is OurochestWorkflowStatus.ACTIVE:
+            if result.workflow == active:
+                return True
+            replacement = self._ourochest_workflow.replace_active(active, result.workflow)
+            if replacement.kind in {
+                OurochestActiveReplaceKind.REPLACED,
+                OurochestActiveReplaceKind.MISSING,
+                OurochestActiveReplaceKind.STALE,
+            }:
+                return True
+            raise ValueError(f"unexpected Ourochest replacement result: {replacement.kind}")
+
+        self._ourochest_workflow.remove_active(
+            str(message.guild.id),
+            str(message.channel.id),
+            str(message.id),
+        )
+        return True
 
     def _resolve_and_record_server_attribution(
         self,
