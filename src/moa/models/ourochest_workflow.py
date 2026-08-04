@@ -18,6 +18,10 @@ class OurochestWorkflowStatus(str, Enum):
 
     PENDING_BOARD = "pending_board"
     ACTIVE = "active"
+    UNSUPPORTED = "unsupported"
+    MALFORMED = "malformed"
+    CONTRADICTION = "contradiction"
+    TERMINAL = "terminal"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,29 +68,32 @@ class OurochestWorkflowState:
             return
 
         if self.board_message_id is None:
-            raise ValueError("active workflow requires a board_message_id")
+            raise ValueError("bound workflow requires a board_message_id")
         _require_identifier(self.board_message_id, "board_message_id")
         if self.bound_at is None:
-            raise ValueError("active workflow requires bound_at")
+            raise ValueError("bound workflow requires bound_at")
         _require_time(self.bound_at, "bound_at")
         if self.bound_at < self.created_at:
             raise ValueError("bound_at must not be before created_at")
         if self.last_board is None:
-            raise ValueError("active workflow requires last_board")
+            raise ValueError("bound workflow requires last_board")
         if not isinstance(self.last_board, OuroHuntBoard):
             raise TypeError("last_board must be an OuroHuntBoard")
         if self.red_candidates is None:
-            raise ValueError("active workflow requires red_candidates")
+            raise ValueError("bound workflow requires red_candidates")
         if not isinstance(self.red_candidates, tuple):
             raise TypeError("red_candidates must be a tuple")
-        if len(self.red_candidates) != 24:
-            raise ValueError("active workflow must contain exactly 24 red candidates")
         if len(set(self.red_candidates)) != len(self.red_candidates):
             raise ValueError("red_candidates must contain unique coordinates")
         for candidate in self.red_candidates:
             _require_coordinate(candidate, "red candidate")
         if self.expires_at <= self.bound_at:
             raise ValueError("active workflow expires_at must be after bound_at")
+        if status is OurochestWorkflowStatus.CONTRADICTION:
+            if self.red_candidates:
+                raise ValueError("contradiction workflow must have no red candidates")
+        elif not self.red_candidates:
+            raise ValueError(f"{status.value} workflow must have red candidates")
 
 
 def _require_identifier(value: WorkflowIdentifier, field_name: str) -> WorkflowIdentifier:
