@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import DisableListSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -77,9 +77,10 @@ class DisableListProjectionCoordinator:
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
         projection_slot = self._disablelist_slot(server, account)
-        connection = connect(self._database_path)
-        try:
-            connection.execute("BEGIN")
+
+        def coordinate_with_connection(
+            connection: sqlite3.Connection,
+        ) -> DisableListProjectionResult:
             event = self._load_source_event(connection, source_event_id)
             self._validate_attribution(connection, source_event_id=source_event_id, server=server, account=account)
             self._validate_lifecycle(connection, event, source_event_id, attempt_id)
@@ -109,13 +110,9 @@ class DisableListProjectionCoordinator:
             )
             if success.attempt_status != "succeeded" or success.source_event_status != "succeeded":
                 raise DisableListProjectionStateError(f"processing success was not recorded for source event {source_event_id}")
-            connection.commit()
             return DisableListProjectionResult(1, import_event_id, observation_id, False, True, target)
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+
+        return run_write_transaction(self._database_path, coordinate_with_connection)
 
     def _coordinate_replay(self, connection: sqlite3.Connection, event: sqlite3.Row, projection_slot: str, *, state: DisableListSnapshot) -> DisableListProjectionResult:
         import_event_id = self._positive_id(event["legacy_import_event_id"], "legacy_import_event_id")
@@ -131,7 +128,6 @@ class DisableListProjectionCoordinator:
             raise DisableListProjectionIntegrityError("disablelist projection link is not completed")
         observation_id = self._positive_id(link["projection_row_id"], "projection_row_id")
         self._validate_disablelist_target(connection, observation_id, import_event_id, projection_slot, state)
-        connection.rollback()
         return DisableListProjectionResult(0, import_event_id, observation_id, True, True, (self._PROJECTION_TABLE, observation_id))
 
     def _validate_attribution(self, connection: sqlite3.Connection, *, source_event_id: int, server: str, account: str) -> None:
