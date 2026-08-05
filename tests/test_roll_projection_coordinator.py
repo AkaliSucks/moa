@@ -171,6 +171,34 @@ def _event_and_attempt(connection: sqlite3.Connection):
     return event, attempt
 
 
+def _coordinate_roll(coordinator, source_event_id: int, attempt_id: int | None, roll=ROLL_ALL):
+    return coordinator.coordinate_roll(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        roll=roll,
+        server="Server",
+        account="Account",
+        raw="roll payload",
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+
+
+def _corrupt_server_character_value(catalog, monkeypatch, value: int = 999) -> None:
+    original = catalog._import_roll_with_connection
+
+    def import_and_corrupt(connection, **kwargs):
+        imported = original(connection, **kwargs)
+        connection.execute(
+            "UPDATE server_character_observations SET kakera_value = ? WHERE id = ?",
+            (value, imported.server_character_observation_id),
+        )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_roll_with_connection", import_and_corrupt)
+
+
 def test_first_processing_coordinates_all_roll_projections_and_success(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -394,6 +422,68 @@ def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_pat
         assert attempt[0] == "processing"
 
 
+def test_first_processing_rejects_target_from_another_import_and_rolls_back(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    seeded = catalog.import_roll(
+        ROLL_NONE,
+        server_name="Server",
+        account_name="Account",
+        raw_message="seed",
+        source="test",
+    )
+    with connect(database_path) as connection:
+        seeded_roll_id = int(
+            connection.execute(
+                "SELECT id FROM roll_observations WHERE import_event_id = ?",
+                (seeded.import_event_id,),
+            ).fetchone()[0]
+        )
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    before_counts = None
+    with connect(database_path) as connection:
+        before_counts = _counts(connection)
+
+    original = coordinator._targets_from_import
+
+    def return_foreign_target(expected, imported):
+        targets = original(expected, imported)
+        return ((targets[0][0], seeded_roll_id), *targets[1:])
+
+    monkeypatch.setattr(coordinator, "_targets_from_import", return_foreign_target)
+    with pytest.raises(RollProjectionIntegrityError, match="another import event"):
+        _coordinate_roll(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+        assert _event_and_attempt(connection)[0][0:2] == ("processing", None)
+        assert _event_and_attempt(connection)[1][0] == "processing"
+
+
+def test_first_processing_validates_optional_target_before_completion(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _corrupt_server_character_value(catalog, monkeypatch)
+
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched Kakera value"):
+        _coordinate_roll(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        counts = _counts(connection)
+        assert counts["import_events"] == 0
+        assert counts["characters"] == 0
+        assert counts["roll_observations"] == 0
+        assert counts["harem_key_observations"] == 0
+        assert counts["rank_snapshots"] == 0
+        assert counts["server_character_observations"] == 0
+        assert counts["discord_projection_links"] == 0
+        assert _event_and_attempt(connection)[0][0:2] == ("processing", None)
+        assert _event_and_attempt(connection)[1][0] == "processing"
+
+
 def test_retry_after_rolled_back_failure_succeeds_without_duplicates(tmp_path, monkeypatch) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -502,6 +592,171 @@ def test_successful_replay_validates_links_and_inserts_nothing(tmp_path) -> None
     with connect(database_path) as connection:
         assert _counts(connection) == before_counts
         assert _event_and_attempt(connection) == (before_event, before_attempt)
+
+
+def test_succeeded_replay_rejects_non_roll_import_kind_without_mutation(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE import_events SET kind = 'claim' WHERE id = ?",
+            (first.import_event_id,),
+        )
+        before_counts = _counts(connection)
+        before_event, before_attempt = _event_and_attempt(connection)
+        before_links = tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT projection_kind, projection_table, projection_row_id, state "
+                "FROM discord_projection_links ORDER BY id"
+            )
+        )
+
+    with pytest.raises(RollProjectionIntegrityError, match="not a roll import"):
+        _coordinate_roll(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+        assert _event_and_attempt(connection) == (before_event, before_attempt)
+        assert tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT projection_kind, projection_table, projection_row_id, state "
+                "FROM discord_projection_links ORDER BY id"
+            )
+        ) == before_links
+
+
+@pytest.mark.parametrize(
+    "table, column, value, message",
+    [
+        ("roll_observations", "claim_rank", 99, "mismatched claim rank"),
+        ("roll_observations", "kakera_value", 99, "mismatched Kakera value"),
+    ],
+)
+def test_succeeded_replay_rejects_roll_scalar_mismatch(
+    tmp_path, table: str, column: str, value: int, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    target_id = dict(first.projection_targets)[table]
+    with connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE {table} SET {column} = ? WHERE id = ?", (value, target_id)
+        )
+        before_counts = _counts(connection)
+        before_event, before_attempt = _event_and_attempt(connection)
+
+    with pytest.raises(RollProjectionIntegrityError, match=message):
+        _coordinate_roll(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+        assert _event_and_attempt(connection) == (before_event, before_attempt)
+
+
+@pytest.mark.parametrize(
+    "column, value, message",
+    [
+        ("key_count", 99, "mismatched key count"),
+        ("kakera_value", 99, "mismatched Kakera value"),
+    ],
+)
+def test_succeeded_replay_rejects_key_scalar_mismatch(
+    tmp_path, column: str, value: int, message: str
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    target_id = dict(first.projection_targets)["harem_key_observations"]
+    with connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE harem_key_observations SET {column} = ? WHERE id = ?",
+            (value, target_id),
+        )
+
+    with pytest.raises(RollProjectionIntegrityError, match=message):
+        _coordinate_roll(coordinator, source_event_id, None)
+
+
+def test_succeeded_replay_rejects_rank_scalar_mismatch(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    target_id = dict(first.projection_targets)["rank_snapshots"]
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE rank_snapshots SET claim_rank = ? WHERE id = ?",
+            (99, target_id),
+        )
+
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched claim rank"):
+        _coordinate_roll(coordinator, source_event_id, None)
+
+
+def test_succeeded_replay_rejects_server_character_scalar_mismatch(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    target_id = dict(first.projection_targets)["server_character_observations"]
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE server_character_observations SET kakera_value = ? WHERE id = ?",
+            (99, target_id),
+        )
+
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched Kakera value"):
+        _coordinate_roll(coordinator, source_event_id, None)
+
+
+def test_preexisting_character_update_rolls_back_after_target_integrity_failure(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    seed = RollObservation(
+        name="Coordinator Character",
+        series="Coordinator Series",
+        claim_rank=None,
+        kakera_value=None,
+    )
+    seeded = catalog.import_roll(
+        seed,
+        server_name="Server",
+        account_name="Account",
+        raw_message="seed",
+        source="test",
+    )
+    with connect(database_path) as connection:
+        before_character = tuple(
+            connection.execute(
+                "SELECT name, series, normalized_name, normalized_series, updated_at "
+                "FROM characters WHERE normalized_name = 'coordinator character'"
+            ).fetchone()
+        )
+        assert seeded.import_event_id > 0
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _corrupt_server_character_value(catalog, monkeypatch)
+
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched Kakera value"):
+        _coordinate_roll(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT name, series, normalized_name, normalized_series, updated_at "
+                "FROM characters WHERE normalized_name = 'coordinator character'"
+            ).fetchone()
+        ) == before_character
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM roll_observations").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE source_event_id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == 0
+        assert _event_and_attempt(connection)[0][0:2] == ("processing", None)
+        assert _event_and_attempt(connection)[1][0] == "processing"
 
 
 def test_projection_slots_are_compact_deterministic_normalized_json(tmp_path) -> None:

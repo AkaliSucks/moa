@@ -109,7 +109,7 @@ class RollProjectionCoordinator:
                     server=server,
                     account=account,
                 )
-                return self._coordinate_replay(connection, event, expected)
+                return self._coordinate_replay(connection, event, expected, roll)
 
             if attempt_id is None:
                 raise DiscordMessageProcessingConflictError(
@@ -129,6 +129,7 @@ class RollProjectionCoordinator:
                 links,
                 expected,
                 allow_claimed=False,
+                roll=roll,
             )
             if any(str(link["state"]) == "completed" for link in links.values()):
                 raise RollProjectionIntegrityError(
@@ -151,6 +152,19 @@ class RollProjectionCoordinator:
                 observed_at=observed_at,
             )
             targets = self._targets_from_import(expected, imported)
+            for spec, (table, projection_row_id) in zip(expected, targets):
+                if table != spec.table:
+                    raise RollProjectionIntegrityError(
+                        f"projection target for {spec.kind} has the wrong table"
+                    )
+                self._validate_target(
+                    connection,
+                    event,
+                    spec,
+                    projection_row_id,
+                    int(imported.import_event_id),
+                    roll,
+                )
             self._complete_projection_links(
                 connection,
                 source_event_id=source_event_id,
@@ -188,6 +202,7 @@ class RollProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         expected: tuple[_ProjectionSpec, ...],
+        roll: RollObservation,
     ) -> RollProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -195,11 +210,15 @@ class RollProjectionCoordinator:
                 f"succeeded source event {event['id']} has no legacy import event"
             )
         import_event = connection.execute(
-            "SELECT id FROM import_events WHERE id = ?", (int(import_event_id),)
+            "SELECT id, kind FROM import_events WHERE id = ?", (int(import_event_id),)
         ).fetchone()
         if import_event is None:
             raise RollProjectionIntegrityError(
                 f"legacy import event {import_event_id} for source event {event['id']} is missing"
+            )
+        if str(import_event["kind"]) != "roll":
+            raise RollProjectionIntegrityError(
+                f"legacy import event {import_event_id} for source event {event['id']} is not a roll import"
             )
         links = self._load_links(connection, int(event["id"]))
         self._validate_existing_links(
@@ -208,6 +227,7 @@ class RollProjectionCoordinator:
             links,
             expected,
             allow_claimed=False,
+            roll=roll,
         )
         targets = tuple(
             (spec.table, int(links[(spec.kind, spec.slot)]["projection_row_id"]))
@@ -339,6 +359,7 @@ class RollProjectionCoordinator:
         expected: tuple[_ProjectionSpec, ...],
         *,
         allow_claimed: bool,
+        roll: RollObservation,
     ) -> None:
         expected_keys = {(spec.kind, spec.slot) for spec in expected}
         actual_keys = set(links)
@@ -374,6 +395,7 @@ class RollProjectionCoordinator:
                 spec,
                 int(link["projection_row_id"]),
                 int(import_event_id),
+                roll,
             )
         if str(event["status"]) == "succeeded" and actual_keys != expected_keys:
             raise RollProjectionIntegrityError(
@@ -387,6 +409,7 @@ class RollProjectionCoordinator:
         spec: _ProjectionSpec,
         projection_row_id: int,
         import_event_id: int,
+        roll: RollObservation,
     ) -> None:
         if spec.table not in self._TARGET_TABLES:
             raise RollProjectionIntegrityError(
@@ -421,6 +444,14 @@ class RollProjectionCoordinator:
                 """,
                 (int(row["character_id"]), int(row["account_context_id"])),
             ).fetchone()
+            if row["claim_rank"] != roll.claim_rank:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched claim rank"
+                )
+            if row["kakera_value"] != roll.kakera_value:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched Kakera value"
+                )
         elif spec.table == "harem_key_observations":
             context = connection.execute(
                 """
@@ -437,11 +468,23 @@ class RollProjectionCoordinator:
                 raise RollProjectionIntegrityError(
                     f"projection target {spec.table}:{projection_row_id} has the wrong key type"
                 )
+            if row["key_count"] != roll.displayed_key_count:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched key count"
+                )
+            if row["kakera_value"] != roll.kakera_value:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched Kakera value"
+                )
         elif spec.table == "rank_snapshots":
             context = connection.execute(
                 "SELECT normalized_name AS character, normalized_series AS series FROM characters WHERE id = ?",
                 (int(row["character_id"]),),
             ).fetchone()
+            if row["claim_rank"] != roll.claim_rank:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched claim rank"
+                )
         else:
             context = connection.execute(
                 """
@@ -453,6 +496,10 @@ class RollProjectionCoordinator:
                 """,
                 (int(row["character_id"]), int(row["server_context_id"])),
             ).fetchone()
+            if row["kakera_value"] != roll.kakera_value:
+                raise RollProjectionIntegrityError(
+                    f"projection target {spec.table}:{projection_row_id} has mismatched Kakera value"
+                )
 
         if context is None:
             raise RollProjectionIntegrityError(
