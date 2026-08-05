@@ -1079,6 +1079,204 @@ def test_scan_completion_requires_existing_separate_operation(tmp_path):
         catalog.complete_antidisable_scan(result.scan_id)
 
 
+def test_prior_page_workflow_and_bindings_survive_later_page_rollback(
+    tmp_path, monkeypatch
+):
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    _receive_and_begin(discord, suffix="request", raw="adl request")
+    scan = _begin_scan(catalog)
+    discord.create_antidisable_workflow(
+        scan_id=scan.id,
+        request_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD, "guild", "channel", "message-request"
+        ),
+        requesting_user_id="known-user",
+        created_at=OBSERVED_AT,
+        expires_at=FINISHED_AT,
+    )
+
+    first_event, first_attempt = _receive_and_begin(discord, suffix="first")
+    _record_attribution(discord, first_event)
+    discord.bind_antidisable_response(
+        scan_id=scan.id,
+        response_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD, "guild", "channel", "message-first"
+        ),
+        bound_at=OBSERVED_AT,
+    )
+    first = _coordinate(
+        coordinator,
+        first_event,
+        first_attempt,
+        page=_page(number=1),
+        scan_id=scan.id,
+    )
+
+    second_event, second_attempt = _receive_and_begin(discord, suffix="second")
+    _record_attribution(discord, second_event)
+    discord.bind_antidisable_response(
+        scan_id=scan.id,
+        response_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD, "guild", "channel", "message-second"
+        ),
+        bound_at=OBSERVED_AT,
+    )
+    before = _counts(database_path)
+    original_helper = catalog._import_antidisable_page_with_connection
+
+    def fail_after_write(*args, **kwargs):
+        original_helper(*args, **kwargs)
+        raise RuntimeError("forced later-page failure")
+
+    monkeypatch.setattr(catalog, "_import_antidisable_page_with_connection", fail_after_write)
+    with pytest.raises(RuntimeError, match="forced later-page failure"):
+        _coordinate(
+            coordinator,
+            second_event,
+            second_attempt,
+            page=_page(number=2),
+            scan_id=scan.id,
+        )
+
+    assert _counts(database_path) == before
+    with connect(database_path) as connection:
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages "
+            "WHERE harem_scan_id = ? ORDER BY page_number",
+            (scan.id,),
+        ).fetchall()
+        scan_row = connection.execute(
+            "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+        workflow_count = connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()[0]
+        binding_count = connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings "
+            "WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()[0]
+        source_rows = connection.execute(
+            "SELECT id, status, legacy_import_event_id FROM discord_source_events "
+            "WHERE id IN (?, ?) ORDER BY id",
+            (first_event, second_event),
+        ).fetchall()
+    assert [tuple(row) for row in pages] == [(1, first.import_event_id)]
+    assert tuple(scan_row) == (2, None)
+    assert workflow_count == 1
+    assert binding_count == 2
+    assert [tuple(row) for row in source_rows] == [
+        (first_event, "succeeded", first.import_event_id),
+        (second_event, "processing", None),
+    ]
+
+
+def test_runner_replay_commit_is_durable_noop_with_other_page_present(tmp_path):
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    scan = _begin_scan(catalog)
+    second_event, second_attempt = _receive_and_begin(discord, suffix="second")
+    _record_attribution(discord, second_event)
+    second = _coordinate(
+        coordinator,
+        second_event,
+        second_attempt,
+        page=_page(number=2),
+        scan_id=scan.id,
+    )
+    first_event, first_attempt = _receive_and_begin(discord, suffix="first")
+    _record_attribution(discord, first_event)
+    _coordinate(
+        coordinator,
+        first_event,
+        first_attempt,
+        page=_page(number=1),
+        scan_id=scan.id,
+    )
+
+    def durable_snapshot():
+        with connect(database_path) as connection:
+            return {
+                "counts": _counts(database_path),
+                "scan": tuple(
+                    connection.execute(
+                        "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+                        (scan.id,),
+                    ).fetchone()
+                ),
+                "pages": [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT page_number, import_event_id FROM harem_scan_pages "
+                        "WHERE harem_scan_id = ? ORDER BY page_number",
+                        (scan.id,),
+                    ).fetchall()
+                ],
+                "links": [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT source_event_id, projection_slot, projection_table, "
+                        "projection_row_id, state FROM discord_projection_links ORDER BY id"
+                    ).fetchall()
+                ],
+                "events": [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT id, status, legacy_import_event_id FROM discord_source_events "
+                        "ORDER BY id"
+                    ).fetchall()
+                ],
+                "attempts": [
+                    tuple(row)
+                    for row in connection.execute(
+                        "SELECT source_event_id, status FROM discord_processing_attempts ORDER BY id"
+                    ).fetchall()
+                ],
+            }
+
+    before = durable_snapshot()
+    replay = _coordinate(
+        coordinator,
+        second_event,
+        None,
+        page=_page(number=2),
+        scan_id=scan.id,
+    )
+    assert replay.replay_skipped is True
+    assert replay.imported_count == 0
+    assert replay.import_event_id == second.import_event_id
+    assert durable_snapshot() == before
+
+
+def test_coordinator_runner_uses_no_public_page_or_scan_wrapper(
+    tmp_path, monkeypatch
+):
+    database_path, catalog, discord, coordinator, source_event_id, attempt_id, scan_id = (
+        _new_processing(tmp_path)
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("public transaction owner entered from page runner")
+
+    monkeypatch.setattr(catalog, "import_antidisable_page", forbidden)
+    monkeypatch.setattr(catalog, "begin_antidisable_scan", forbidden)
+    monkeypatch.setattr(catalog, "complete_antidisable_scan", forbidden)
+    result = _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        page=_page(count=1),
+        scan_id=scan_id,
+    )
+    assert result.imported_count == 1
+    progress = catalog.harem_scan_progress(scan_id)
+    assert progress is not None
+    assert progress.is_complete is True
+    assert progress.completed_at is None
+    assert _counts(database_path)["harem_scan_pages"] == 1
+
+
 def test_no_per_series_projection_and_persistent_slot_limitation_is_explicit(tmp_path):
     _, catalog, discord, coordinator, source_event_id, result = _setup(tmp_path)
     assert result.projection_target[0] == "import_events"

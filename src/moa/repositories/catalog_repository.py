@@ -2309,8 +2309,9 @@ class CatalogRepository:
     ) -> AntidisableImportResult:
         """Store one account-scoped `$adl` series page."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_antidisable_page_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_antidisable_page_with_connection(
                 connection,
                 page=page,
                 scan_id=scan_id,
@@ -2319,7 +2320,8 @@ class CatalogRepository:
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return AntidisableImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
