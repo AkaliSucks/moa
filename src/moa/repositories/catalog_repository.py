@@ -991,8 +991,9 @@ class CatalogRepository:
     ) -> ClaimImportResult:
         """Store claim evidence without inventing a character series."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_claim_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_claim_with_connection(
                 connection,
                 claim=claim,
                 server=server_name,
@@ -1000,7 +1001,8 @@ class CatalogRepository:
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return ClaimImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
