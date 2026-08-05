@@ -1162,6 +1162,46 @@ def test_public_roll_wrapper_keeps_public_result_and_transaction_behavior(tmp_pa
         assert _counts(connection)["import_events"] == 1
 
 
+def test_public_roll_wrapper_rolls_back_and_remains_usable(tmp_path, monkeypatch) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original = catalog._import_roll_with_connection
+
+    def fail_after_writes(connection, **kwargs):
+        original(connection, **kwargs)
+        raise RuntimeError("forced public roll failure")
+
+    monkeypatch.setattr(catalog, "_import_roll_with_connection", fail_after_writes)
+    with pytest.raises(RuntimeError, match="forced public roll failure"):
+        catalog.import_roll(ROLL, "Server", "Account", "roll payload", "discord")
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == {
+            "import_events": 0,
+            "characters": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "claim_observations": 0,
+            "profile_observations": 0,
+            "roll_observations": 0,
+            "harem_key_observations": 0,
+            "rank_snapshots": 0,
+            "server_character_observations": 0,
+            "discord_projection_links": 0,
+        }
+
+    monkeypatch.setattr(catalog, "_import_roll_with_connection", original)
+    result = catalog.import_roll(ROLL, "Server", "Account", "roll payload", "discord")
+
+    assert result.character_id > 0
+    with connect(database_path) as connection:
+        counts = _counts(connection)
+        assert counts["import_events"] == 1
+        assert counts["roll_observations"] == 1
+        assert counts["harem_key_observations"] == 1
+        assert counts["rank_snapshots"] == 1
+        assert counts["server_character_observations"] == 1
+
+
 def test_public_claim_wrapper_keeps_result_and_writes_expected_rows(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 

@@ -254,6 +254,32 @@ def test_first_processing_coordinates_all_roll_projections_and_success(tmp_path)
         assert attempt[0:2] == ("succeeded", FINISHED_AT.isoformat())
 
 
+def test_coordinator_calls_supplied_roll_helper_without_public_wrapper(
+    tmp_path, monkeypatch
+) -> None:
+    _database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original = catalog._import_roll_with_connection
+    calls = 0
+
+    def supplied_helper(connection, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert connection.in_transaction is True
+        return original(connection, **kwargs)
+
+    def forbidden_public_wrapper(*_args, **_kwargs):
+        raise AssertionError("coordinator called public roll wrapper")
+
+    monkeypatch.setattr(catalog, "_import_roll_with_connection", supplied_helper)
+    monkeypatch.setattr(catalog, "import_roll", forbidden_public_wrapper)
+
+    result = _coordinate_roll(coordinator, source_event_id, attempt_id)
+
+    assert result.imported_count == 1
+    assert calls == 1
+
+
 def test_roll_without_optional_projections_only_creates_roll_projection(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
