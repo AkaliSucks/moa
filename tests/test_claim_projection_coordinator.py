@@ -365,8 +365,21 @@ def test_equivalent_casing_and_whitespace_reuses_projection_slot_on_replay(tmp_p
 
 
 def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_path, monkeypatch) -> None:
-    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    existing = catalog.import_roll(
+        RollObservation(
+            name="Existing Character",
+            series="Existing Series",
+            claim_rank=1,
+            kakera_value=10,
+        ),
+        "Server",
+        "Account",
+        "existing roll",
+        "discord",
+    )
     source_event_id, attempt_id = _receive_and_begin(discord)
+    before = _database_snapshot(database_path)
     monkeypatch.setattr(
         coordinator,
         "_complete_projection_link",
@@ -376,17 +389,15 @@ def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_pat
     with pytest.raises(RuntimeError, match="forced failure after claim writes"):
         _coordinate(coordinator, source_event_id, attempt_id)
 
+    assert _database_snapshot(database_path) == before
     with connect(database_path) as connection:
-        assert _counts(connection) == {
-            "import_events": 0,
-            "characters": 0,
-            "server_contexts": 0,
-            "account_contexts": 0,
-            "claim_observations": 0,
-            "roll_observations": 0,
-            "profile_observations": 0,
-            "discord_projection_links": 0,
-        }
+        assert connection.execute(
+            "SELECT 1 FROM characters WHERE id = ?", (existing.character_id,)
+        ).fetchone() is not None
+        assert connection.execute(
+            "SELECT 1 FROM roll_observations WHERE import_event_id = ?",
+            (existing.import_event_id,),
+        ).fetchone() is not None
         assert connection.execute(
             "SELECT status, legacy_import_event_id FROM discord_source_events"
         ).fetchone()[:2] == ("processing", None)
@@ -419,8 +430,7 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     first = _coordinate(coordinator, source_event_id, attempt_id)
-    with connect(database_path) as connection:
-        before = _counts(connection)
+    before = _database_snapshot(database_path)
 
     replay = _coordinate(coordinator, source_event_id, None)
 
@@ -433,9 +443,81 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
         durable_success_recorded=True,
         projection_target=first.projection_target,
     )
+    assert _database_snapshot(database_path) == before
+
+
+def test_coordinator_resolves_existing_account_character_inside_runner(tmp_path) -> None:
+    _database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    roll = catalog.import_roll(
+        RollObservation(
+            name=CLAIM.character_name,
+            series="Claim Series",
+            claim_rank=1,
+            kakera_value=10,
+        ),
+        "Server",
+        "Account",
+        "existing roll",
+        "discord",
+    )
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.character_id == roll.character_id
+
+
+def test_coordinator_preserves_ambiguous_character_as_unresolved(tmp_path) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    for suffix in ("one", "two"):
+        catalog.import_roll(
+            RollObservation(
+                name=CLAIM.character_name,
+                series=f"Claim Series {suffix}",
+                claim_rank=1,
+                kakera_value=10,
+            ),
+            "Server",
+            f"Other Account {suffix}",
+            f"existing roll {suffix}",
+            "discord",
+        )
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.character_id is None
     with connect(database_path) as connection:
-        assert _counts(connection) == before
-        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT character_id FROM claim_observations WHERE id = ?",
+            (result.claim_observation_id,),
+        ).fetchone()[0] is None
+
+
+def test_coordinator_calls_supplied_claim_helper_without_public_wrapper(
+    tmp_path, monkeypatch
+) -> None:
+    _database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original = catalog._import_claim_with_connection
+    calls = 0
+
+    def supplied_helper(connection, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(connection, **kwargs)
+
+    def forbidden_public_wrapper(*_args, **_kwargs):
+        raise AssertionError("coordinator called public claim wrapper")
+
+    monkeypatch.setattr(catalog, "_import_claim_with_connection", supplied_helper)
+    monkeypatch.setattr(catalog, "import_claim", forbidden_public_wrapper)
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.imported_count == 1
+    assert calls == 1
 
 
 @pytest.mark.parametrize(

@@ -1198,6 +1198,33 @@ def test_public_claim_wrapper_keeps_result_and_writes_expected_rows(tmp_path) ->
         )
 
 
+def test_public_claim_wrapper_rolls_back_and_remains_usable(tmp_path, monkeypatch) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original = catalog._import_claim_with_connection
+
+    def fail_after_writes(connection, **kwargs):
+        original(connection, **kwargs)
+        raise RuntimeError("forced public claim failure")
+
+    monkeypatch.setattr(catalog, "_import_claim_with_connection", fail_after_writes)
+    with pytest.raises(RuntimeError, match="forced public claim failure"):
+        catalog.import_claim(CLAIM, "Server", "Account", "claim payload", "discord")
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert _counts(connection)["server_contexts"] == 0
+        assert _counts(connection)["account_contexts"] == 0
+        assert _counts(connection)["claim_observations"] == 0
+
+    monkeypatch.setattr(catalog, "_import_claim_with_connection", original)
+    result = catalog.import_claim(CLAIM, "Server", "Account", "claim payload", "discord")
+
+    assert result.character_id is None
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 1
+        assert _counts(connection)["claim_observations"] == 1
+
+
 def test_claim_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
