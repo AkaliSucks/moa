@@ -232,6 +232,42 @@ def test_failure_after_catalog_writes_rolls_back_and_retry_succeeds(tmp_path, mo
         }
 
 
+def test_first_processing_settings_mismatch_rolls_back(tmp_path, monkeypatch) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    original = catalog._import_kakeraloot_settings_with_connection
+
+    def import_mismatched(connection, **kwargs):
+        imported = original(connection, **kwargs)
+        connection.execute(
+            "UPDATE kakeraloot_settings_observations SET loot_cost = ? WHERE id = ?",
+            (SETTINGS.loot_cost + 1, imported.kakeraloot_settings_observation_id),
+        )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_kakeraloot_settings_with_connection", import_mismatched)
+
+    with pytest.raises(InfoklProjectionTargetError, match="mismatched loot_cost"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "kakeraloot_settings_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_event_server_attributions": 1,
+            "discord_processing_attempts": 1,
+        }
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "processing"
+
+
 def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -253,6 +289,44 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
     with connect(database_path) as connection:
         assert _counts(connection) == before
     assert discord.get_server_attribution(source_event_id) == attribution
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "loot_cost",
+        "quantity_quality_base_cost",
+        "quantity_quality_level_increment",
+    ],
+)
+def test_succeeded_replay_rejects_mismatched_settings_value(tmp_path, field) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        before = _counts(connection)
+        connection.execute(
+            f"UPDATE kakeraloot_settings_observations SET {field} = ? WHERE id = ?",
+            (getattr(SETTINGS, field) + 1, first.kakeraloot_settings_observation_id),
+        )
+
+    with pytest.raises(InfoklProjectionTargetError, match=f"mismatched {field}"):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == before
+        assert connection.execute(
+            f"SELECT {field} FROM kakeraloot_settings_observations WHERE id = ?",
+            (first.kakeraloot_settings_observation_id,),
+        ).fetchone()[0] == getattr(SETTINGS, field) + 1
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("succeeded", first.import_event_id)
+        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "succeeded"
 
 
 def test_edited_discord_revision_gets_independent_projection(tmp_path) -> None:

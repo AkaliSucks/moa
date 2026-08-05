@@ -100,7 +100,7 @@ class InfoklProjectionCoordinator:
                     raise InfoklProjectionStateError(
                         f"Discord source event {source_event_id} has already succeeded"
                     )
-                return self._coordinate_replay(connection, event, projection_slot)
+                return self._coordinate_replay(connection, event, projection_slot, settings)
 
             if attempt_id is None:
                 raise InfoklProjectionStateError(
@@ -147,6 +147,7 @@ class InfoklProjectionCoordinator:
                 observation_id=observation_id,
                 import_event_id=import_event_id,
                 projection_slot=projection_slot,
+                settings=settings,
             )
             target = (self._PROJECTION_TABLE, observation_id)
             self._complete_projection_link(
@@ -187,6 +188,7 @@ class InfoklProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         projection_slot: str,
+        settings: KakeralootSettingsSnapshot,
     ) -> InfoklProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -227,6 +229,7 @@ class InfoklProjectionCoordinator:
             observation_id=observation_id,
             import_event_id=int(import_event_id),
             projection_slot=projection_slot,
+            settings=settings,
         )
         return InfoklProjectionResult(
             imported_count=0,
@@ -381,12 +384,15 @@ class InfoklProjectionCoordinator:
         observation_id: int,
         import_event_id: int,
         projection_slot: str,
+        settings: KakeralootSettingsSnapshot,
     ) -> None:
         if self._PROJECTION_TABLE not in self._TARGET_TABLES:
             raise InfoklProjectionIntegrityError("Infokl projection table is not allowlisted")
         row = connection.execute(
             """
-            SELECT kso.import_event_id, sc.normalized_name AS server
+            SELECT kso.import_event_id, sc.normalized_name AS server,
+                   kso.loot_cost, kso.quantity_quality_base_cost,
+                   kso.quantity_quality_level_increment
             FROM kakeraloot_settings_observations AS kso
             JOIN server_contexts AS sc ON sc.id = kso.server_context_id
             WHERE kso.id = ?
@@ -418,6 +424,15 @@ class InfoklProjectionCoordinator:
             raise InfoklProjectionTargetError(
                 f"projection target kakeraloot_settings_observations:{observation_id} has mismatched server scope"
             )
+        for field in (
+            "loot_cost",
+            "quantity_quality_base_cost",
+            "quantity_quality_level_increment",
+        ):
+            if row[field] != getattr(settings, field):
+                raise InfoklProjectionTargetError(
+                    f"projection target kakeraloot_settings_observations:{observation_id} has mismatched {field}"
+                )
 
     @staticmethod
     def _infokl_slot(server: str) -> str:
