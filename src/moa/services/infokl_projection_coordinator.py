@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import KakeralootSettingsSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -90,9 +90,9 @@ class InfoklProjectionCoordinator:
         finished_at = self._normalize_datetime(finished_at, "finished_at")
         projection_slot = self._infokl_slot(server)
 
-        connection = connect(self._database_path)
-        try:
-            connection.execute("BEGIN")
+        def coordinate_with_connection(
+            connection: sqlite3.Connection,
+        ) -> InfoklProjectionResult:
             event = self._load_source_event(connection, source_event_id)
             self._validate_server_attribution(connection, source_event_id, server)
             if str(event["status"]) == "succeeded":
@@ -168,7 +168,6 @@ class InfoklProjectionCoordinator:
                 raise InfoklProjectionStateError(
                     f"processing success was not recorded for source event {source_event_id}"
                 )
-            connection.commit()
             return InfoklProjectionResult(
                 imported_count=1,
                 import_event_id=import_event_id,
@@ -177,11 +176,8 @@ class InfoklProjectionCoordinator:
                 durable_success_recorded=True,
                 projection_target=target,
             )
-        except BaseException:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+
+        return run_write_transaction(self._database_path, coordinate_with_connection)
 
     def _coordinate_replay(
         self,
