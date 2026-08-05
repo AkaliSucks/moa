@@ -4536,6 +4536,57 @@ def test_public_antidisable_import_preserves_result_and_stored_values(tmp_path) 
         ]
 
 
+def test_public_antidisable_wrapper_rolls_back_helper_failure_and_remains_usable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    original_helper = catalog._import_antidisable_page_with_connection
+
+    def fail_after_write(connection: sqlite3.Connection, **kwargs):
+        original_helper(connection, **kwargs)
+        raise RuntimeError("forced antidisable page import failure")
+
+    with connect(database_path) as connection:
+        before = _antidisable_counts(connection)
+
+    monkeypatch.setattr(catalog, "_import_antidisable_page_with_connection", fail_after_write)
+    with pytest.raises(RuntimeError, match="forced antidisable page import failure"):
+        catalog.import_antidisable_page(
+            ANTIDISABLE_CONTINUATION_PAGE,
+            "Server",
+            "Account",
+            "failed page two",
+            "discord",
+            scan.id,
+        )
+
+    with connect(database_path) as connection:
+        assert _antidisable_counts(connection) == before
+    progress = catalog.harem_scan_progress(scan.id)
+    assert progress is not None
+    assert progress.expected_page_count is None
+    assert progress.imported_pages == ()
+    assert progress.completed_at is None
+
+    monkeypatch.setattr(catalog, "_import_antidisable_page_with_connection", original_helper)
+    result = catalog.import_antidisable_page(
+        ANTIDISABLE_CONTINUATION_PAGE,
+        "Server",
+        "Account",
+        "successful page two",
+        "discord",
+        scan.id,
+    )
+    assert result.scan_id == scan.id
+    assert result.page_number == 2
+    progress = catalog.harem_scan_progress(scan.id)
+    assert progress is not None
+    assert progress.expected_page_count == 2
+    assert progress.imported_pages == (2,)
+    assert progress.completed_at is None
+
+
 def test_antidisable_scan_start_helper_visibility_and_commit(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
