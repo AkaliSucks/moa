@@ -2890,8 +2890,9 @@ class CatalogRepository:
     ) -> TowerStateImportResult:
         """Store a complete account-scoped `$kt` snapshot."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_tower_state_with_connection(
+        imported = run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_tower_state_with_connection(
                 connection,
                 state=state,
                 server=server_name,
@@ -2899,7 +2900,8 @@ class CatalogRepository:
                 raw=raw_message,
                 source=source,
                 observed_at=observed_at,
-            )
+            ),
+        )
         return TowerStateImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),
