@@ -2440,6 +2440,63 @@ def test_public_kakeraloot_state_wrapper_preserves_result_and_stored_values(tmp_
         )
 
 
+def test_public_kakeraloot_state_wrapper_runner_rolls_back_and_recovers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original_helper = catalog._import_kakeraloot_state_with_connection
+
+    def fail_after_write(connection: sqlite3.Connection, **kwargs):
+        original_helper(connection, **kwargs)
+        raise RuntimeError("forced Kakeraloot State import failure")
+
+    monkeypatch.setattr(
+        catalog,
+        "_import_kakeraloot_state_with_connection",
+        fail_after_write,
+    )
+
+    with pytest.raises(RuntimeError, match="forced Kakeraloot State import failure"):
+        catalog.import_kakeraloot_state(
+            KAKERALOOT_STATE,
+            "Server",
+            "Account",
+            "failed payload",
+            "discord",
+        )
+
+    with connect(database_path) as connection:
+        assert _kakeraloot_state_counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "kakeraloot_state_observations": 0,
+            "discord_projection_links": 0,
+            "discord_source_events": 0,
+            "discord_source_event_server_attributions": 0,
+            "discord_source_event_account_attributions": 0,
+            "discord_processing_attempts": 0,
+        }
+
+    monkeypatch.setattr(
+        catalog,
+        "_import_kakeraloot_state_with_connection",
+        original_helper,
+    )
+    result = catalog.import_kakeraloot_state(
+        KAKERALOOT_STATE,
+        "Server",
+        "Account",
+        "successful payload",
+        "discord",
+    )
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert _kakeraloot_state_counts(connection)[
+            "kakeraloot_state_observations"
+        ] == 1
+
+
 def test_kakeraloot_state_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 

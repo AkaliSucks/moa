@@ -251,6 +251,34 @@ def test_first_processing_persists_atomic_kakeraloot_state_projection(tmp_path) 
         ) == ("succeeded", FINISHED_AT.isoformat())
 
 
+def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        catalog,
+        "import_kakeraloot_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinator called public Kakeraloot State wrapper")
+        ),
+    )
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.imported_count == 1
+    assert result.replay_skipped is False
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kakeraloot_state_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT state FROM discord_projection_links WHERE source_event_id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "completed"
+
+
 def test_first_processing_links_and_preserves_every_stored_field(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
