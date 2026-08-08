@@ -2081,8 +2081,11 @@ class CatalogRepository:
     ) -> PlayerBonusImportResult:
         """Store a complete, account-scoped `$bonus` snapshot."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            imported = self._import_player_bonus_with_connection(
+
+        def import_with_connection(
+            connection: sqlite3.Connection,
+        ) -> _PlayerBonusImportConnectionResult:
+            return self._import_player_bonus_with_connection(
                 connection,
                 state=bonus,
                 server=server_name,
@@ -2091,6 +2094,8 @@ class CatalogRepository:
                 source=source,
                 observed_at=observed_at,
             )
+
+        imported = run_write_transaction(self._database_path, import_with_connection)
         return PlayerBonusImportResult(
             import_event_id=imported.import_event_id,
             server_name=server_name.strip(),

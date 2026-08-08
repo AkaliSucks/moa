@@ -280,6 +280,34 @@ def test_first_processing_writes_one_player_bonus_projection_and_preserves_value
         ) == ("succeeded", FINISHED_AT.isoformat())
 
 
+def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    monkeypatch.setattr(
+        catalog,
+        "import_player_bonus",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinator called public Player Bonus wrapper")
+        ),
+    )
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.imported_count == 1
+    assert result.replay_skipped is False
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM player_bonus_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT state FROM discord_projection_links WHERE source_event_id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "completed"
+
+
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
