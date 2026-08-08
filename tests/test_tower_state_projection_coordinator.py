@@ -89,6 +89,7 @@ def _coordinate(
     server=" Server ",
     account=" Account ",
     state=TOWER_STATE,
+    observed_at=OBSERVED_AT,
 ):
     return coordinator.coordinate_tower_state(
         source_event_id=source_event_id,
@@ -98,7 +99,7 @@ def _coordinate(
         account=account,
         raw="tower payload",
         source="discord",
-        observed_at=OBSERVED_AT,
+        observed_at=observed_at,
         finished_at=FINISHED_AT,
     )
 
@@ -398,19 +399,7 @@ def test_succeeded_replay_returns_existing_ids_and_reconstructs_from_same_databa
     first = _coordinate(coordinator, source_event_id, attempt_id)
     before = _snapshot(database_path)
 
-    replay = TowerStateProjectionCoordinator(
-        CatalogRepository(database_path), DiscordMessageRepository(database_path)
-    ).coordinate_tower_state(
-        source_event_id=source_event_id,
-        attempt_id=None,
-        state=NO_COMPLETED_TOWER_STATE,
-        server=" Server ",
-        account=" Account ",
-        raw="replayed payload",
-        source="replay",
-        observed_at=OBSERVED_AT,
-        finished_at=FINISHED_AT,
-    )
+    replay = _coordinate(coordinator, source_event_id, None)
 
     assert replay == TowerStateProjectionResult(
         imported_count=0,
@@ -421,6 +410,64 @@ def test_succeeded_replay_returns_existing_ids_and_reconstructs_from_same_databa
         projection_target=first.projection_target,
     )
     assert _snapshot(database_path) == before
+
+
+@pytest.mark.parametrize(
+    ("replay_state", "replay_observed_at"),
+    (
+        pytest.param(TOWER_STATE.model_copy(update={"current_level": 99}), OBSERVED_AT, id="current_level"),
+        pytest.param(ZERO_TOWER_STATE, OBSERVED_AT, id="completed_towers"),
+        pytest.param(TOWER_STATE.model_copy(update={"next_level_cost": 1}), OBSERVED_AT, id="next_level_cost"),
+        pytest.param(TOWER_STATE.model_copy(update={"kakera_balance": 1}), OBSERVED_AT, id="kakera_balance"),
+        pytest.param(TOWER_STATE.model_copy(update={"built_perk_ids": (8,)}), OBSERVED_AT, id="built_perk_ids"),
+        pytest.param(TOWER_STATE, OBSERVED_AT.replace(minute=5), id="observed_at"),
+    ),
+)
+def test_succeeded_replay_rejects_mismatched_tower_target_values(
+    tmp_path, replay_state: TowerStateSnapshot, replay_observed_at: datetime
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    before = _snapshot(database_path)
+    with connect(database_path) as connection:
+        before_target = tuple(
+            connection.execute(
+                "SELECT current_level, completed_towers, next_level_cost, kakera_balance, "
+                "built_perk_ids_json, observed_at, import_event_id FROM tower_state_observations"
+            ).fetchone()
+        )
+        before_link = tuple(
+            connection.execute(
+                "SELECT projection_table, projection_row_id, state, completed_at "
+                "FROM discord_projection_links"
+            ).fetchone()
+        )
+
+    with pytest.raises(TowerStateProjectionTargetError, match="mismatched"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            state=replay_state,
+            observed_at=replay_observed_at,
+        )
+
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT current_level, completed_towers, next_level_cost, kakera_balance, "
+                "built_perk_ids_json, observed_at, import_event_id FROM tower_state_observations"
+            ).fetchone()
+        ) == before_target
+        assert tuple(
+            connection.execute(
+                "SELECT projection_table, projection_row_id, state, completed_at "
+                "FROM discord_projection_links"
+            ).fetchone()
+        ) == before_link
 
 
 @pytest.mark.parametrize(

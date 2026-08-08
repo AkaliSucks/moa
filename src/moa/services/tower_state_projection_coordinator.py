@@ -105,7 +105,13 @@ class TowerStateProjectionCoordinator:
             )
             projection_slot = self._tower_state_slot(server, account)
             if str(event["status"]) == "succeeded":
-                return self._coordinate_replay(connection, event, projection_slot)
+                return self._coordinate_replay(
+                    connection,
+                    event,
+                    projection_slot,
+                    state=state,
+                    observed_at=observed_at,
+                )
 
             links = self._load_links(connection, source_event_id)
             expected_key = (self._PROJECTION_KIND, projection_slot)
@@ -190,6 +196,9 @@ class TowerStateProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         projection_slot: str,
+        *,
+        state: TowerStateSnapshot,
+        observed_at: datetime,
     ) -> TowerStateProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -230,6 +239,8 @@ class TowerStateProjectionCoordinator:
             observation_id=observation_id,
             import_event_id=int(import_event_id),
             projection_slot=projection_slot,
+            state=state,
+            observed_at=observed_at,
         )
         return TowerStateProjectionResult(
             imported_count=0,
