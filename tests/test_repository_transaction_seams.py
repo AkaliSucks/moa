@@ -6162,8 +6162,20 @@ def test_antidisable_scan_start_helper_external_rollback_removes_new_rows(tmp_pa
         }
 
 
-def test_public_antidisable_scan_start_preserves_result_and_commits(tmp_path) -> None:
+def test_public_antidisable_scan_start_preserves_result_and_commits(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
+    original_progress = catalog.harem_scan_progress
+
+    def progress_after_commit(scan_id: int):
+        with connect(database_path) as observer:
+            assert observer.execute(
+                "SELECT COUNT(*) FROM harem_scans WHERE id = ?", (scan_id,)
+            ).fetchone()[0] == 1
+        return original_progress(scan_id)
+
+    monkeypatch.setattr(catalog, "harem_scan_progress", progress_after_commit)
 
     scan = catalog.begin_antidisable_scan(" Server ", " Account ")
 
@@ -6188,9 +6200,115 @@ def test_public_antidisable_scan_start_preserves_result_and_commits(tmp_path) ->
             "discord_source_event_account_attributions": 0,
             "discord_processing_attempts": 0,
         }
+        row = connection.execute(
+            "SELECT started_at, scan_kind FROM harem_scans WHERE id = ?", (scan.id,)
+        ).fetchone()
+        assert datetime.fromisoformat(row["started_at"]).tzinfo is not None
+        assert row["scan_kind"] == "antidisable"
+
+
+def test_public_antidisable_scan_start_rolls_back_contexts_and_recovers(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    existing = catalog.begin_antidisable_scan("Original Server", "Original Account")
+    with connect(database_path) as connection:
+        before_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        before_account = connection.execute(
+            "SELECT id, server_context_id, name, normalized_name, created_at, updated_at "
+            "FROM account_contexts"
+        ).fetchone()
+        before_scan = connection.execute(
+            "SELECT id, account_context_id, expected_page_count, started_at, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
+            (existing.id,),
+        ).fetchone()
+        connection.execute(
+            """
+            CREATE TRIGGER fail_antidisable_scan_startup
+            BEFORE INSERT ON harem_scans
+            BEGIN
+                SELECT RAISE(FAIL, 'forced antidisable scan startup failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced antidisable scan startup failure"):
+        catalog.begin_antidisable_scan("New Server", "New Account")
+
+    with connect(database_path) as connection:
         assert connection.execute(
-            "SELECT scan_kind FROM harem_scans WHERE id = ?", (scan.id,)
-        ).fetchone()[0] == "antidisable"
+            "SELECT COUNT(*) FROM server_contexts WHERE normalized_name = 'new server'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM account_contexts WHERE normalized_name = 'new account'"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced antidisable scan startup failure"):
+        catalog.begin_antidisable_scan(" ORIGINAL SERVER ", " ORIGINAL ACCOUNT ")
+
+    with connect(database_path) as connection:
+        after_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        after_account = connection.execute(
+            "SELECT id, server_context_id, name, normalized_name, created_at, updated_at "
+            "FROM account_contexts"
+        ).fetchone()
+        after_scan = connection.execute(
+            "SELECT id, account_context_id, expected_page_count, started_at, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
+            (existing.id,),
+        ).fetchone()
+        assert tuple(after_server) == tuple(before_server)
+        assert tuple(after_account) == tuple(before_account)
+        assert tuple(after_scan) == tuple(before_scan)
+        connection.execute("DROP TRIGGER fail_antidisable_scan_startup")
+
+    recovered = catalog.begin_antidisable_scan("Original Server", "Original Account")
+
+    assert recovered.id > existing.id
+    assert recovered.server_name == "Original Server"
+    assert recovered.account_name == "Original Account"
+    assert recovered.expected_page_count is None
+    assert recovered.imported_pages == ()
+    assert recovered.completed_at is None
+    assert recovered.scan_kind == "antidisable"
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0] == 2
+
+
+def test_public_antidisable_scan_start_progress_failure_leaves_committed_scan(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    def fail_progress(_scan_id: int):
+        raise RuntimeError("forced post-commit progress failure")
+
+    monkeypatch.setattr(catalog, "harem_scan_progress", fail_progress)
+
+    with pytest.raises(RuntimeError, match="forced post-commit progress failure"):
+        catalog.begin_antidisable_scan("Server", "Account")
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT harem_scans.id, server_contexts.name, account_contexts.name,
+                   harem_scans.expected_page_count, harem_scans.completed_at,
+                   harem_scans.scan_kind
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            """
+        ).fetchone()
+
+    assert tuple(row)[1:] == ("Server", "Account", None, None, "antidisable")
+    recovered = CatalogRepository(database_path).harem_scan_progress(row["id"])
+    assert recovered is not None
+    assert recovered.id == row["id"]
+    assert recovered.scan_kind == "antidisable"
 
 
 def test_antidisable_helper_uses_supplied_connection_and_returns_actual_ids(tmp_path) -> None:

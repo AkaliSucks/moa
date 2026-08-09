@@ -2418,13 +2418,15 @@ class CatalogRepository:
     ) -> HaremScanProgress:
         """Start a complete multi-page `$adl` scan."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
-            scan_id = self._begin_antidisable_scan_with_connection(
+        scan_id = run_write_transaction(
+            self._database_path,
+            lambda connection: self._begin_antidisable_scan_with_connection(
                 connection,
                 server=server_name,
                 account=account_name,
                 observed_at=observed_at,
-            )
+            ),
+        )
         progress = self.harem_scan_progress(scan_id)
         assert progress is not None
         return progress
