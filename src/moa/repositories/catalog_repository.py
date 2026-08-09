@@ -2471,26 +2471,28 @@ class CatalogRepository:
 
     def complete_antidisable_scan(self, scan_id: int) -> HaremScanProgress:
         """Activate a complete `$adl` scan."""
-        progress = self.harem_scan_progress(scan_id)
-        if progress is None:
-            raise ValueError("Antidisable scan not found.")
-        if progress.scan_kind != "antidisable":
-            raise ValueError("The scan is not an antidisable scan.")
-        if not progress.is_complete:
-            expected = progress.expected_page_count or "an unknown number of"
-            raise ValueError(
-                f"Antidisable scan is incomplete: imported pages {list(progress.imported_pages)}; "
-                f"expected {expected} pages."
-            )
-        completed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+        def complete_with_connection(connection: sqlite3.Connection) -> HaremScanProgress:
+            progress = self._harem_scan_progress_with_connection(connection, scan_id)
+            if progress is None:
+                raise ValueError("Antidisable scan not found.")
+            if progress.scan_kind != "antidisable":
+                raise ValueError("The scan is not an antidisable scan.")
+            if not progress.is_complete:
+                expected = progress.expected_page_count or "an unknown number of"
+                raise ValueError(
+                    f"Antidisable scan is incomplete: imported pages {list(progress.imported_pages)}; "
+                    f"expected {expected} pages."
+                )
+            completed_at = datetime.now(timezone.utc)
             connection.execute(
                 "UPDATE harem_scans SET completed_at = ? WHERE id = ?",
                 (completed_at.isoformat(), scan_id),
             )
-        completed = self.harem_scan_progress(scan_id)
-        assert completed is not None
-        return completed
+            completed = self._harem_scan_progress_with_connection(connection, scan_id)
+            assert completed is not None
+            return completed
+
+        return run_write_transaction(self._database_path, complete_with_connection)
 
     def import_disablelist(
         self,

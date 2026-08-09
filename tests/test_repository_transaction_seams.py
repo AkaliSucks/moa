@@ -6388,6 +6388,302 @@ def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path)
     assert catalog.antidisable_series("Server", "Account") == ("Series A", "Series B", "Series C")
 
 
+def test_antidisable_scan_completion_uses_supplied_connection_and_persists_result(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    imported = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE.model_copy(update={"page_count": 1}),
+        "Server",
+        "Account",
+        "complete antidisable page",
+        "test",
+        scan.id,
+    )
+    original_helper = catalog._harem_scan_progress_with_connection
+    helper_calls: list[tuple[int, bool]] = []
+
+    def observed_helper(connection: sqlite3.Connection, scan_id: int):
+        helper_calls.append((id(connection), connection.in_transaction))
+        return original_helper(connection, scan_id)
+
+    def unexpected_connection():
+        raise AssertionError("completion opened an independent repository connection")
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", observed_helper)
+    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+
+    completed = catalog.complete_antidisable_scan(scan.id)
+
+    assert len(helper_calls) == 2
+    assert helper_calls[0][0] == helper_calls[1][0]
+    assert [in_transaction for _connection_id, in_transaction in helper_calls] == [True, True]
+    assert completed.scan_kind == "antidisable"
+    assert completed.expected_page_count == 1
+    assert completed.imported_pages == (1,)
+    assert completed.completed_at is not None
+    with connect(database_path) as connection:
+        durable = original_helper(connection, scan.id)
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages "
+            "WHERE harem_scan_id = ? ORDER BY page_number",
+            (scan.id,),
+        ).fetchall()
+    assert durable == completed
+    assert [tuple(row) for row in pages] == [(1, imported.import_event_id)]
+
+
+def test_antidisable_scan_completion_rejects_wrong_kind_and_incomplete_without_changes(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    wrong_kind = catalog.begin_harem_scan("Server", "Account", "keys")
+    wrong_kind_page = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(HaremKeyEntry(name="Wrong Kind", key_type="silver", key_count=1),),
+        ),
+        "Server",
+        "Account",
+        "wrong-kind page",
+        "test",
+        wrong_kind.id,
+    )
+    incomplete = catalog.begin_antidisable_scan("Server", "Account")
+    incomplete_page = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE,
+        "Server",
+        "Account",
+        "incomplete antidisable page",
+        "test",
+        incomplete.id,
+    )
+
+    with pytest.raises(ValueError, match="The scan is not an antidisable scan"):
+        catalog.complete_antidisable_scan(wrong_kind.id)
+    with pytest.raises(ValueError, match="Antidisable scan is incomplete"):
+        catalog.complete_antidisable_scan(incomplete.id)
+
+    with connect(database_path) as connection:
+        scans = connection.execute(
+            "SELECT id, completed_at FROM harem_scans WHERE id IN (?, ?) ORDER BY id",
+            (wrong_kind.id, incomplete.id),
+        ).fetchall()
+        pages = connection.execute(
+            "SELECT harem_scan_id, page_number, import_event_id FROM harem_scan_pages "
+            "WHERE harem_scan_id IN (?, ?) ORDER BY harem_scan_id, page_number",
+            (wrong_kind.id, incomplete.id),
+        ).fetchall()
+    assert [tuple(row) for row in scans] == [(wrong_kind.id, None), (incomplete.id, None)]
+    assert [tuple(row) for row in pages] == [
+        (wrong_kind.id, 1, wrong_kind_page.import_event_id),
+        (incomplete.id, 1, incomplete_page.import_event_id),
+    ]
+
+
+def test_antidisable_scan_completion_update_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    request_message = _receive_request(discord)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    discord.create_antidisable_workflow(
+        scan_id=scan.id,
+        request_message_aggregate_key=request_message,
+        requesting_user_id="known-user",
+        created_at=OBSERVED_AT,
+        expires_at=FINISHED_AT,
+    )
+    imported = catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE.model_copy(update={"page_count": 1}),
+        "Server",
+        "Account",
+        "rollback antidisable page",
+        "test",
+        scan.id,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_antidisable_scan_completion
+            BEFORE UPDATE OF completed_at ON harem_scans
+            WHEN NEW.completed_at IS NOT NULL
+            BEGIN
+                SELECT RAISE(FAIL, 'forced antidisable scan completion failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced antidisable scan completion failure"
+    ):
+        catalog.complete_antidisable_scan(scan.id)
+
+    with connect(database_path) as connection:
+        progress = catalog._harem_scan_progress_with_connection(connection, scan.id)
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchall()
+        workflow_count = connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER fail_antidisable_scan_completion")
+    assert progress is not None and progress.completed_at is None
+    assert [tuple(row) for row in pages] == [(1, imported.import_event_id)]
+    assert workflow_count == 1
+
+    recovered = catalog.complete_antidisable_scan(scan.id)
+
+    assert recovered.id == scan.id
+    assert recovered.scan_kind == "antidisable"
+    assert recovered.imported_pages == (1,)
+    assert recovered.completed_at is not None
+
+
+def test_antidisable_scan_completion_final_read_failure_rolls_back_update(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE.model_copy(update={"page_count": 1}),
+        "Server",
+        "Account",
+        "final-read antidisable page",
+        "test",
+        scan.id,
+    )
+    original_helper = catalog._harem_scan_progress_with_connection
+    failure = RuntimeError("forced final antidisable progress read failure")
+    helper_call_count = 0
+
+    def fail_final_read(connection: sqlite3.Connection, scan_id: int):
+        nonlocal helper_call_count
+        helper_call_count += 1
+        if helper_call_count == 2:
+            raise failure
+        return original_helper(connection, scan_id)
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", fail_final_read)
+
+    with pytest.raises(RuntimeError) as raised:
+        catalog.complete_antidisable_scan(scan.id)
+
+    assert raised.value is failure
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+        pages = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchall()
+    assert tuple(row) == (1, None)
+    assert [row["page_number"] for row in pages] == [1]
+
+
+def test_antidisable_scan_completion_serializes_before_competing_page_writer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    catalog.import_antidisable_page(
+        ANTIDISABLE_PAGE.model_copy(update={"page_count": 1}),
+        "Server",
+        "Account",
+        "initial antidisable page",
+        "test",
+        scan.id,
+    )
+    original_progress_helper = catalog._harem_scan_progress_with_connection
+    original_page_helper = catalog._import_antidisable_page_with_connection
+    validation_finished = threading.Event()
+    release_completion = threading.Event()
+    writer_started = threading.Event()
+    writer_entered_callback = threading.Event()
+    completion_failures: list[BaseException] = []
+    writer_failures: list[BaseException] = []
+    progress_call_count = 0
+
+    def pause_after_validation(connection: sqlite3.Connection, scan_id: int):
+        nonlocal progress_call_count
+        progress = original_progress_helper(connection, scan_id)
+        progress_call_count += 1
+        if progress_call_count == 1:
+            validation_finished.set()
+            assert release_completion.wait(_THREAD_TIMEOUT), "completion was not released"
+        return progress
+
+    def observe_page_callback(connection: sqlite3.Connection, **kwargs):
+        writer_entered_callback.set()
+        return original_page_helper(connection, **kwargs)
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", pause_after_validation)
+    monkeypatch.setattr(catalog, "_import_antidisable_page_with_connection", observe_page_callback)
+
+    def complete_scan() -> None:
+        try:
+            catalog.complete_antidisable_scan(scan.id)
+        except BaseException as exc:
+            completion_failures.append(exc)
+
+    def import_competing_page() -> None:
+        writer_started.set()
+        try:
+            catalog.import_antidisable_page(
+                ANTIDISABLE_CONTINUATION_PAGE,
+                "Server",
+                "Account",
+                "competing antidisable page",
+                "test",
+                scan.id,
+            )
+        except BaseException as exc:
+            writer_failures.append(exc)
+
+    completion_thread = threading.Thread(target=complete_scan)
+    completion_thread.start()
+    assert validation_finished.wait(_THREAD_TIMEOUT), "completion did not finish validation"
+
+    writer_thread = threading.Thread(target=import_competing_page)
+    writer_thread.start()
+    assert writer_started.wait(_THREAD_TIMEOUT), "competing page writer did not start"
+    assert not writer_entered_callback.is_set()
+
+    release_completion.set()
+    completion_thread.join(timeout=_THREAD_TIMEOUT)
+    writer_thread.join(timeout=_THREAD_TIMEOUT)
+
+    assert not completion_thread.is_alive(), "completion worker did not terminate"
+    assert not writer_thread.is_alive(), "page writer worker did not terminate"
+    assert completion_failures == []
+    assert writer_entered_callback.is_set()
+    assert len(writer_failures) == 1
+    assert isinstance(writer_failures[0], ValueError)
+    assert str(writer_failures[0]) == (
+        "Antidisable scan is already complete; begin a new scan to refresh it."
+    )
+    with connect(database_path) as connection:
+        completed_at = connection.execute(
+            "SELECT completed_at FROM harem_scans WHERE id = ?", (scan.id,)
+        ).fetchone()[0]
+        pages = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ? ORDER BY page_number",
+            (scan.id,),
+        ).fetchall()
+        competing_events = connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE raw_message = 'competing antidisable page'"
+        ).fetchone()[0]
+    assert completed_at is not None
+    assert [row["page_number"] for row in pages] == [1]
+    assert competing_events == 0
+
+
 def test_antidisable_scan_and_workflow_helpers_commit_atomically_on_one_connection(
     tmp_path,
 ) -> None:
