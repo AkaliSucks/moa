@@ -2835,7 +2835,8 @@ class CatalogRepository:
     ) -> PersonalRareImportResult:
         """Store one account-scoped `$persr` observation."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+
+        def import_with_connection(connection: sqlite3.Connection) -> PersonalRareImportResult:
             cursor = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("personal_rare", source, observed_at.isoformat(), raw_message),
@@ -2851,12 +2852,14 @@ class CatalogRepository:
                 """,
                 (account_id, state.personal_rare_multiplier, observed_at.isoformat(), import_event_id),
             )
-        return PersonalRareImportResult(
-            import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
-        )
+            return PersonalRareImportResult(
+                import_event_id=import_event_id,
+                server_name=server_name.strip(),
+                account_name=account_name.strip(),
+                observed_at=observed_at,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def personal_rare(
         self, server_name: str, account_name: str

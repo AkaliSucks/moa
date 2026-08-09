@@ -24,6 +24,7 @@ from moa.models.character import (
     ServerSettingsSnapshot,
     KakeralootSettingsSnapshot,
     MudapinSnapshot,
+    PersonalRareSnapshot,
     SphereGain,
     SphereResultSnapshot,
     TowerStateSnapshot,
@@ -65,6 +66,172 @@ from moa.services.wishlist_projection_coordinator import (
     WishlistProjectionCoordinator,
     WishlistProjectionResult,
 )
+
+
+def test_public_personal_rare_wrapper_persists_expected_atomic_result(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_personal_rare(
+        PersonalRareSnapshot(personal_rare_multiplier=2),
+        " Server ",
+        " Account ",
+        "personal rare payload",
+        "discord:test",
+    )
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                import_events.id AS import_event_id,
+                import_events.kind,
+                import_events.source,
+                import_events.raw_message,
+                import_events.observed_at AS event_observed_at,
+                server_contexts.name AS server_name,
+                account_contexts.name AS account_name,
+                personal_rare_observations.personal_rare_multiplier,
+                personal_rare_observations.observed_at AS personal_rare_observed_at,
+                personal_rare_observations.import_event_id AS observation_import_event_id
+            FROM personal_rare_observations
+            JOIN import_events
+              ON import_events.id = personal_rare_observations.import_event_id
+            JOIN account_contexts
+              ON account_contexts.id = personal_rare_observations.account_context_id
+            JOIN server_contexts
+              ON server_contexts.id = account_contexts.server_context_id
+            """
+        ).fetchone()
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'personal_rare'"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM personal_rare_observations"
+        ).fetchone()[0] == 1
+
+    assert row is not None
+    assert row["import_event_id"] == result.import_event_id
+    assert row["kind"] == "personal_rare"
+    assert row["source"] == "discord:test"
+    assert row["raw_message"] == "personal rare payload"
+    assert row["event_observed_at"] == result.observed_at.isoformat()
+    assert row["server_name"] == "Server"
+    assert row["account_name"] == "Account"
+    assert row["personal_rare_multiplier"] == 2
+    assert row["personal_rare_observed_at"] == result.observed_at.isoformat()
+    assert row["observation_import_event_id"] == result.import_event_id
+
+
+def test_public_personal_rare_wrapper_rolls_back_contexts_and_remains_usable(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    state = PersonalRareSnapshot(personal_rare_multiplier=2)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_personal_rare
+            AFTER INSERT ON personal_rare_observations
+            BEGIN
+                SELECT RAISE(FAIL, 'forced personal rare failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced personal rare failure"):
+        catalog.import_personal_rare(
+            state,
+            "New Server",
+            "New Account",
+            "failed new-context payload",
+            "discord:test",
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'personal_rare'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM personal_rare_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server', 'original server', 'server created', 'server updated')
+            """
+        )
+        server_id = connection.execute(
+            "SELECT id FROM server_contexts WHERE normalized_name = 'original server'"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (
+                ?, 'Original Account', 'original account', 'account created', 'account updated'
+            )
+            """,
+            (server_id,),
+        )
+        before_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        before_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced personal rare failure"):
+        catalog.import_personal_rare(
+            state,
+            " ORIGINAL SERVER ",
+            " ORIGINAL ACCOUNT ",
+            "failed existing-context payload",
+            "discord:test",
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'personal_rare'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM personal_rare_observations"
+        ).fetchone()[0] == 0
+        after_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        after_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+        assert tuple(after_server) == tuple(before_server)
+        assert tuple(after_account) == tuple(before_account)
+        connection.execute("DROP TRIGGER fail_personal_rare")
+
+    result = catalog.import_personal_rare(
+        state,
+        "Original Server",
+        "Original Account",
+        "successful payload",
+        "discord:test",
+    )
+
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'personal_rare'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM personal_rare_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
 
 
 def test_public_divorce_wrapper_persists_expected_atomic_result(tmp_path) -> None:
