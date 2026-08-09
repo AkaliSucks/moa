@@ -1984,7 +1984,8 @@ class CatalogRepository:
         if normalized_kind not in {"keys", "owned"}:
             raise ValueError("Harem scan kind must be `keys` or `owned`.")
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+
+        def begin_with_connection(connection: sqlite3.Connection) -> int:
             server_id = self._upsert_server(connection, server_name, observed_at)
             account_id = self._upsert_account(connection, server_id, account_name, observed_at)
             cursor = connection.execute(
@@ -1992,7 +1993,9 @@ class CatalogRepository:
                 "VALUES (?, NULL, ?, ?)",
                 (account_id, observed_at.isoformat(), normalized_kind),
             )
-            scan_id = int(cursor.lastrowid)
+            return int(cursor.lastrowid)
+
+        scan_id = run_write_transaction(self._database_path, begin_with_connection)
         progress = self.harem_scan_progress(scan_id)
         assert progress is not None
         return progress

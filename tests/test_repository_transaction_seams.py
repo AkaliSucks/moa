@@ -68,6 +68,135 @@ from moa.services.wishlist_projection_coordinator import (
 )
 
 
+def test_public_harem_scan_startup_persists_keys_progress(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    progress = catalog.begin_harem_scan(" Server ", " Account ", "keys")
+
+    assert progress.id > 0
+    assert progress.server_name == "Server"
+    assert progress.account_name == "Account"
+    assert progress.expected_page_count is None
+    assert progress.imported_pages == ()
+    assert progress.completed_at is None
+    assert progress.scan_kind == "keys"
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT harem_scans.id, server_contexts.name AS server_name,
+                   account_contexts.name AS account_name,
+                   harem_scans.expected_page_count, harem_scans.started_at,
+                   harem_scans.completed_at, harem_scans.scan_kind
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            WHERE harem_scans.id = ?
+            """,
+            (progress.id,),
+        ).fetchone()
+
+    assert row is not None
+    assert row["id"] == progress.id
+    assert row["server_name"] == progress.server_name
+    assert row["account_name"] == progress.account_name
+    assert row["expected_page_count"] == progress.expected_page_count
+    assert datetime.fromisoformat(row["started_at"]).tzinfo is not None
+    assert row["completed_at"] is None
+    assert row["scan_kind"] == progress.scan_kind
+
+
+def test_public_harem_scan_startup_persists_owned_kind(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    progress = catalog.begin_harem_scan("Server", "Account", " OwNeD ")
+
+    assert progress.id > 0
+    assert progress.scan_kind == "owned"
+    assert progress.expected_page_count is None
+    assert progress.imported_pages == ()
+    assert progress.completed_at is None
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT scan_kind, expected_page_count, completed_at "
+            "FROM harem_scans WHERE id = ?",
+            (progress.id,),
+        ).fetchone()
+
+    assert tuple(row) == ("owned", None, None)
+
+
+def test_public_harem_scan_startup_rolls_back_contexts_and_recovers(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    existing = catalog.begin_harem_scan("Original Server", "Original Account", "keys")
+    with connect(database_path) as connection:
+        before_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        before_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+        before_scan = connection.execute(
+            "SELECT id, account_context_id, expected_page_count, started_at, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
+            (existing.id,),
+        ).fetchone()
+        connection.execute(
+            """
+            CREATE TRIGGER fail_harem_scan_startup
+            BEFORE INSERT ON harem_scans
+            BEGIN
+                SELECT RAISE(FAIL, 'forced harem scan startup failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced harem scan startup failure"):
+        catalog.begin_harem_scan("New Server", "New Account", "keys")
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM server_contexts WHERE normalized_name = 'new server'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM account_contexts WHERE normalized_name = 'new account'"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced harem scan startup failure"):
+        catalog.begin_harem_scan(" ORIGINAL SERVER ", " ORIGINAL ACCOUNT ", "owned")
+
+    with connect(database_path) as connection:
+        after_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        after_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+        after_scan = connection.execute(
+            "SELECT id, account_context_id, expected_page_count, started_at, completed_at, scan_kind "
+            "FROM harem_scans WHERE id = ?",
+            (existing.id,),
+        ).fetchone()
+        assert tuple(after_server) == tuple(before_server)
+        assert tuple(after_account) == tuple(before_account)
+        assert tuple(after_scan) == tuple(before_scan)
+        connection.execute("DROP TRIGGER fail_harem_scan_startup")
+
+    recovered = catalog.begin_harem_scan("Original Server", "Original Account", "owned")
+
+    assert recovered.id > existing.id
+    assert recovered.scan_kind == "owned"
+    assert recovered.server_name == "Original Server"
+    assert recovered.account_name == "Original Account"
+    assert recovered.expected_page_count is None
+    assert recovered.imported_pages == ()
+    assert recovered.completed_at is None
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0] == 2
+
+
 def test_public_personal_rare_wrapper_persists_expected_atomic_result(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
