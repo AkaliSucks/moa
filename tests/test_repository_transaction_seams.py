@@ -12,6 +12,7 @@ from moa.models.character import (
     ClaimConfirmation,
     DisableListEntry,
     DisableListSnapshot,
+    KakeraReactionReceipt,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     PlayerBonusMetric,
@@ -63,6 +64,147 @@ from moa.services.wishlist_projection_coordinator import (
     WishlistProjectionCoordinator,
     WishlistProjectionResult,
 )
+
+
+def test_public_kakera_reaction_wrapper_persists_expected_atomic_result(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    receipt = KakeraReactionReceipt(
+        reaction_label=":kakeraY:", account_name="Account", kakera_earned=497
+    )
+
+    result = catalog.import_kakera_reaction(
+        receipt, " Server ", "reaction payload", "discord:test"
+    )
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.observed_at.tzinfo is not None
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                import_events.id AS import_event_id,
+                import_events.kind,
+                import_events.source,
+                import_events.raw_message,
+                import_events.observed_at AS event_observed_at,
+                server_contexts.name AS server_name,
+                account_contexts.name AS account_name,
+                kakera_reaction_observations.reaction_label,
+                kakera_reaction_observations.kakera_earned,
+                kakera_reaction_observations.observed_at AS reaction_observed_at,
+                kakera_reaction_observations.import_event_id AS reaction_import_event_id
+            FROM kakera_reaction_observations
+            JOIN import_events
+              ON import_events.id = kakera_reaction_observations.import_event_id
+            JOIN account_contexts
+              ON account_contexts.id = kakera_reaction_observations.account_context_id
+            JOIN server_contexts
+              ON server_contexts.id = account_contexts.server_context_id
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row["import_event_id"] == result.import_event_id
+    assert row["reaction_import_event_id"] == result.import_event_id
+    assert row["kind"] == "kakera_reaction"
+    assert row["source"] == "discord:test"
+    assert row["raw_message"] == "reaction payload"
+    assert row["server_name"] == "Server"
+    assert row["account_name"] == "Account"
+    assert row["reaction_label"] == ":kakeraY:"
+    assert row["kakera_earned"] == 497
+    assert datetime.fromisoformat(row["event_observed_at"]) == result.observed_at
+    assert datetime.fromisoformat(row["reaction_observed_at"]) == result.observed_at
+
+
+def test_public_kakera_reaction_wrapper_rolls_back_and_remains_usable(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    receipt = KakeraReactionReceipt(
+        reaction_label=":kakeraG:", account_name="New Account", kakera_earned=524
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_kakera_reaction
+            BEFORE INSERT ON kakera_reaction_observations
+            BEGIN
+                SELECT RAISE(FAIL, 'forced kakera reaction failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced kakera reaction failure"):
+        catalog.import_kakera_reaction(
+            receipt, "New Server", "failed new-context payload", "discord:test"
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'kakera_reaction'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kakera_reaction_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server', 'original server', 'created', 'server original')
+            """
+        )
+        server_id = connection.execute(
+            "SELECT id FROM server_contexts WHERE normalized_name = 'original server'"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (?, 'Original Account', 'original account', 'created', 'account original')
+            """,
+            (server_id,),
+        )
+
+    existing_receipt = KakeraReactionReceipt(
+        reaction_label=":kakeraP:", account_name="ORIGINAL ACCOUNT", kakera_earned=110
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="forced kakera reaction failure"):
+        catalog.import_kakera_reaction(
+            existing_receipt,
+            "ORIGINAL SERVER",
+            "failed existing-context payload",
+            "discord:test",
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'kakera_reaction'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kakera_reaction_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT name, created_at, updated_at FROM server_contexts"
+        ).fetchone()[:] == ("Original Server", "created", "server original")
+        assert connection.execute(
+            "SELECT name, created_at, updated_at FROM account_contexts"
+        ).fetchone()[:] == ("Original Account", "created", "account original")
+        connection.execute("DROP TRIGGER fail_kakera_reaction")
+
+    result = catalog.import_kakera_reaction(
+        receipt, "New Server", "successful payload", "discord:test"
+    )
+
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'kakera_reaction'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kakera_reaction_observations"
+        ).fetchone()[0] == 1
 
 
 def test_public_command_observation_wrapper_persists_one_expected_row(tmp_path) -> None:

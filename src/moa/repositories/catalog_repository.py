@@ -1305,7 +1305,7 @@ class CatalogRepository:
 
     def import_kakera_reaction(self, receipt, server_name, raw_message, source):
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+        def import_with_connection(connection: sqlite3.Connection) -> KakeraReactionImportResult:
             event_id = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("kakera_reaction", source, observed_at.isoformat(), raw_message),
@@ -1316,7 +1316,9 @@ class CatalogRepository:
                 "INSERT INTO kakera_reaction_observations (account_context_id, reaction_label, kakera_earned, observed_at, import_event_id) VALUES (?, ?, ?, ?, ?)",
                 (account_id, receipt.reaction_label, receipt.kakera_earned, observed_at.isoformat(), event_id),
             )
-        return KakeraReactionImportResult(import_event_id=event_id, server_name=server_name.strip(), account_name=receipt.account_name, observed_at=observed_at)
+            return KakeraReactionImportResult(import_event_id=event_id, server_name=server_name.strip(), account_name=receipt.account_name, observed_at=observed_at)
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def kakera_reactions(self, server_name, account_name, limit):
         with self._connection() as connection:
