@@ -300,6 +300,101 @@ def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(
         )
 
 
+@pytest.mark.parametrize(
+    ("stored_markers", "message"),
+    [
+        ((":pinZ:", ":logopinB:", ":pinA:", ":logopinC:"), "mismatched markers"),
+        ((":pinA:", ":logopinB:", ":logopinC:"), "mismatched markers"),
+    ],
+)
+def test_first_processing_marker_mismatch_rolls_back(
+    tmp_path, monkeypatch, stored_markers, message
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original = catalog._import_mudapins_with_connection
+
+    def import_with_mismatched_markers(connection, **kwargs):
+        imported = original(connection, **kwargs)
+        connection.execute(
+            "UPDATE mudapin_observations SET pin_markers_json = ?, pin_count = ? WHERE id = ?",
+            (json.dumps(list(stored_markers)), len(stored_markers), imported.mudapin_observation_id),
+        )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_mudapins_with_connection", import_with_mismatched_markers)
+    with pytest.raises(MudapinsProjectionTargetError, match=message):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection) == {
+            "import_events": 0,
+            "server_contexts": 0,
+            "account_contexts": 0,
+            "mudapin_observations": 0,
+            "profile_observations": 0,
+            "roll_observations": 0,
+            "discord_projection_links": 0,
+        }
+        assert tuple(connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()) == ("processing", None)
+        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == (
+            "processing"
+        )
+
+
+def test_first_processing_pin_count_mismatch_rolls_back(tmp_path, monkeypatch) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original = catalog._import_mudapins_with_connection
+
+    def import_with_mismatched_count(connection, **kwargs):
+        imported = original(connection, **kwargs)
+        connection.execute(
+            "UPDATE mudapin_observations SET pin_count = ? WHERE id = ?",
+            (99, imported.mudapin_observation_id),
+        )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_mudapins_with_connection", import_with_mismatched_count)
+    with pytest.raises(MudapinsProjectionTargetError, match="mismatched pin count"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["mudapin_observations"] == 0
+        assert connection.execute(
+            "SELECT state FROM discord_projection_links"
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchone()[0] == "processing"
+
+
+def test_first_processing_observed_at_mismatch_rolls_back(tmp_path, monkeypatch) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original = catalog._import_mudapins_with_connection
+
+    def import_with_mismatched_timestamp(connection, **kwargs):
+        imported = original(connection, **kwargs)
+        connection.execute(
+            "UPDATE mudapin_observations SET observed_at = ? WHERE id = ?",
+            ("2026-07-28T12:00:01+00:00", imported.mudapin_observation_id),
+        )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_mudapins_with_connection", import_with_mismatched_timestamp)
+    with pytest.raises(MudapinsProjectionTargetError, match="mismatched observed_at"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["mudapin_observations"] == 0
+        assert connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchone()[0] == "processing"
+
+
 def test_retry_after_rollback_succeeds_exactly_once(tmp_path, monkeypatch) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -476,6 +571,73 @@ def test_succeeded_replay_rejects_mismatched_context(tmp_path) -> None:
 
     with pytest.raises(MudapinsProjectionTargetError, match="mismatched account scope"):
         _coordinate(coordinator, source_event_id, None)
+
+
+@pytest.mark.parametrize(
+    "stored_markers",
+    [
+        (":pinZ:", ":logopinB:", ":pinA:", ":logopinC:"),
+        (":pinA:", ":logopinB:", ":logopinC:"),
+    ],
+)
+def test_succeeded_replay_rejects_mismatched_markers_without_repair(
+    tmp_path, stored_markers
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE mudapin_observations SET pin_markers_json = ?, pin_count = ? WHERE id = ?",
+            (json.dumps(list(stored_markers)), len(stored_markers), first.mudapin_observation_id),
+        )
+        before = tuple(connection.execute(
+            "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE id = ?",
+            (first.mudapin_observation_id,),
+        ).fetchone())
+        before_counts = _counts(connection)
+
+    with pytest.raises(MudapinsProjectionTargetError, match="mismatched markers"):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert tuple(connection.execute(
+            "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE id = ?",
+            (first.mudapin_observation_id,),
+        ).fetchone()) == before
+        assert _counts(connection) == before_counts
+        assert tuple(connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()) == ("succeeded", first.import_event_id)
+
+
+def test_succeeded_replay_rejects_mismatched_pin_count_without_repair(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE mudapin_observations SET pin_count = ? WHERE id = ?",
+            (99, first.mudapin_observation_id),
+        )
+        before = tuple(connection.execute(
+            "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE id = ?",
+            (first.mudapin_observation_id,),
+        ).fetchone())
+        before_counts = _counts(connection)
+
+    with pytest.raises(MudapinsProjectionTargetError, match="mismatched pin count"):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert tuple(connection.execute(
+            "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE id = ?",
+            (first.mudapin_observation_id,),
+        ).fetchone()) == before
+        assert _counts(connection) == before_counts
+        assert tuple(connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()) == ("succeeded", first.import_event_id)
 
 
 def test_succeeded_replay_rejects_semantic_slot_mismatch(tmp_path) -> None:

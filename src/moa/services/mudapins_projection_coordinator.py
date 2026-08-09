@@ -106,7 +106,13 @@ class MudapinsProjectionCoordinator:
                     account=account,
                 )
                 projection_slot = self._mudapins_slot(server, account)
-                return self._coordinate_replay(connection, event, projection_slot)
+                return self._coordinate_replay(
+                    connection,
+                    event,
+                    projection_slot,
+                    snapshot=snapshot,
+                    observed_at=observed_at,
+                )
 
             if attempt_id is None:
                 raise MudapinsProjectionStateError(
@@ -160,6 +166,8 @@ class MudapinsProjectionCoordinator:
                 observation_id=observation_id,
                 import_event_id=import_event_id,
                 projection_slot=projection_slot,
+                snapshot=snapshot,
+                observed_at=observed_at,
             )
             target = (self._PROJECTION_TABLE, observation_id)
             self._complete_projection_link(
@@ -200,6 +208,9 @@ class MudapinsProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         projection_slot: str,
+        *,
+        snapshot: MudapinSnapshot,
+        observed_at: datetime,
     ) -> MudapinsProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -240,6 +251,8 @@ class MudapinsProjectionCoordinator:
             observation_id=observation_id,
             import_event_id=int(import_event_id),
             projection_slot=projection_slot,
+            snapshot=snapshot,
+            observed_at=observed_at,
         )
         return MudapinsProjectionResult(
             imported_count=0,
@@ -423,6 +436,8 @@ class MudapinsProjectionCoordinator:
         observation_id: int,
         import_event_id: int,
         projection_slot: str,
+        snapshot: MudapinSnapshot,
+        observed_at: datetime,
     ) -> None:
         if self._TARGET_TABLES != frozenset({self._PROJECTION_TABLE}):
             raise MudapinsProjectionIntegrityError(
@@ -431,7 +446,8 @@ class MudapinsProjectionCoordinator:
         row = connection.execute(
             """
             SELECT mo.import_event_id, ac.normalized_name AS account,
-                   sc.normalized_name AS server
+                   sc.normalized_name AS server, mo.pin_markers_json,
+                   mo.pin_count, mo.observed_at
             FROM mudapin_observations AS mo
             JOIN account_contexts AS ac ON ac.id = mo.account_context_id
             JOIN server_contexts AS sc ON sc.id = ac.server_context_id
@@ -468,6 +484,25 @@ class MudapinsProjectionCoordinator:
         if row["server"] != slot["server"] or row["account"] != slot["account"]:
             raise MudapinsProjectionTargetError(
                 f"projection target mudapin_observations:{observation_id} has mismatched account scope"
+            )
+        try:
+            stored_markers = json.loads(row["pin_markers_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MudapinsProjectionTargetError(
+                f"projection target mudapin_observations:{observation_id} has invalid markers"
+            ) from error
+        expected_markers = list(snapshot.pin_markers)
+        if stored_markers != expected_markers:
+            raise MudapinsProjectionTargetError(
+                f"projection target mudapin_observations:{observation_id} has mismatched markers"
+            )
+        if int(row["pin_count"]) != len(expected_markers):
+            raise MudapinsProjectionTargetError(
+                f"projection target mudapin_observations:{observation_id} has mismatched pin count"
+            )
+        if str(row["observed_at"]) != observed_at.isoformat():
+            raise MudapinsProjectionTargetError(
+                f"projection target mudapin_observations:{observation_id} has mismatched observed_at"
             )
 
     @staticmethod
