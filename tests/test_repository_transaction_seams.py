@@ -4568,6 +4568,85 @@ def test_public_mudapins_wrapper_preserves_compatibility_and_stored_values(tmp_p
         assert tuple(server) == ("Server", "server")
 
 
+def test_public_mudapins_wrapper_runner_rolls_back_recovers_and_preserves_contexts(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    catalog.import_mudapins(MUDAPINS, "Server", "Account", "initial payload", "discord")
+    with connect(database_path) as connection:
+        before_counts = _mudapins_counts(connection)
+        before_context = tuple(connection.execute(
+            """
+            SELECT server_contexts.id, server_contexts.name, server_contexts.normalized_name,
+                   server_contexts.created_at, server_contexts.updated_at,
+                   account_contexts.id, account_contexts.name,
+                   account_contexts.normalized_name, account_contexts.created_at,
+                   account_contexts.updated_at
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone())
+    original_helper = catalog._import_mudapins_with_connection
+
+    def fail_after_write(connection: sqlite3.Connection, **kwargs):
+        original_helper(connection, **kwargs)
+        changed_context = connection.execute(
+            """
+            SELECT server_contexts.name, account_contexts.name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        assert tuple(changed_context) == ("SERVER", "ACCOUNT")
+        raise RuntimeError("forced MudaPins import failure")
+
+    monkeypatch.setattr(
+        catalog,
+        "_import_mudapins_with_connection",
+        fail_after_write,
+    )
+
+    with pytest.raises(RuntimeError, match="forced MudaPins import failure"):
+        catalog.import_mudapins(
+            MUDAPINS,
+            " SERVER ",
+            " ACCOUNT ",
+            "failed payload",
+            "discord",
+        )
+
+    with connect(database_path) as connection:
+        assert _mudapins_counts(connection) == before_counts
+        current_context = tuple(connection.execute(
+            """
+            SELECT server_contexts.id, server_contexts.name, server_contexts.normalized_name,
+                   server_contexts.created_at, server_contexts.updated_at,
+                   account_contexts.id, account_contexts.name,
+                   account_contexts.normalized_name, account_contexts.created_at,
+                   account_contexts.updated_at
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone())
+        assert current_context == before_context
+
+    monkeypatch.setattr(
+        catalog,
+        "_import_mudapins_with_connection",
+        original_helper,
+    )
+    result = catalog.import_mudapins(
+        MUDAPINS,
+        "Server",
+        "Account",
+        "successful payload",
+        "discord",
+    )
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert _mudapins_counts(connection)["mudapin_observations"] == 2
+
+
 def test_mudapins_helper_writes_on_supplied_connection_before_commit(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 

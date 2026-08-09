@@ -229,6 +229,33 @@ def test_first_processing_coordinates_mudapins_and_preserves_snapshot(tmp_path) 
         assert _attribution_rows(connection)[1][0][1:4] == ("resolved", "Server", "Account")
 
 
+def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    monkeypatch.setattr(
+        catalog,
+        "import_mudapins",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coordinator called public MudaPins wrapper")
+        ),
+    )
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert result.imported_count == 1
+    assert result.replay_skipped is False
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mudapin_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT state FROM discord_projection_links WHERE source_event_id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "completed"
+
+
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
     assert coordinator._mudapins_slot("  SeRver  ", "  AcCount  ") == (
@@ -634,6 +661,32 @@ def test_succeeded_replay_rejects_mismatched_pin_count_without_repair(tmp_path) 
             "SELECT pin_markers_json, pin_count FROM mudapin_observations WHERE id = ?",
             (first.mudapin_observation_id,),
         ).fetchone()) == before
+        assert _counts(connection) == before_counts
+        assert tuple(connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()) == ("succeeded", first.import_event_id)
+
+
+def test_succeeded_replay_rejects_mismatched_observed_at_without_repair(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    mismatched_observed_at = "2026-07-28T12:00:01+00:00"
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE mudapin_observations SET observed_at = ? WHERE id = ?",
+            (mismatched_observed_at, first.mudapin_observation_id),
+        )
+        before_counts = _counts(connection)
+
+    with pytest.raises(MudapinsProjectionTargetError, match="mismatched observed_at"):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT observed_at FROM mudapin_observations WHERE id = ?",
+            (first.mudapin_observation_id,),
+        ).fetchone()[0] == mismatched_observed_at
         assert _counts(connection) == before_counts
         assert tuple(connection.execute(
             "SELECT status, legacy_import_event_id FROM discord_source_events"
