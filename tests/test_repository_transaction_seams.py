@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import threading
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
 
@@ -13,6 +14,8 @@ from moa.models.character import (
     DisableListEntry,
     DisableListSnapshot,
     DivorceConfirmation,
+    HaremKeyEntry,
+    HaremKeyPage,
     KakeraReactionReceipt,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
@@ -66,6 +69,9 @@ from moa.services.wishlist_projection_coordinator import (
     WishlistProjectionCoordinator,
     WishlistProjectionResult,
 )
+
+
+_THREAD_TIMEOUT = 5.0
 
 
 def test_public_harem_scan_startup_persists_keys_progress(tmp_path) -> None:
@@ -195,6 +201,339 @@ def test_public_harem_scan_startup_rolls_back_contexts_and_recovers(
     assert recovered.completed_at is None
     with connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0] == 2
+
+
+def test_harem_scan_completion_uses_supplied_connection_and_persists_result(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    imported = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(
+                HaremKeyEntry(
+                    name="Complete Character",
+                    key_type="gold",
+                    key_count=7,
+                    kakera_value=1_453,
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "complete page",
+        "test",
+        scan.id,
+    )
+    with connect(database_path) as connection:
+        before_pages = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT page_number, import_event_id FROM harem_scan_pages "
+                "WHERE harem_scan_id = ? ORDER BY page_number",
+                (scan.id,),
+            ).fetchall()
+        ]
+
+    original_helper = catalog._harem_scan_progress_with_connection
+    helper_calls: list[tuple[int, bool]] = []
+
+    def observed_helper(connection: sqlite3.Connection, scan_id: int):
+        helper_calls.append((id(connection), connection.in_transaction))
+        return original_helper(connection, scan_id)
+
+    def unexpected_connection():
+        raise AssertionError("completion opened an independent repository connection")
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", observed_helper)
+    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+
+    completed = catalog.complete_harem_scan(scan.id)
+
+    assert len(helper_calls) == 2
+    assert helper_calls[0][0] == helper_calls[1][0]
+    assert [in_transaction for _connection_id, in_transaction in helper_calls] == [True, True]
+    assert completed.id == scan.id
+    assert completed.expected_page_count == 1
+    assert completed.imported_pages == (1,)
+    assert completed.completed_at is not None
+    assert completed.is_complete is True
+    with connect(database_path) as connection:
+        before_total_changes = connection.total_changes
+        durable = original_helper(connection, scan.id)
+        assert connection.in_transaction is False
+        assert connection.total_changes == before_total_changes
+        after_pages = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT page_number, import_event_id FROM harem_scan_pages "
+                "WHERE harem_scan_id = ? ORDER BY page_number",
+                (scan.id,),
+            ).fetchall()
+        ]
+    assert durable == completed
+    assert before_pages == after_pages == [(1, imported.import_event_id)]
+
+
+def test_harem_scan_completion_rejects_incomplete_scan_without_changes(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    imported = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=2,
+            entries=(HaremKeyEntry(name="Page One", key_type="silver", key_count=5),),
+        ),
+        "Server",
+        "Account",
+        "incomplete page",
+        "test",
+        scan.id,
+    )
+
+    with pytest.raises(ValueError, match="Harem scan is incomplete"):
+        catalog.complete_harem_scan(scan.id)
+
+    progress = catalog.harem_scan_progress(scan.id)
+    assert progress is not None
+    assert progress.expected_page_count == 2
+    assert progress.imported_pages == (1,)
+    assert progress.completed_at is None
+    with connect(database_path) as connection:
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchall()
+    assert [tuple(row) for row in pages] == [(1, imported.import_event_id)]
+
+
+def test_harem_scan_completion_update_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    imported = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(HaremKeyEntry(name="Rollback Character", key_type="gold", key_count=6),),
+        ),
+        "Server",
+        "Account",
+        "rollback page",
+        "test",
+        scan.id,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_harem_scan_completion
+            BEFORE UPDATE OF completed_at ON harem_scans
+            WHEN NEW.completed_at IS NOT NULL
+            BEGIN
+                SELECT RAISE(FAIL, 'forced harem scan completion failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced harem scan completion failure"):
+        catalog.complete_harem_scan(scan.id)
+
+    progress = catalog.harem_scan_progress(scan.id)
+    assert progress is not None
+    assert progress.expected_page_count == 1
+    assert progress.imported_pages == (1,)
+    assert progress.completed_at is None
+    with connect(database_path) as connection:
+        pages = connection.execute(
+            "SELECT page_number, import_event_id FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchall()
+        connection.execute("DROP TRIGGER fail_harem_scan_completion")
+    assert [tuple(row) for row in pages] == [(1, imported.import_event_id)]
+
+    recovered = catalog.complete_harem_scan(scan.id)
+
+    assert recovered.id == scan.id
+    assert recovered.imported_pages == (1,)
+    assert recovered.completed_at is not None
+
+
+def test_harem_scan_completion_final_read_failure_rolls_back_update(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(HaremKeyEntry(name="Final Read", key_type="bronze", key_count=1),),
+        ),
+        "Server",
+        "Account",
+        "final read page",
+        "test",
+        scan.id,
+    )
+    original_helper = catalog._harem_scan_progress_with_connection
+    failure = RuntimeError("forced final harem progress read failure")
+    helper_call_count = 0
+
+    def fail_final_read(connection: sqlite3.Connection, scan_id: int):
+        nonlocal helper_call_count
+        helper_call_count += 1
+        if helper_call_count == 2:
+            raise failure
+        return original_helper(connection, scan_id)
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", fail_final_read)
+
+    with pytest.raises(RuntimeError) as raised:
+        catalog.complete_harem_scan(scan.id)
+
+    assert raised.value is failure
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+        pages = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchall()
+    assert tuple(row) == (1, None)
+    assert [page["page_number"] for page in pages] == [1]
+
+
+def test_harem_scan_completion_serializes_validation_before_competing_page_writer(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(HaremKeyEntry(name="Initial Page", key_type="gold", key_count=7),),
+        ),
+        "Server",
+        "Account",
+        "initial page",
+        "test",
+        scan.id,
+    )
+    original_helper = catalog._harem_scan_progress_with_connection
+    validation_finished = threading.Event()
+    release_completion = threading.Event()
+    writer_attempted = threading.Event()
+    writer_first_write_returned = threading.Event()
+    completion_failures: list[BaseException] = []
+    writer_failures: list[BaseException] = []
+    helper_call_count = 0
+
+    def pause_after_validation(connection: sqlite3.Connection, scan_id: int):
+        nonlocal helper_call_count
+        progress = original_helper(connection, scan_id)
+        helper_call_count += 1
+        if helper_call_count == 1:
+            validation_finished.set()
+            assert release_completion.wait(_THREAD_TIMEOUT), "completion was not released"
+        return progress
+
+    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", pause_after_validation)
+
+    def complete_scan() -> None:
+        try:
+            catalog.complete_harem_scan(scan.id)
+        except BaseException as exc:
+            completion_failures.append(exc)
+
+    completion_thread = threading.Thread(target=complete_scan)
+    completion_thread.start()
+    assert validation_finished.wait(_THREAD_TIMEOUT), "completion did not finish validation"
+
+    original_connection = catalog._connection
+
+    class ObservedPageWriterConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def __getattr__(self, name: str):
+            return getattr(self._connection, name)
+
+        def execute(self, sql: str, parameters=()):
+            if "INSERT INTO import_events" in sql:
+                writer_attempted.set()
+                result = self._connection.execute(sql, parameters)
+                writer_first_write_returned.set()
+                return result
+            return self._connection.execute(sql, parameters)
+
+    monkeypatch.setattr(
+        catalog,
+        "_connection",
+        lambda: ObservedPageWriterConnection(original_connection()),
+    )
+
+    def import_competing_page() -> None:
+        try:
+            catalog.import_harem_key_page(
+                HaremKeyPage(
+                    page_number=2,
+                    page_count=2,
+                    entries=(
+                        HaremKeyEntry(name="Competing Page", key_type="silver", key_count=5),
+                    ),
+                ),
+                "Server",
+                "Account",
+                "competing page",
+                "test",
+                scan.id,
+            )
+        except BaseException as exc:
+            writer_failures.append(exc)
+
+    writer_thread = threading.Thread(target=import_competing_page)
+    writer_thread.start()
+    assert writer_attempted.wait(_THREAD_TIMEOUT), "competing page writer did not attempt a write"
+    assert not writer_first_write_returned.is_set()
+
+    release_completion.set()
+    completion_thread.join(timeout=_THREAD_TIMEOUT)
+    writer_thread.join(timeout=_THREAD_TIMEOUT)
+
+    assert not completion_thread.is_alive(), "completion worker did not terminate"
+    assert not writer_thread.is_alive(), "page writer worker did not terminate"
+    assert completion_failures == []
+    assert writer_first_write_returned.is_set()
+    assert len(writer_failures) == 1
+    assert isinstance(writer_failures[0], ValueError)
+    assert str(writer_failures[0]) == "Harem scan is already complete; begin a new scan to refresh it."
+    with connect(database_path) as connection:
+        completed_at = connection.execute(
+            "SELECT completed_at FROM harem_scans WHERE id = ?", (scan.id,)
+        ).fetchone()[0]
+        pages = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ? ORDER BY page_number",
+            (scan.id,),
+        ).fetchall()
+        competing_events = connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE raw_message = 'competing page'"
+        ).fetchone()[0]
+    assert completed_at is not None
+    assert [row["page_number"] for row in pages] == [1]
+    assert competing_events == 0
 
 
 def test_public_personal_rare_wrapper_persists_expected_atomic_result(tmp_path) -> None:

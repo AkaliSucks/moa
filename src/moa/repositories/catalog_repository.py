@@ -2002,25 +2002,30 @@ class CatalogRepository:
 
     def harem_scan_progress(self, scan_id: int) -> HaremScanProgress | None:
         with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT harem_scans.id, server_contexts.name AS server_name,
-                       account_contexts.name AS account_name, harem_scans.expected_page_count,
-                       harem_scans.completed_at, harem_scans.scan_kind
-                FROM harem_scans
-                JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
-                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
-                WHERE harem_scans.id = ?
-                """,
-                (scan_id,),
-            ).fetchone()
-            if row is None:
-                return None
-            page_rows = connection.execute(
-                "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ? "
-                "ORDER BY page_number",
-                (scan_id,),
-            ).fetchall()
+            return self._harem_scan_progress_with_connection(connection, scan_id)
+
+    def _harem_scan_progress_with_connection(
+        self, connection: sqlite3.Connection, scan_id: int
+    ) -> HaremScanProgress | None:
+        row = connection.execute(
+            """
+            SELECT harem_scans.id, server_contexts.name AS server_name,
+                   account_contexts.name AS account_name, harem_scans.expected_page_count,
+                   harem_scans.completed_at, harem_scans.scan_kind
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            WHERE harem_scans.id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        page_rows = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ? "
+            "ORDER BY page_number",
+            (scan_id,),
+        ).fetchall()
         return HaremScanProgress(
             id=row["id"],
             server_name=row["server_name"],
@@ -2034,24 +2039,26 @@ class CatalogRepository:
         )
 
     def complete_harem_scan(self, scan_id: int) -> HaremScanProgress:
-        progress = self.harem_scan_progress(scan_id)
-        if progress is None:
-            raise ValueError("Harem scan not found.")
-        if not progress.is_complete:
-            expected = progress.expected_page_count or "an unknown number of"
-            raise ValueError(
-                f"Harem scan is incomplete: imported pages {list(progress.imported_pages)}; "
-                f"expected {expected} pages."
-            )
-        completed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+        def complete_with_connection(connection: sqlite3.Connection) -> HaremScanProgress:
+            progress = self._harem_scan_progress_with_connection(connection, scan_id)
+            if progress is None:
+                raise ValueError("Harem scan not found.")
+            if not progress.is_complete:
+                expected = progress.expected_page_count or "an unknown number of"
+                raise ValueError(
+                    f"Harem scan is incomplete: imported pages {list(progress.imported_pages)}; "
+                    f"expected {expected} pages."
+                )
+            completed_at = datetime.now(timezone.utc)
             connection.execute(
                 "UPDATE harem_scans SET completed_at = ? WHERE id = ?",
                 (completed_at.isoformat(), scan_id),
             )
-        completed = self.harem_scan_progress(scan_id)
-        assert completed is not None
-        return completed
+            completed = self._harem_scan_progress_with_connection(connection, scan_id)
+            assert completed is not None
+            return completed
+
+        return run_write_transaction(self._database_path, complete_with_connection)
 
     def has_complete_harem_scan(
         self, server_name: str, account_name: str, scan_kind: str = "keys"
