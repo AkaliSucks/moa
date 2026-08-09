@@ -105,7 +105,12 @@ class KakeraStateProjectionCoordinator:
             )
             projection_slot = self._kakera_state_slot(server, account)
             if str(event["status"]) == "succeeded":
-                return self._coordinate_replay(connection, event, projection_slot)
+                return self._coordinate_replay(
+                    connection,
+                    event,
+                    projection_slot,
+                    state=state,
+                )
 
             links = self._load_links(connection, source_event_id)
             expected_key = (self._PROJECTION_KIND, projection_slot)
@@ -149,6 +154,8 @@ class KakeraStateProjectionCoordinator:
                 observation_id=observation_id,
                 import_event_id=import_event_id,
                 projection_slot=projection_slot,
+                state=state,
+                observed_at=observed_at,
             )
             self._complete_projection_link(
                 connection,
@@ -188,6 +195,8 @@ class KakeraStateProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         projection_slot: str,
+        *,
+        state: KakeraStateSnapshot,
     ) -> KakeraStateProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -228,6 +237,7 @@ class KakeraStateProjectionCoordinator:
             observation_id=observation_id,
             import_event_id=int(import_event_id),
             projection_slot=projection_slot,
+            state=state,
         )
         return KakeraStateProjectionResult(
             imported_count=0,
@@ -420,6 +430,8 @@ class KakeraStateProjectionCoordinator:
         observation_id: int,
         import_event_id: int,
         projection_slot: str,
+        state: KakeraStateSnapshot | None = None,
+        observed_at: datetime | None = None,
     ) -> None:
         if self._PROJECTION_TABLE not in self._TARGET_TABLES:
             raise KakeraStateProjectionIntegrityError(
@@ -427,7 +439,8 @@ class KakeraStateProjectionCoordinator:
             )
         row = connection.execute(
             """
-            SELECT kso.import_event_id, ac.normalized_name AS account,
+            SELECT kso.import_event_id, kso.kakera_balance, kso.badges_json,
+                   kso.observed_at, ac.normalized_name AS account,
                    sc.normalized_name AS server
             FROM kakera_state_observations AS kso
             JOIN account_contexts AS ac ON ac.id = kso.account_context_id
@@ -465,6 +478,27 @@ class KakeraStateProjectionCoordinator:
         if row["server"] != slot["server"] or row["account"] != slot["account"]:
             raise KakeraStateProjectionTargetError(
                 f"projection target kakera_state_observations:{observation_id} has mismatched Kakera scope"
+            )
+        if state is None:
+            return
+        if row["kakera_balance"] != state.kakera_balance:
+            raise KakeraStateProjectionTargetError(
+                f"projection target kakera_state_observations:{observation_id} has mismatched Kakera balance"
+            )
+        try:
+            badges = json.loads(row["badges_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise KakeraStateProjectionTargetError(
+                f"projection target kakera_state_observations:{observation_id} has invalid badges"
+            ) from error
+        expected_badges = [badge.model_dump() for badge in state.badges]
+        if badges != expected_badges:
+            raise KakeraStateProjectionTargetError(
+                f"projection target kakera_state_observations:{observation_id} has mismatched badges"
+            )
+        if observed_at is not None and row["observed_at"] != observed_at.isoformat():
+            raise KakeraStateProjectionTargetError(
+                f"projection target kakera_state_observations:{observation_id} has mismatched observation time"
             )
 
     @staticmethod

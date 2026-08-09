@@ -351,6 +351,55 @@ def test_failure_after_catalog_writes_rolls_back_and_retry_succeeds_once(tmp_pat
         assert _counts(connection)["discord_projection_links"] == 1
 
 
+@pytest.mark.parametrize("mutation", ("balance", "badges", "observed_at"))
+def test_first_processing_target_value_mismatch_rolls_back(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    original_helper = catalog._import_kakera_state_with_connection
+
+    def tamper_target(connection: sqlite3.Connection, **kwargs):
+        imported = original_helper(connection, **kwargs)
+        if mutation == "balance":
+            connection.execute(
+                "UPDATE kakera_state_observations SET kakera_balance = ? WHERE id = ?",
+                (KAKERA_STATE.kakera_balance + 1, imported.kakera_state_observation_id),
+            )
+        elif mutation == "badges":
+            connection.execute(
+                "UPDATE kakera_state_observations SET badges_json = ? WHERE id = ?",
+                (json.dumps([]), imported.kakera_state_observation_id),
+            )
+        else:
+            connection.execute(
+                "UPDATE kakera_state_observations SET observed_at = ? WHERE id = ?",
+                (FINISHED_AT.isoformat(), imported.kakera_state_observation_id),
+            )
+        return imported
+
+    monkeypatch.setattr(catalog, "_import_kakera_state_with_connection", tamper_target)
+
+    with pytest.raises(KakeraStateProjectionTargetError):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert _counts(connection)["kakera_state_observations"] == 0
+        assert _counts(connection)["server_contexts"] == 0
+        assert _counts(connection)["account_contexts"] == 0
+        assert _counts(connection)["discord_projection_links"] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "processing"
+
+
 def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -369,6 +418,35 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
         projection_target=first.projection_target,
     )
     assert _snapshot(database_path) == before
+
+
+@pytest.mark.parametrize("field", ("kakera_balance", "badges_json"))
+def test_succeeded_replay_value_mismatch_fails_without_repair(tmp_path, field: str) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        tampered_value = (
+            KAKERA_STATE.kakera_balance + 1
+            if field == "kakera_balance"
+            else json.dumps([])
+        )
+        connection.execute(
+            f"UPDATE kakera_state_observations SET {field} = ? WHERE id = ?",
+            (tampered_value, first.kakera_state_observation_id),
+        )
+
+    before = _snapshot(database_path)
+    with pytest.raises(KakeraStateProjectionTargetError):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert connection.execute(
+            f"SELECT {field} FROM kakera_state_observations WHERE id = ?",
+            (first.kakera_state_observation_id,),
+        ).fetchone()[0] == tampered_value
 
 
 @pytest.mark.parametrize(
