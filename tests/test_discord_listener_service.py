@@ -9452,10 +9452,11 @@ def _adl_durable_counts(database_path):
 
 def test_listener_adl_request_receipt_precedes_durable_workflow_start(tmp_path) -> None:
     listener, repository, database_path = _durable_listener(tmp_path)
+    catalog_repository = listener._catalog._repository
     order: list[str] = []
     original_receive = repository.receive_message
     original_lookup = repository.get_antidisable_workflow_by_request_message
-    original_scan = listener._catalog._repository._begin_antidisable_scan_with_connection
+    original_scan = catalog_repository._begin_antidisable_scan_with_connection
     original_workflow = repository._create_antidisable_workflow_with_connection
 
     def receive_message(**kwargs):
@@ -9476,13 +9477,21 @@ def test_listener_adl_request_receipt_precedes_durable_workflow_start(tmp_path) 
 
     repository.receive_message = receive_message
     repository.get_antidisable_workflow_by_request_message = lookup
-    listener._catalog._repository._begin_antidisable_scan_with_connection = begin_scan
+    catalog_repository._begin_antidisable_scan_with_connection = begin_scan
     repository._create_antidisable_workflow_with_connection = create_workflow
+    catalog_repository.begin_antidisable_scan = Mock(
+        side_effect=AssertionError("public scan transaction owner must not be called")
+    )
+    repository.create_antidisable_workflow = Mock(
+        side_effect=AssertionError("public workflow transaction owner must not be called")
+    )
     message = _adl_request_message()
 
     asyncio.run(listener.handle_message(message))
 
     assert order == ["receipt", "lookup", "scan", "workflow"]
+    catalog_repository.begin_antidisable_scan.assert_not_called()
+    repository.create_antidisable_workflow.assert_not_called()
     assert _adl_durable_counts(database_path) == (1, 1, 1, 1, 1, 1)
     assert repository.get_antidisable_workflow_by_request_message(
         _adl_request_aggregate(message)

@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import logging
 import re
+import sqlite3
 import time
 import warnings
 from dataclasses import dataclass, replace
@@ -18,12 +19,13 @@ from typing import Any, Literal, Mapping
 import discord
 
 from moa.core.config import ConfigAccount, ConfigService
-from moa.database.sqlite import connect
+from moa.database.sqlite import run_write_transaction
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.models.discord_identity import MessageAggregateKey, SourcePlatform
 from moa.models.discord_message_mapping import build_message_receive_envelope
 from moa.repositories.discord_message_repository import (
+    AntidisableWorkflowMutationResult,
     DiscordMessageProcessingConflictError,
     DiscordMessageProcessingError,
     DiscordMessageRepository,
@@ -2417,9 +2419,9 @@ class DiscordListenerService:
             )
             if workflow is None:
                 database_path = getattr(repository, "_database_path", None)
-                connection = connect(database_path)
-                try:
-                    connection.execute("BEGIN")
+                def create_workflow_with_connection(
+                    connection: sqlite3.Connection,
+                ) -> AntidisableWorkflowMutationResult:
                     scan_id = catalog_repository._begin_antidisable_scan_with_connection(
                         connection,
                         server=context.identity.server,
@@ -2435,12 +2437,12 @@ class DiscordListenerService:
                         expires_at=received_at
                         + timedelta(seconds=self._CONTEXT_TTL_SECONDS),
                     )
-                    connection.commit()
-                except Exception:
-                    connection.rollback()
-                    raise
-                finally:
-                    connection.close()
+
+                    return workflow_result
+
+                workflow_result = run_write_transaction(
+                    database_path, create_workflow_with_connection
+                )
                 workflow = workflow_result.workflow
             scan_key = (
                 context.identity.server.casefold(),
