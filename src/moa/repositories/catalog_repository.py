@@ -1093,7 +1093,7 @@ class CatalogRepository:
         """Store a divorce tombstone so older claim/harem evidence is no longer current."""
         observed_at = datetime.now(timezone.utc)
         normalized_name = self._normalize(divorce.character_name)
-        with self._connection() as connection:
+        def import_with_connection(connection: sqlite3.Connection) -> DivorceImportResult:
             cursor = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("divorce", source, observed_at.isoformat(), raw_message),
@@ -1163,15 +1163,17 @@ class CatalogRepository:
                     import_event_id,
                 ),
             )
-        return DivorceImportResult(
-            import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            character_name=divorce.character_name,
-            character_id=character_id,
-            kakera_refund=divorce.kakera_refund,
-            observed_at=observed_at,
-        )
+            return DivorceImportResult(
+                import_event_id=import_event_id,
+                server_name=server_name.strip(),
+                account_name=account_name.strip(),
+                character_name=divorce.character_name,
+                character_id=character_id,
+                kakera_refund=divorce.kakera_refund,
+                observed_at=observed_at,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def claim_observations(
         self, server_name: str, account_name: str

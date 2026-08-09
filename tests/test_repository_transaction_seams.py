@@ -12,6 +12,7 @@ from moa.models.character import (
     ClaimConfirmation,
     DisableListEntry,
     DisableListSnapshot,
+    DivorceConfirmation,
     KakeraReactionReceipt,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
@@ -64,6 +65,200 @@ from moa.services.wishlist_projection_coordinator import (
     WishlistProjectionCoordinator,
     WishlistProjectionResult,
 )
+
+
+def test_public_divorce_wrapper_persists_expected_atomic_result(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    with connect(database_path) as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series,
+                gender, roulette, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Professor Layton",
+                "Professor Layton",
+                "professor layton",
+                "professor layton",
+                None,
+                None,
+                "created",
+                "updated",
+            ),
+        )
+        character_id = int(cursor.lastrowid)
+    divorce = DivorceConfirmation(
+        account_name="Account",
+        character_name="Professor Layton",
+        kakera_refund=54,
+    )
+
+    result = catalog.import_divorce(
+        divorce,
+        " Server ",
+        " Account ",
+        "divorce payload",
+        "discord:test",
+    )
+
+    assert result.import_event_id > 0
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.character_name == "Professor Layton"
+    assert result.character_id == character_id
+    assert result.kakera_refund == 54
+    assert result.observed_at.tzinfo is not None
+    with connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                import_events.id AS import_event_id,
+                import_events.kind,
+                import_events.source,
+                import_events.raw_message,
+                import_events.observed_at AS event_observed_at,
+                server_contexts.name AS server_name,
+                account_contexts.name AS account_name,
+                divorce_observations.character_id,
+                divorce_observations.character_name,
+                divorce_observations.normalized_character_name,
+                divorce_observations.kakera_refund,
+                divorce_observations.observed_at AS divorce_observed_at,
+                divorce_observations.import_event_id AS divorce_import_event_id
+            FROM divorce_observations
+            JOIN import_events
+              ON import_events.id = divorce_observations.import_event_id
+            JOIN account_contexts
+              ON account_contexts.id = divorce_observations.account_context_id
+            JOIN server_contexts
+              ON server_contexts.id = account_contexts.server_context_id
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert row["import_event_id"] == result.import_event_id
+    assert row["kind"] == "divorce"
+    assert row["source"] == "discord:test"
+    assert row["raw_message"] == "divorce payload"
+    assert row["event_observed_at"] == result.observed_at.isoformat()
+    assert row["server_name"] == "Server"
+    assert row["account_name"] == "Account"
+    assert row["character_id"] == character_id
+    assert row["character_name"] == "Professor Layton"
+    assert row["normalized_character_name"] == "professor layton"
+    assert row["kakera_refund"] == 54
+    assert row["divorce_observed_at"] == result.observed_at.isoformat()
+    assert row["divorce_import_event_id"] == result.import_event_id
+
+
+def test_public_divorce_wrapper_rolls_back_contexts_and_remains_usable(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    divorce = DivorceConfirmation(
+        account_name="Account",
+        character_name="Professor Layton",
+        kakera_refund=54,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_divorce
+            BEFORE INSERT ON divorce_observations
+            BEGIN
+                SELECT RAISE(FAIL, 'forced divorce failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced divorce failure"):
+        catalog.import_divorce(
+            divorce,
+            "New Server",
+            "New Account",
+            "failed new-context payload",
+            "discord:test",
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'divorce'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM divorce_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server', 'original server', 'server created', 'server updated')
+            """
+        )
+        server_id = connection.execute(
+            "SELECT id FROM server_contexts WHERE normalized_name = 'original server'"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (
+                ?, 'Original Account', 'original account', 'account created', 'account updated'
+            )
+            """,
+            (server_id,),
+        )
+        before_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        before_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced divorce failure"):
+        catalog.import_divorce(
+            divorce,
+            " ORIGINAL SERVER ",
+            " ORIGINAL ACCOUNT ",
+            "failed existing-context payload",
+            "discord:test",
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'divorce'"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM divorce_observations"
+        ).fetchone()[0] == 0
+        after_server = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+        ).fetchone()
+        after_account = connection.execute(
+            "SELECT id, name, normalized_name, created_at, updated_at FROM account_contexts"
+        ).fetchone()
+        assert tuple(after_server) == tuple(before_server)
+        assert tuple(after_account) == tuple(before_account)
+        connection.execute("DROP TRIGGER fail_divorce")
+
+    result = catalog.import_divorce(
+        divorce,
+        "Original Server",
+        "Original Account",
+        "successful payload",
+        "discord:test",
+    )
+
+    assert result.import_event_id > 0
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'divorce'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM divorce_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
 
 
 def test_public_kakera_reaction_wrapper_persists_expected_atomic_result(tmp_path) -> None:
