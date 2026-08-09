@@ -65,6 +65,65 @@ from moa.services.wishlist_projection_coordinator import (
 )
 
 
+def test_public_command_observation_wrapper_persists_one_expected_row(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_command_observation(
+        " /$GiVeK ", "command observation payload", "discord:test"
+    )
+
+    assert result is None
+    with connect(database_path) as connection:
+        events = connection.execute(
+            """
+            SELECT kind, source, observed_at, raw_message
+            FROM import_events
+            """
+        ).fetchall()
+    assert len(events) == 1
+    assert events[0]["kind"] == "command_observation"
+    assert events[0]["source"] == "discord:test:command=$givek"
+    assert datetime.fromisoformat(events[0]["observed_at"]).tzinfo is not None
+    assert events[0]["raw_message"] == "command observation payload"
+
+
+def test_public_command_observation_wrapper_rolls_back_and_remains_usable(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_command_observation
+            AFTER INSERT ON import_events
+            WHEN NEW.kind = 'command_observation'
+            BEGIN
+                SELECT RAISE(FAIL, 'forced command observation failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced command observation failure"):
+        catalog.import_command_observation("givek", "failed payload", "discord:test")
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'command_observation'"
+        ).fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_command_observation")
+
+    result = catalog.import_command_observation(
+        "givek", "successful payload", "discord:test"
+    )
+
+    assert result is None
+    with connect(database_path) as connection:
+        events = connection.execute(
+            "SELECT source, raw_message FROM import_events WHERE kind = 'command_observation'"
+        ).fetchall()
+    assert [tuple(event) for event in events] == [
+        ("discord:test:command=$givek", "successful payload")
+    ]
+
+
 ROLL = RollObservation(
     name="Transaction Character",
     series="Transaction Series",

@@ -554,7 +554,7 @@ class CatalogRepository:
         """Persist an audited response for a supported state-changing command."""
         normalized_command = command_name.strip().casefold().lstrip("$/") or "unknown"
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+        def insert_command_observation(connection: sqlite3.Connection) -> None:
             connection.execute(
                 """
                 INSERT INTO import_events (kind, source, observed_at, raw_message)
@@ -567,6 +567,8 @@ class CatalogRepository:
                     raw_message,
                 ),
             )
+
+        run_write_transaction(self._database_path, insert_command_observation)
 
     def import_sphere_result(
         self,
