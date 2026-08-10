@@ -433,10 +433,11 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
         scan.id,
     )
     original_helper = catalog._harem_scan_progress_with_connection
+    original_runner = catalog_repository_module.run_write_transaction
     validation_finished = threading.Event()
     release_completion = threading.Event()
-    writer_attempted = threading.Event()
-    writer_first_write_returned = threading.Event()
+    writer_started = threading.Event()
+    writer_entered_callback = threading.Event()
     completion_failures: list[BaseException] = []
     writer_failures: list[BaseException] = []
     helper_call_count = 0
@@ -450,7 +451,18 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
             assert release_completion.wait(_THREAD_TIMEOUT), "completion was not released"
         return progress
 
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name != "harem-key-page-writer":
+            return original_runner(database_path, callback)
+
+        def observed_callback(connection: sqlite3.Connection):
+            writer_entered_callback.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
     monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", pause_after_validation)
+    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
 
     def complete_scan() -> None:
         try:
@@ -462,37 +474,8 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
     completion_thread.start()
     assert validation_finished.wait(_THREAD_TIMEOUT), "completion did not finish validation"
 
-    original_connection = catalog._connection
-
-    class ObservedPageWriterConnection:
-        def __init__(self, connection: sqlite3.Connection) -> None:
-            self._connection = connection
-
-        def __enter__(self):
-            self._connection.__enter__()
-            return self
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            return self._connection.__exit__(exc_type, exc_value, traceback)
-
-        def __getattr__(self, name: str):
-            return getattr(self._connection, name)
-
-        def execute(self, sql: str, parameters=()):
-            if "INSERT INTO import_events" in sql:
-                writer_attempted.set()
-                result = self._connection.execute(sql, parameters)
-                writer_first_write_returned.set()
-                return result
-            return self._connection.execute(sql, parameters)
-
-    monkeypatch.setattr(
-        catalog,
-        "_connection",
-        lambda: ObservedPageWriterConnection(original_connection()),
-    )
-
     def import_competing_page() -> None:
+        writer_started.set()
         try:
             catalog.import_harem_key_page(
                 HaremKeyPage(
@@ -511,10 +494,13 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
         except BaseException as exc:
             writer_failures.append(exc)
 
-    writer_thread = threading.Thread(target=import_competing_page)
+    writer_thread = threading.Thread(
+        target=import_competing_page,
+        name="harem-key-page-writer",
+    )
     writer_thread.start()
-    assert writer_attempted.wait(_THREAD_TIMEOUT), "competing page writer did not attempt a write"
-    assert not writer_first_write_returned.is_set()
+    assert writer_started.wait(_THREAD_TIMEOUT), "competing page writer did not start"
+    assert not writer_entered_callback.is_set()
 
     release_completion.set()
     completion_thread.join(timeout=_THREAD_TIMEOUT)
@@ -523,7 +509,7 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
     assert not completion_thread.is_alive(), "completion worker did not terminate"
     assert not writer_thread.is_alive(), "page writer worker did not terminate"
     assert completion_failures == []
-    assert writer_first_write_returned.is_set()
+    assert writer_entered_callback.is_set()
     assert len(writer_failures) == 1
     assert isinstance(writer_failures[0], ValueError)
     assert str(writer_failures[0]) == "Harem scan is already complete; begin a new scan to refresh it."
@@ -541,6 +527,582 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
     assert completed_at is not None
     assert [row["page_number"] for row in pages] == [1]
     assert competing_events == 0
+
+
+def test_public_harem_key_page_import_persists_complete_scanned_page(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        resolved_character_id = connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES ('Resolved Character', 'Resolved Series', 'resolved character',
+                      'resolved series', 'female', 'wa', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES ('Ambiguous Character', 'First Series', 'ambiguous character',
+                      'first series', NULL, NULL, ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES ('Ambiguous Character', 'Second Series', 'ambiguous character',
+                      'second series', NULL, NULL, ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        )
+
+    original_runner = catalog_repository_module.run_write_transaction
+    original_prepare = catalog._prepare_harem_scan_page
+    callback_calls: list[tuple[int, bool]] = []
+    prepare_calls: list[tuple[int, bool]] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection: sqlite3.Connection):
+            callback_calls.append((id(connection), connection.in_transaction))
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    def observed_prepare(connection: sqlite3.Connection, *args, **kwargs) -> None:
+        prepare_calls.append((id(connection), connection.in_transaction))
+        original_prepare(connection, *args, **kwargs)
+
+    def unexpected_connection():
+        raise AssertionError("harem-key page import opened an independent connection")
+
+    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(catalog, "_prepare_harem_scan_page", observed_prepare)
+    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+
+    result = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=2,
+            page_count=3,
+            entries=(
+                HaremKeyEntry(
+                    name="RESOLVED CHARACTER",
+                    key_type="gold",
+                    key_count=7,
+                    kakera_value=1_453,
+                ),
+                HaremKeyEntry(
+                    name="Ambiguous Character",
+                    key_type="silver",
+                    key_count=5,
+                    kakera_value=None,
+                ),
+                HaremKeyEntry(
+                    name="Missing Character",
+                    key_type="bronze",
+                    key_count=0,
+                    kakera_value=0,
+                ),
+            ),
+        ),
+        " Server ",
+        " Account ",
+        "complete harem-key page",
+        "discord:test",
+        scan.id,
+    )
+
+    assert callback_calls == prepare_calls
+    assert len(callback_calls) == 1
+    assert callback_calls[0][1] is True
+    assert set(result.model_dump()) == {
+        "import_event_id",
+        "server_name",
+        "account_name",
+        "entries_imported",
+        "entries_linked",
+        "observed_at",
+        "scan_id",
+        "page_number",
+        "page_count",
+    }
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.entries_imported == 3
+    assert result.entries_linked == 1
+    assert result.scan_id == scan.id
+    assert result.page_number == 2
+    assert result.page_count == 3
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        context = connection.execute(
+            """
+            SELECT server_contexts.name, server_contexts.normalized_name,
+                   account_contexts.name, account_contexts.normalized_name
+            FROM harem_scans
+            JOIN account_contexts ON account_contexts.id = harem_scans.account_context_id
+            JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
+            WHERE harem_scans.id = ?
+            """,
+            (scan.id,),
+        ).fetchone()
+        observations = connection.execute(
+            """
+            SELECT character_id, character_name, normalized_character_name,
+                   key_type, key_count, kakera_value, observed_at,
+                   import_event_id, harem_scan_id
+            FROM harem_key_observations ORDER BY id
+            """
+        ).fetchall()
+        scan_row = connection.execute(
+            "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (scan.id,),
+        ).fetchone()
+        page_rows = connection.execute(
+            """
+            SELECT harem_scan_id, page_number, import_event_id
+            FROM harem_scan_pages WHERE harem_scan_id = ?
+            """,
+            (scan.id,),
+        ).fetchall()
+
+    assert tuple(event) == (
+        "harem_key_page",
+        "discord:test",
+        result.observed_at.isoformat(),
+        "complete harem-key page",
+    )
+    assert tuple(context) == ("Server", "server", "Account", "account")
+    assert [tuple(row) for row in observations] == [
+        (
+            resolved_character_id,
+            "RESOLVED CHARACTER",
+            "resolved character",
+            "gold",
+            7,
+            1_453,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+            scan.id,
+        ),
+        (
+            None,
+            "Ambiguous Character",
+            "ambiguous character",
+            "silver",
+            5,
+            None,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+            scan.id,
+        ),
+        (
+            None,
+            "Missing Character",
+            "missing character",
+            "bronze",
+            0,
+            0,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+            scan.id,
+        ),
+    ]
+    assert tuple(scan_row) == (3, None)
+    assert [tuple(row) for row in page_rows] == [(scan.id, 2, result.import_event_id)]
+
+
+def test_public_harem_key_page_non_scan_preserves_null_page_metadata(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    result = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=None,
+            page_count=None,
+            entries=(HaremKeyEntry(name="Unscanned Character", key_type="bronze", key_count=0),),
+        ),
+        "Server",
+        "Account",
+        "unscanned harem-key page",
+        "clipboard",
+    )
+
+    assert result.scan_id is None
+    assert result.page_number is None
+    assert result.page_count is None
+    assert result.entries_imported == 1
+    assert result.entries_linked == 0
+    with connect(database_path) as connection:
+        observation = connection.execute(
+            """
+            SELECT character_name, key_type, key_count, harem_scan_id, import_event_id
+            FROM harem_key_observations
+            """
+        ).fetchone()
+        scan_count = connection.execute("SELECT COUNT(*) FROM harem_scans").fetchone()[0]
+        page_count = connection.execute("SELECT COUNT(*) FROM harem_scan_pages").fetchone()[0]
+
+    assert tuple(observation) == (
+        "Unscanned Character",
+        "bronze",
+        0,
+        None,
+        result.import_event_id,
+    )
+    assert scan_count == 0
+    assert page_count == 0
+
+
+def test_public_harem_key_page_late_failure_restores_rows_and_recovers(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        server_id = connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server Display', 'server', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        ).lastrowid
+        account_id = connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (?, 'Original Account Display', 'account', ?, ?)
+            """,
+            (server_id, seeded_at, seeded_at),
+        ).lastrowid
+        target_scan_id = connection.execute(
+            """
+            INSERT INTO harem_scans (
+                account_context_id, expected_page_count, started_at, completed_at, scan_kind
+            ) VALUES (?, NULL, ?, NULL, 'keys')
+            """,
+            (account_id, seeded_at),
+        ).lastrowid
+        unrelated_scan_id = connection.execute(
+            """
+            INSERT INTO harem_scans (
+                account_context_id, expected_page_count, started_at, completed_at, scan_kind
+            ) VALUES (?, 1, ?, NULL, 'keys')
+            """,
+            (account_id, seeded_at),
+        ).lastrowid
+        unrelated_event_id = connection.execute(
+            """
+            INSERT INTO import_events (kind, source, observed_at, raw_message)
+            VALUES ('harem_key_page', 'seed', ?, 'unrelated page')
+            """,
+            (seeded_at,),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id)
+            VALUES (?, 1, ?)
+            """,
+            (unrelated_scan_id, unrelated_event_id),
+        )
+        before_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name,
+                       server_contexts.normalized_name, server_contexts.created_at,
+                       server_contexts.updated_at, account_contexts.id,
+                       account_contexts.name, account_contexts.normalized_name,
+                       account_contexts.created_at, account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                WHERE account_contexts.id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        )
+        before_target_scan = tuple(
+            connection.execute(
+                """
+                SELECT id, account_context_id, expected_page_count, started_at,
+                       completed_at, scan_kind
+                FROM harem_scans WHERE id = ?
+                """,
+                (target_scan_id,),
+            ).fetchone()
+        )
+        before_unrelated_page = tuple(
+            connection.execute(
+                """
+                SELECT harem_scan_id, page_number, import_event_id
+                FROM harem_scan_pages WHERE harem_scan_id = ?
+                """,
+                (unrelated_scan_id,),
+            ).fetchone()
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_later_harem_key_observation
+            BEFORE INSERT ON harem_key_observations
+            WHEN NEW.normalized_character_name = 'later character'
+            BEGIN
+                SELECT RAISE(FAIL, 'forced later harem key failure');
+            END
+            """
+        )
+
+    page = HaremKeyPage(
+        page_number=2,
+        page_count=2,
+        entries=(
+            HaremKeyEntry(name="First Character", key_type="silver", key_count=5),
+            HaremKeyEntry(name="Later Character", key_type="gold", key_count=7),
+        ),
+    )
+
+    with pytest.raises(sqlite3.IntegrityError) as raised:
+        catalog.import_harem_key_page(
+            page,
+            " SERVER ",
+            " ACCOUNT ",
+            "retryable harem-key page",
+            "discord:test",
+            target_scan_id,
+        )
+    assert str(raised.value) == "forced later harem key failure"
+
+    with connect(database_path) as connection:
+        after_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name,
+                       server_contexts.normalized_name, server_contexts.created_at,
+                       server_contexts.updated_at, account_contexts.id,
+                       account_contexts.name, account_contexts.normalized_name,
+                       account_contexts.created_at, account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                WHERE account_contexts.id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        )
+        after_target_scan = tuple(
+            connection.execute(
+                """
+                SELECT id, account_context_id, expected_page_count, started_at,
+                       completed_at, scan_kind
+                FROM harem_scans WHERE id = ?
+                """,
+                (target_scan_id,),
+            ).fetchone()
+        )
+        target_pages = connection.execute(
+            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (target_scan_id,),
+        ).fetchall()
+        after_unrelated_page = tuple(
+            connection.execute(
+                """
+                SELECT harem_scan_id, page_number, import_event_id
+                FROM harem_scan_pages WHERE harem_scan_id = ?
+                """,
+                (unrelated_scan_id,),
+            ).fetchone()
+        )
+        failed_events = connection.execute(
+            "SELECT id FROM import_events WHERE raw_message = 'retryable harem-key page'"
+        ).fetchall()
+        failed_observations = connection.execute(
+            "SELECT id FROM harem_key_observations WHERE harem_scan_id = ?",
+            (target_scan_id,),
+        ).fetchall()
+
+    assert after_context == before_context
+    assert after_target_scan == before_target_scan
+    assert target_pages == []
+    assert after_unrelated_page == before_unrelated_page
+    assert failed_events == []
+    assert failed_observations == []
+
+    with connect(database_path) as connection:
+        connection.execute("DROP TRIGGER fail_later_harem_key_observation")
+
+    recovered = catalog.import_harem_key_page(
+        page,
+        " SERVER ",
+        " ACCOUNT ",
+        "retryable harem-key page",
+        "discord:test",
+        target_scan_id,
+    )
+
+    with connect(database_path) as connection:
+        recovered_events = connection.execute(
+            "SELECT id FROM import_events WHERE raw_message = 'retryable harem-key page'"
+        ).fetchall()
+        recovered_observations = connection.execute(
+            """
+            SELECT character_name, import_event_id, harem_scan_id
+            FROM harem_key_observations WHERE harem_scan_id = ? ORDER BY id
+            """,
+            (target_scan_id,),
+        ).fetchall()
+        recovered_scan = connection.execute(
+            "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+            (target_scan_id,),
+        ).fetchone()
+        recovered_pages = connection.execute(
+            """
+            SELECT page_number, import_event_id FROM harem_scan_pages
+            WHERE harem_scan_id = ?
+            """,
+            (target_scan_id,),
+        ).fetchall()
+        durable_unrelated_page = tuple(
+            connection.execute(
+                """
+                SELECT harem_scan_id, page_number, import_event_id
+                FROM harem_scan_pages WHERE harem_scan_id = ?
+                """,
+                (unrelated_scan_id,),
+            ).fetchone()
+        )
+
+    assert [row["id"] for row in recovered_events] == [recovered.import_event_id]
+    assert [tuple(row) for row in recovered_observations] == [
+        ("First Character", recovered.import_event_id, target_scan_id),
+        ("Later Character", recovered.import_event_id, target_scan_id),
+    ]
+    assert tuple(recovered_scan) == (2, None)
+    assert [tuple(row) for row in recovered_pages] == [(2, recovered.import_event_id)]
+    assert durable_unrelated_page == before_unrelated_page
+
+
+def test_public_harem_key_page_duplicate_rejection_rolls_back_attempt(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+    page = HaremKeyPage(
+        page_number=1,
+        page_count=2,
+        entries=(HaremKeyEntry(name="Character", key_type="gold", key_count=7),),
+    )
+    imported = catalog.import_harem_key_page(
+        page,
+        "Server",
+        "Account",
+        "original harem-key page",
+        "test",
+        scan.id,
+    )
+    with connect(database_path) as connection:
+        before_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name,
+                       server_contexts.normalized_name, server_contexts.created_at,
+                       server_contexts.updated_at, account_contexts.id,
+                       account_contexts.name, account_contexts.normalized_name,
+                       account_contexts.created_at, account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                WHERE account_contexts.id = (
+                    SELECT account_context_id FROM harem_scans WHERE id = ?
+                )
+                """,
+                (scan.id,),
+            ).fetchone()
+        )
+        before_scan = tuple(
+            connection.execute(
+                "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+                (scan.id,),
+            ).fetchone()
+        )
+        before_pages = [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT page_number, import_event_id FROM harem_scan_pages
+                WHERE harem_scan_id = ? ORDER BY page_number
+                """,
+                (scan.id,),
+            ).fetchall()
+        ]
+        before_observations = connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()[0]
+
+    with pytest.raises(ValueError) as raised:
+        catalog.import_harem_key_page(
+            page,
+            " SERVER ",
+            " ACCOUNT ",
+            "duplicate harem-key page",
+            "test",
+            scan.id,
+        )
+    assert str(raised.value) == "This harem scan already contains that page."
+
+    with connect(database_path) as connection:
+        after_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name,
+                       server_contexts.normalized_name, server_contexts.created_at,
+                       server_contexts.updated_at, account_contexts.id,
+                       account_contexts.name, account_contexts.normalized_name,
+                       account_contexts.created_at, account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                WHERE account_contexts.id = (
+                    SELECT account_context_id FROM harem_scans WHERE id = ?
+                )
+                """,
+                (scan.id,),
+            ).fetchone()
+        )
+        after_scan = tuple(
+            connection.execute(
+                "SELECT expected_page_count, completed_at FROM harem_scans WHERE id = ?",
+                (scan.id,),
+            ).fetchone()
+        )
+        after_pages = [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT page_number, import_event_id FROM harem_scan_pages
+                WHERE harem_scan_id = ? ORDER BY page_number
+                """,
+                (scan.id,),
+            ).fetchall()
+        ]
+        after_observations = connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()[0]
+        duplicate_events = connection.execute(
+            "SELECT id FROM import_events WHERE raw_message = 'duplicate harem-key page'"
+        ).fetchall()
+
+    assert after_context == before_context
+    assert after_scan == before_scan == (2, None)
+    assert after_pages == before_pages == [(1, imported.import_event_id)]
+    assert after_observations == before_observations == 1
+    assert duplicate_events == []
 
 
 def test_public_personal_rare_wrapper_persists_expected_atomic_result(tmp_path) -> None:
