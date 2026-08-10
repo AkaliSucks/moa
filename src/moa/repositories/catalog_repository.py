@@ -2630,7 +2630,8 @@ class CatalogRepository:
     ) -> RollabilityImportResult:
         """Store direct Mudae evidence that characters cannot currently roll."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+
+        def import_with_connection(connection: sqlite3.Connection) -> RollabilityImportResult:
             cursor = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("topx_page", source, observed_at.isoformat(), raw_message),
@@ -2663,13 +2664,15 @@ class CatalogRepository:
                     """,
                     (account_id, character_id, character.reason, observed_at.isoformat(), import_event_id),
                 )
-        return RollabilityImportResult(
-            import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            characters_imported=len(page.characters),
-            observed_at=observed_at,
-        )
+            return RollabilityImportResult(
+                import_event_id=import_event_id,
+                server_name=server_name.strip(),
+                account_name=account_name.strip(),
+                characters_imported=len(page.characters),
+                observed_at=observed_at,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def unavailable_characters(
         self, server_name: str, account_name: str

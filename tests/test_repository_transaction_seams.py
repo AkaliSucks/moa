@@ -32,6 +32,8 @@ from moa.models.character import (
     SphereResultSnapshot,
     TowerStateSnapshot,
     TimerStateSnapshot,
+    UnavailableCharacter,
+    UnavailableCharacterPage,
     WishlistEntry,
     WishlistSnapshot,
 )
@@ -1096,6 +1098,379 @@ def test_public_command_observation_wrapper_rolls_back_and_remains_usable(tmp_pa
     assert [tuple(event) for event in events] == [
         ("discord:test:command=$givek", "successful payload")
     ]
+
+
+def test_public_unavailable_character_import_persists_complete_page_and_reuses_character(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "Existing Character",
+                "Original Series",
+                "existing character",
+                "original series",
+                "female",
+                "wa",
+                seeded_at,
+                seeded_at,
+            ),
+        )
+        existing_character_id = connection.execute(
+            "SELECT id FROM characters WHERE normalized_name = 'existing character'"
+        ).fetchone()["id"]
+
+    page = UnavailableCharacterPage(
+        limit=1000,
+        page_number=1,
+        page_count=2,
+        characters=(
+            UnavailableCharacter(
+                name="EXISTING CHARACTER",
+                series="ORIGINAL SERIES",
+                claim_rank=10,
+                reason=None,
+            ),
+            UnavailableCharacter(
+                name="New Character",
+                series="New Series",
+                claim_rank=88,
+                reason="$togglewestern",
+            ),
+        ),
+    )
+
+    result = catalog.import_unavailable_characters(
+        page,
+        "  Server  ",
+        "  Account  ",
+        "complete topx payload",
+        "clipboard",
+    )
+
+    assert set(result.model_dump()) == {
+        "import_event_id",
+        "server_name",
+        "account_name",
+        "characters_imported",
+        "observed_at",
+    }
+    assert result.server_name == "Server"
+    assert result.account_name == "Account"
+    assert result.characters_imported == 2
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        context = connection.execute(
+            """
+            SELECT server_contexts.name AS server_name,
+                   server_contexts.normalized_name AS normalized_server_name,
+                   account_contexts.name AS account_name,
+                   account_contexts.normalized_name AS normalized_account_name
+            FROM server_contexts
+            JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+            """
+        ).fetchone()
+        characters = connection.execute(
+            """
+            SELECT id, name, series, normalized_name, normalized_series, gender, roulette
+            FROM characters ORDER BY normalized_name
+            """
+        ).fetchall()
+        ranks = connection.execute(
+            """
+            SELECT characters.name, rank_snapshots.character_id, rank_snapshots.claim_rank,
+                   rank_snapshots.like_rank, rank_snapshots.observed_at,
+                   rank_snapshots.import_event_id
+            FROM rank_snapshots
+            JOIN characters ON characters.id = rank_snapshots.character_id
+            ORDER BY rank_snapshots.id
+            """
+        ).fetchall()
+        unavailable = connection.execute(
+            """
+            SELECT characters.name, unavailable_character_observations.character_id,
+                   unavailable_character_observations.reason,
+                   unavailable_character_observations.observed_at,
+                   unavailable_character_observations.import_event_id
+            FROM unavailable_character_observations
+            JOIN characters ON characters.id = unavailable_character_observations.character_id
+            ORDER BY unavailable_character_observations.id
+            """
+        ).fetchall()
+
+    assert tuple(event) == (
+        "topx_page",
+        "clipboard",
+        result.observed_at.isoformat(),
+        "complete topx payload",
+    )
+    assert tuple(context) == ("Server", "server", "Account", "account")
+    assert len(characters) == 2
+    assert tuple(characters[0]) == (
+        existing_character_id,
+        "EXISTING CHARACTER",
+        "ORIGINAL SERIES",
+        "existing character",
+        "original series",
+        "female",
+        "wa",
+    )
+    assert tuple(characters[1])[1:] == (
+        "New Character",
+        "New Series",
+        "new character",
+        "new series",
+        None,
+        None,
+    )
+    assert [tuple(row) for row in ranks] == [
+        (
+            "EXISTING CHARACTER",
+            existing_character_id,
+            10,
+            None,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        ),
+        (
+            "New Character",
+            characters[1]["id"],
+            88,
+            None,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        ),
+    ]
+    assert [tuple(row) for row in unavailable] == [
+        (
+            "EXISTING CHARACTER",
+            existing_character_id,
+            None,
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        ),
+        (
+            "New Character",
+            characters[1]["id"],
+            "$togglewestern",
+            result.observed_at.isoformat(),
+            result.import_event_id,
+        ),
+    ]
+
+
+def test_public_unavailable_character_import_late_failure_removes_new_page_rows(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    page = UnavailableCharacterPage(
+        limit=None,
+        page_number=None,
+        page_count=None,
+        characters=(
+            UnavailableCharacter(
+                name="First Character", series="First Series", claim_rank=1, reason=None
+            ),
+            UnavailableCharacter(
+                name="Later Character", series="Later Series", claim_rank=2, reason="$toggleirl"
+            ),
+        ),
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_later_unavailable_character_rank
+            BEFORE INSERT ON rank_snapshots
+            WHEN EXISTS (
+                SELECT 1 FROM characters
+                WHERE id = NEW.character_id AND normalized_name = 'later character'
+            )
+            BEGIN
+                SELECT RAISE(FAIL, 'forced later unavailable character failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced later unavailable character failure"
+    ):
+        catalog.import_unavailable_characters(
+            page, "New Server", "New Account", "failed topx payload", "discord"
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unavailable_character_observations"
+        ).fetchone()[0] == 0
+
+
+def test_public_unavailable_character_import_restores_existing_rows_and_recovers(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        server_id = connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server', 'server', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (?, 'Original Account', 'account', ?, ?)
+            """,
+            (server_id, seeded_at, seeded_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES (
+                'Original Character', 'Original Series', 'existing character',
+                'existing series', 'female', 'wa', ?, ?
+            )
+            """,
+            (seeded_at, seeded_at),
+        )
+        before_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name, server_contexts.normalized_name,
+                       server_contexts.created_at, server_contexts.updated_at,
+                       account_contexts.id, account_contexts.name,
+                       account_contexts.normalized_name, account_contexts.created_at,
+                       account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                """
+            ).fetchone()
+        )
+        before_character = tuple(
+            connection.execute(
+                """
+                SELECT id, name, series, normalized_name, normalized_series, gender, roulette,
+                       created_at, updated_at
+                FROM characters
+                """
+            ).fetchone()
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_later_unavailable_character_observation
+            BEFORE INSERT ON unavailable_character_observations
+            WHEN EXISTS (
+                SELECT 1 FROM characters
+                WHERE id = NEW.character_id AND normalized_name = 'later character'
+            )
+            BEGIN
+                SELECT RAISE(FAIL, 'forced later unavailable observation failure');
+            END
+            """
+        )
+
+    page = UnavailableCharacterPage(
+        limit=1000,
+        page_number=1,
+        page_count=1,
+        characters=(
+            UnavailableCharacter(
+                name="EXISTING CHARACTER",
+                series="EXISTING SERIES",
+                claim_rank=10,
+                reason=None,
+            ),
+            UnavailableCharacter(
+                name="Later Character",
+                series="Later Series",
+                claim_rank=20,
+                reason="$togglewestern",
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced later unavailable observation failure"
+    ):
+        catalog.import_unavailable_characters(
+            page, " SERVER ", " ACCOUNT ", "failed topx payload", "discord"
+        )
+
+    with connect(database_path) as connection:
+        current_context = tuple(
+            connection.execute(
+                """
+                SELECT server_contexts.id, server_contexts.name, server_contexts.normalized_name,
+                       server_contexts.created_at, server_contexts.updated_at,
+                       account_contexts.id, account_contexts.name,
+                       account_contexts.normalized_name, account_contexts.created_at,
+                       account_contexts.updated_at
+                FROM server_contexts
+                JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
+                """
+            ).fetchone()
+        )
+        current_character = tuple(
+            connection.execute(
+                """
+                SELECT id, name, series, normalized_name, normalized_series, gender, roulette,
+                       created_at, updated_at
+                FROM characters
+                """
+            ).fetchone()
+        )
+        assert current_context == before_context
+        assert current_character == before_character
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unavailable_character_observations"
+        ).fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_later_unavailable_character_observation")
+
+    result = catalog.import_unavailable_characters(
+        page, " SERVER ", " ACCOUNT ", "successful topx payload", "discord"
+    )
+
+    assert result.characters_imported == 2
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unavailable_character_observations"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(DISTINCT import_event_id) FROM rank_snapshots"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(DISTINCT import_event_id) FROM unavailable_character_observations"
+        ).fetchone()[0] == 1
 
 
 ROLL = RollObservation(
