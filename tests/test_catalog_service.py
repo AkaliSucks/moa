@@ -217,6 +217,42 @@ def test_delete_import_removes_only_its_derived_observations(tmp_path) -> None:
     assert service.recent_imports()[0].id == correct.import_event_id
 
 
+def test_delete_import_rolls_back_prior_cleanup_when_final_delete_fails(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    details = MudaeTextParser().parse_character_details(CHARACTER_DETAILS)
+    target = service.import_character_details(
+        details, "Target Server", CHARACTER_DETAILS, "clipboard"
+    )
+    unrelated = service.import_character_details(
+        details, "Other Server", CHARACTER_DETAILS, "clipboard"
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_import_event_delete
+            BEFORE DELETE ON import_events
+            BEGIN
+                SELECT RAISE(FAIL, 'forced import event delete failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced import event delete failure"):
+        service.delete_import_event(target.import_event_id)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE id IN (?, ?)",
+            (target.import_event_id, unrelated.import_event_id),
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM server_character_observations "
+            "WHERE import_event_id IN (?, ?)",
+            (target.import_event_id, unrelated.import_event_id),
+        ).fetchone()[0] == 2
+
+
 def test_repair_bugged_imports_removes_timer_rolls_and_orphaned_split_rows(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     service = CatalogService(CatalogRepository(database_path))

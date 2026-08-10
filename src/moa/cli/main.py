@@ -11,7 +11,10 @@ from moa.core.config import ConfigService
 from moa.database.sqlite import DEFAULT_DATABASE_PATH
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
-from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.catalog_repository import (
+    CatalogRepository,
+    ImportEventDeletionBlockedError,
+)
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
@@ -3045,7 +3048,14 @@ def catalog_rank_history(
 @catalog_app.command("delete-import")
 def catalog_delete_import(import_event_id: int) -> None:
     """Delete one mistaken import while preserving all other catalog data."""
-    if not CatalogService().delete_import_event(import_event_id):
+    try:
+        deleted = CatalogService().delete_import_event(import_event_id)
+    except ImportEventDeletionBlockedError:
+        console.print(
+            "[red]Deletion blocked: this import belongs to durable/replayable source state.[/red]"
+        )
+        raise typer.Exit(1) from None
+    if not deleted:
         console.print("[red]Import event not found.[/red]")
         raise typer.Exit(1)
     console.print(f"[green]Deleted import event {import_event_id}.[/green]")

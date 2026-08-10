@@ -96,6 +96,10 @@ from moa.models.character import (
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 
 
+class ImportEventDeletionBlockedError(RuntimeError):
+    """Raised when durable source state still owns an import event."""
+
+
 class CatalogRepositoryProtocol(Protocol):
     """Storage contract required by :class:`CatalogService`."""
 
@@ -3734,6 +3738,16 @@ class CatalogRepository:
     def _delete_import_event_from_connection(
         connection: sqlite3.Connection, import_event_id: int
     ) -> None:
+        durable_reference = connection.execute(
+            "SELECT 1 FROM discord_source_events WHERE legacy_import_event_id = ? LIMIT 1",
+            (import_event_id,),
+        ).fetchone()
+        if durable_reference is not None:
+            raise ImportEventDeletionBlockedError(
+                f"Import event {import_event_id} belongs to durable/replayable source state "
+                "and cannot be deleted."
+            )
+
         connection.execute(
             "DELETE FROM server_character_observations WHERE import_event_id = ?",
             (import_event_id,),
@@ -3755,6 +3769,8 @@ class CatalogRepository:
             "kakeraloot_state_observations",
             "kakeraloot_settings_observations",
             "server_settings_observations",
+            "profile_observations",
+            "mudapin_observations",
         ):
             connection.execute(
                 f"DELETE FROM {table} WHERE import_event_id = ?",

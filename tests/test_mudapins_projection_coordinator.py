@@ -7,7 +7,10 @@ import pytest
 from moa.database.sqlite import connect
 from moa.models.character import MudapinSnapshot
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
-from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.catalog_repository import (
+    CatalogRepository,
+    ImportEventDeletionBlockedError,
+)
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.mudapins_projection_coordinator import (
     MudapinsProjectionCoordinator,
@@ -469,6 +472,88 @@ def test_matching_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_
     )
     with connect(database_path) as connection:
         assert _durable_state(connection) == before
+
+
+def test_unlinked_mudapins_import_deletion_exposes_previous_snapshot(tmp_path) -> None:
+    database_path, catalog, _discord, _coordinator = _repositories(tmp_path)
+    previous_snapshot = MudapinSnapshot(pin_markers=(":pinA:", ":logopinB:"))
+    deleted_snapshot = MudapinSnapshot(pin_markers=(":pinC:", ":pinA:", ":pinC:"))
+    unrelated_snapshot = MudapinSnapshot(pin_markers=(":logopinD:",))
+    previous = catalog.import_mudapins(
+        previous_snapshot, "Server", "Account", "previous pins", "clipboard"
+    )
+    deleted = catalog.import_mudapins(
+        deleted_snapshot, "Server", "Account", "mistaken pins", "clipboard"
+    )
+    unrelated = catalog.import_mudapins(
+        unrelated_snapshot, "Other Server", "Other Account", "other pins", "clipboard"
+    )
+
+    assert catalog.mudapins("Server", "Account").snapshot == deleted_snapshot
+    assert catalog.delete_import_event(deleted.import_event_id) is True
+
+    assert catalog.mudapins("Server", "Account").snapshot == previous_snapshot
+    assert catalog.mudapins("Other Server", "Other Account").snapshot == unrelated_snapshot
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (deleted.import_event_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mudapin_observations WHERE import_event_id = ?",
+            (deleted.import_event_id,),
+        ).fetchone()[0] == 0
+        rows = connection.execute(
+            "SELECT pin_markers_json, pin_count FROM mudapin_observations "
+            "WHERE import_event_id IN (?, ?) ORDER BY id",
+            (previous.import_event_id, unrelated.import_event_id),
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            (json.dumps(list(previous_snapshot.pin_markers)), 2),
+            (json.dumps(list(unrelated_snapshot.pin_markers)), 1),
+        ]
+
+
+def test_durably_linked_mudapins_import_refuses_deletion_and_replays_after_restart(
+    tmp_path,
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        before = (
+            tuple(connection.execute("SELECT * FROM discord_source_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_processing_attempts").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_projection_links").fetchone()),
+            tuple(connection.execute("SELECT * FROM mudapin_observations").fetchone()),
+            _attribution_rows(connection),
+            _counts(connection),
+        )
+
+    with pytest.raises(ImportEventDeletionBlockedError, match="durable/replayable"):
+        catalog.delete_import_event(first.import_event_id)
+
+    restarted = MudapinsProjectionCoordinator(
+        CatalogRepository(database_path), DiscordMessageRepository(database_path)
+    )
+    replay = _coordinate(restarted, source_event_id, None)
+    assert replay == MudapinsProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        mudapin_observation_id=first.mudapin_observation_id,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    with connect(database_path) as connection:
+        after = (
+            tuple(connection.execute("SELECT * FROM discord_source_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_processing_attempts").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_projection_links").fetchone()),
+            tuple(connection.execute("SELECT * FROM mudapin_observations").fetchone()),
+            _attribution_rows(connection),
+            _counts(connection),
+        )
+    assert after == before
 
 
 def test_edited_discord_revision_gets_independent_projection(tmp_path) -> None:

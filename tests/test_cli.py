@@ -1006,6 +1006,23 @@ def test_catalog_reset_requires_confirmation_and_backs_up_database(monkeypatch, 
     assert len(list(tmp_path.glob("moa.db.bak-full-reset-*"))) == 1
 
 
+def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> None:
+    class BlockingCatalogService:
+        def delete_import_event(self, import_event_id):
+            raise main.ImportEventDeletionBlockedError(
+                f"Import event {import_event_id} belongs to durable source state"
+            )
+
+    monkeypatch.setattr(main, "CatalogService", BlockingCatalogService)
+
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "42"])
+
+    assert result.exit_code == 1
+    assert "Deletion blocked" in result.stdout
+    assert "durable/replayable source state" in result.stdout
+    assert "FOREIGN KEY" not in result.stdout
+
+
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
     assert main._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
         "Claimed 💞 => cute_beagle_91130"
