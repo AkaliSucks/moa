@@ -762,7 +762,10 @@ class CatalogRepository:
     ) -> CharacterDetailsImportResult:
         """Upsert one `$im` response and preserve its server-specific value."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+
+        def import_with_connection(
+            connection: sqlite3.Connection,
+        ) -> CharacterDetailsImportResult:
             cursor = connection.execute(
                 """
                 INSERT INTO import_events (kind, source, observed_at, raw_message)
@@ -852,12 +855,14 @@ class CatalogRepository:
                     ),
                 )
 
-        return CharacterDetailsImportResult(
-            import_event_id=import_event_id,
-            character_id=character_id,
-            server_name=server_name.strip(),
-            observed_at=observed_at,
-        )
+            return CharacterDetailsImportResult(
+                import_event_id=import_event_id,
+                character_id=character_id,
+                server_name=server_name.strip(),
+                observed_at=observed_at,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def import_roll(
         self,

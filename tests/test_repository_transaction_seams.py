@@ -10,6 +10,7 @@ from moa.database.sqlite import connect
 from moa.models.character import (
     AntidisablePage,
     BadgeLevel,
+    CharacterDetails,
     ClaimConfirmation,
     DisableListEntry,
     DisableListSnapshot,
@@ -1412,6 +1413,309 @@ def test_public_top_page_import_restores_existing_rows_and_recovers(tmp_path) ->
         assert connection.execute(
             "SELECT COUNT(DISTINCT import_event_id) FROM top_owner_observations"
         ).fetchone()[0] == 1
+
+
+def test_public_character_details_import_persists_complete_evidence(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    details = CharacterDetails(
+        name="Character",
+        series="Series",
+        gender="female",
+        roulette="animanga",
+        kakera_value=321,
+        claim_rank=12,
+        like_rank=34,
+        key_type="silver",
+        key_count=5,
+    )
+
+    result = catalog.import_character_details(
+        details, "  Server  ", "complete character payload", "clipboard", "  Account  "
+    )
+
+    assert set(result.model_dump()) == {
+        "import_event_id",
+        "character_id",
+        "server_name",
+        "observed_at",
+    }
+    assert result.server_name == "Server"
+    assert result.observed_at.tzinfo is not None
+    assert result.observed_at.utcoffset().total_seconds() == 0
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+        character = connection.execute(
+            "SELECT id, name, series, normalized_name, normalized_series, gender, roulette "
+            "FROM characters"
+        ).fetchone()
+        server = connection.execute(
+            "SELECT id, name, normalized_name FROM server_contexts"
+        ).fetchone()
+        account = connection.execute(
+            "SELECT id, server_context_id, name, normalized_name FROM account_contexts"
+        ).fetchone()
+        rank = connection.execute(
+            "SELECT character_id, claim_rank, like_rank, observed_at, import_event_id "
+            "FROM rank_snapshots"
+        ).fetchone()
+        server_observation = connection.execute(
+            "SELECT server_context_id, character_id, kakera_value, observed_at, import_event_id "
+            "FROM server_character_observations"
+        ).fetchone()
+        key = connection.execute(
+            "SELECT account_context_id, character_id, character_name, "
+            "normalized_character_name, key_type, key_count, kakera_value, observed_at, "
+            "import_event_id FROM harem_key_observations"
+        ).fetchone()
+
+    assert tuple(event) == (
+        "character_details",
+        "clipboard",
+        result.observed_at.isoformat(),
+        "complete character payload",
+    )
+    assert tuple(character) == (
+        result.character_id,
+        "Character",
+        "Series",
+        "character",
+        "series",
+        "female",
+        "animanga",
+    )
+    assert tuple(server)[1:] == ("Server", "server")
+    assert tuple(account)[1:] == (server["id"], "Account", "account")
+    assert tuple(rank) == (
+        result.character_id,
+        12,
+        34,
+        result.observed_at.isoformat(),
+        result.import_event_id,
+    )
+    assert tuple(server_observation) == (
+        server["id"],
+        result.character_id,
+        321,
+        result.observed_at.isoformat(),
+        result.import_event_id,
+    )
+    assert tuple(key) == (
+        account["id"],
+        result.character_id,
+        "Character",
+        "character",
+        "silver",
+        5,
+        321,
+        result.observed_at.isoformat(),
+        result.import_event_id,
+    )
+
+
+def test_public_character_details_import_reuses_partial_character_and_skips_incomplete_evidence(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        character_id = connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES ('Original Name', 'Original Series', 'character', 'series',
+                      'female', 'game', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        ).lastrowid
+
+    result = catalog.import_character_details(
+        CharacterDetails(
+            name="CHARACTER",
+            series="SERIES",
+            gender="male",
+            roulette=None,
+            kakera_value=None,
+            claim_rank=None,
+            like_rank=None,
+            key_type="bronze",
+            key_count=None,
+        ),
+        "Server",
+        "partial character payload",
+        "clipboard",
+        "Account",
+    )
+
+    assert result.character_id == character_id
+    with connect(database_path) as connection:
+        character = connection.execute(
+            """
+            SELECT id, name, series, normalized_name, normalized_series, gender, roulette,
+                   created_at, updated_at
+            FROM characters
+            """
+        ).fetchone()
+        server_observation = connection.execute(
+            "SELECT character_id, kakera_value, import_event_id "
+            "FROM server_character_observations"
+        ).fetchone()
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations"
+        ).fetchone()[0] == 0
+
+    assert tuple(character) == (
+        character_id,
+        "CHARACTER",
+        "SERIES",
+        "character",
+        "series",
+        "male",
+        "game",
+        seeded_at,
+        result.observed_at.isoformat(),
+    )
+    assert tuple(server_observation) == (character_id, None, result.import_event_id)
+
+
+def test_public_character_details_import_restores_existing_rows_and_recovers(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    seeded_at = "2026-07-01T00:00:00+00:00"
+    with connect(database_path) as connection:
+        server_id = connection.execute(
+            """
+            INSERT INTO server_contexts (name, normalized_name, created_at, updated_at)
+            VALUES ('Original Server', 'server', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        ).lastrowid
+        connection.execute(
+            """
+            INSERT INTO account_contexts (
+                server_context_id, name, normalized_name, created_at, updated_at
+            ) VALUES (?, 'Original Account', 'account', ?, ?)
+            """,
+            (server_id, seeded_at, seeded_at),
+        )
+        connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, gender, roulette,
+                created_at, updated_at
+            ) VALUES ('Original Name', 'Original Series', 'character', 'series',
+                      'female', 'game', ?, ?)
+            """,
+            (seeded_at, seeded_at),
+        )
+        before_character = tuple(
+            connection.execute(
+                "SELECT id, name, series, normalized_name, normalized_series, gender, roulette, "
+                "created_at, updated_at FROM characters"
+            ).fetchone()
+        )
+        before_server = tuple(
+            connection.execute(
+                "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+            ).fetchone()
+        )
+        before_account = tuple(
+            connection.execute(
+                "SELECT id, server_context_id, name, normalized_name, created_at, updated_at "
+                "FROM account_contexts"
+            ).fetchone()
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_character_details_key
+            BEFORE INSERT ON harem_key_observations
+            BEGIN
+                SELECT RAISE(FAIL, 'forced character details key failure');
+            END
+            """
+        )
+
+    details = CharacterDetails(
+        name="CHARACTER",
+        series="SERIES",
+        gender="male",
+        roulette=None,
+        kakera_value=444,
+        claim_rank=7,
+        like_rank=8,
+        key_type="gold",
+        key_count=9,
+    )
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced character details key failure"
+    ):
+        catalog.import_character_details(
+            details, " SERVER ", "failed character payload", "discord", " ACCOUNT "
+        )
+
+    with connect(database_path) as connection:
+        current_character = tuple(
+            connection.execute(
+                "SELECT id, name, series, normalized_name, normalized_series, gender, roulette, "
+                "created_at, updated_at FROM characters"
+            ).fetchone()
+        )
+        current_server = tuple(
+            connection.execute(
+                "SELECT id, name, normalized_name, created_at, updated_at FROM server_contexts"
+            ).fetchone()
+        )
+        current_account = tuple(
+            connection.execute(
+                "SELECT id, server_context_id, name, normalized_name, created_at, updated_at "
+                "FROM account_contexts"
+            ).fetchone()
+        )
+        assert current_character == before_character
+        assert current_server == before_server
+        assert current_account == before_account
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM server_character_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations"
+        ).fetchone()[0] == 0
+        connection.execute("DROP TRIGGER fail_character_details_key")
+
+    result = catalog.import_character_details(
+        details, " SERVER ", "successful character payload", "discord", " ACCOUNT "
+    )
+
+    assert result.character_id == before_character[0]
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM characters").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM server_character_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations"
+        ).fetchone()[0] == 1
+        linked_event_ids = {
+            connection.execute("SELECT import_event_id FROM rank_snapshots").fetchone()[0],
+            connection.execute(
+                "SELECT import_event_id FROM server_character_observations"
+            ).fetchone()[0],
+            connection.execute(
+                "SELECT import_event_id FROM harem_key_observations"
+            ).fetchone()[0],
+        }
+    assert linked_event_ids == {result.import_event_id}
 
 
 def test_public_unavailable_character_import_persists_complete_page_and_reuses_character(
