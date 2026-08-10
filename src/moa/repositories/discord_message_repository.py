@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from moa.database.sqlite import connect
+from moa.database.sqlite import connect, run_write_transaction
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 
@@ -686,7 +686,9 @@ class DiscordMessageRepository:
         normalized_recorded_at = self._normalize_processing_datetime(recorded_at, "recorded_at")
         recorded_at_value = normalized_recorded_at.isoformat()
 
-        with self._connection() as connection:
+        def record_with_connection(
+            connection: sqlite3.Connection,
+        ) -> DiscordSourceEventServerAttribution:
             source_event = connection.execute(
                 "SELECT 1 FROM discord_source_events WHERE id = ?",
                 (source_event_id,),
@@ -755,6 +757,8 @@ class DiscordMessageRepository:
                     "Inserted Discord server attribution could not be reloaded"
                 )
             return result
+
+        return run_write_transaction(self._database_path, record_with_connection)
 
     def get_account_attribution(
         self, source_event_id: int
