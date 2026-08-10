@@ -690,7 +690,7 @@ class CatalogRepository:
             raise ValueError("A `$topo` import with owner claims requires --server.")
 
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+        def import_with_connection(connection: sqlite3.Connection) -> TopImportResult:
             cursor = connection.execute(
                 """
                 INSERT INTO import_events (kind, source, observed_at, raw_message)
@@ -744,11 +744,13 @@ class CatalogRepository:
                         ),
                     )
 
-        return TopImportResult(
-            import_event_id=import_event_id,
-            characters_imported=len(page.characters),
-            observed_at=observed_at,
-        )
+            return TopImportResult(
+                import_event_id=import_event_id,
+                characters_imported=len(page.characters),
+                observed_at=observed_at,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def import_character_details(
         self,
