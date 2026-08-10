@@ -3686,14 +3686,16 @@ class CatalogRepository:
         Canonical character records stay in the catalog. This preserves data
         imported from other messages while removing only the mistaken evidence.
         """
-        with self._connection() as connection:
+        def delete_with_connection(connection: sqlite3.Connection) -> bool:
             exists = connection.execute(
                 "SELECT 1 FROM import_events WHERE id = ?", (import_event_id,)
             ).fetchone()
             if exists is None:
                 return False
             self._delete_import_event_from_connection(connection, import_event_id)
-        return True
+            return True
+
+        return run_write_transaction(self._database_path, delete_with_connection)
 
     def inspect_bugged_imports(self) -> tuple[int, int]:
         """Count timer-as-roll imports and imports reparsed by the fixed parser."""

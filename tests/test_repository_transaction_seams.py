@@ -36,8 +36,10 @@ from moa.models.character import (
     WishlistSnapshot,
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
+from moa.repositories import catalog_repository as catalog_repository_module
 from moa.repositories.catalog_repository import (
     CatalogRepository,
+    ImportEventDeletionBlockedError,
     _AntidisablePageImportConnectionResult,
     _KakeralootStateImportConnectionResult,
     _DisableListImportConnectionResult,
@@ -1539,6 +1541,194 @@ def _profile_projection_counts(connection: sqlite3.Connection) -> dict[str, int]
         table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         for table in tables
     }
+
+
+def test_public_import_event_delete_uses_one_active_runner_connection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    target = catalog.import_roll(
+        ROLL, "Server", "Account", "target roll", "clipboard"
+    )
+    unrelated = catalog.import_roll(
+        ROLL, "Server", "Account", "unrelated roll", "clipboard"
+    )
+    original_runner = catalog_repository_module.run_write_transaction
+    original_helper = catalog._delete_import_event_from_connection
+    callback_calls: list[tuple[int, bool]] = []
+    existence_reads: list[tuple[int, bool]] = []
+    helper_calls: list[tuple[int, bool]] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection: sqlite3.Connection):
+            callback_calls.append((id(connection), connection.in_transaction))
+
+            def trace(statement: str) -> None:
+                if "SELECT 1 FROM import_events" in statement:
+                    existence_reads.append((id(connection), connection.in_transaction))
+
+            connection.set_trace_callback(trace)
+            try:
+                return callback(connection)
+            finally:
+                connection.set_trace_callback(None)
+
+        return original_runner(database_path, observed_callback)
+
+    def observed_helper(connection: sqlite3.Connection, import_event_id: int) -> None:
+        helper_calls.append((id(connection), connection.in_transaction))
+        original_helper(connection, import_event_id)
+
+    def unexpected_connection():
+        raise AssertionError("public deletion opened an independent repository connection")
+
+    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(catalog, "_delete_import_event_from_connection", observed_helper)
+    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+
+    assert catalog.delete_import_event(target.import_event_id) is True
+
+    assert len(callback_calls) == len(existence_reads) == len(helper_calls) == 1
+    assert callback_calls[0][0] == existence_reads[0][0] == helper_calls[0][0]
+    assert callback_calls[0][1] is existence_reads[0][1] is helper_calls[0][1] is True
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (target.import_event_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM roll_observations WHERE import_event_id = ?",
+            (target.import_event_id,),
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (unrelated.import_event_id,)
+        ).fetchone() is not None
+        assert connection.execute(
+            "SELECT 1 FROM roll_observations WHERE import_event_id = ?",
+            (unrelated.import_event_id,),
+        ).fetchone() is not None
+
+
+def test_public_import_event_delete_missing_runs_inside_runner_without_changes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    existing = catalog.import_roll(
+        ROLL, "Server", "Account", "existing roll", "clipboard"
+    )
+    original_runner = catalog_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection: sqlite3.Connection):
+            callback_states.append(connection.in_transaction)
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
+    with connect(database_path) as connection:
+        before = (
+            tuple(connection.execute("SELECT * FROM import_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM roll_observations").fetchone()),
+        )
+
+    assert catalog.delete_import_event(existing.import_event_id + 10_000) is False
+
+    assert callback_states == [True]
+    with connect(database_path) as connection:
+        after = (
+            tuple(connection.execute("SELECT * FROM import_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM roll_observations").fetchone()),
+        )
+    assert after == before
+
+
+def test_public_import_event_delete_durable_refusal_rolls_back_runner(tmp_path) -> None:
+    database_path, catalog, discord = _repositories(tmp_path)
+    coordinator = ProfileProjectionCoordinator(catalog, discord)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_account_scoped_attribution(discord, source_event_id)
+    result = coordinator.coordinate_profile(
+        source_event_id=source_event_id,
+        attempt_id=attempt_id,
+        profile=PROFILE.model_copy(update={"profile_name": "Account"}),
+        server="Server",
+        account="Account",
+        raw="profile payload",
+        source="discord",
+        observed_at=OBSERVED_AT,
+        finished_at=FINISHED_AT,
+    )
+    with connect(database_path) as connection:
+        before = (
+            tuple(connection.execute("SELECT * FROM import_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM profile_observations").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_source_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_processing_attempts").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_projection_links").fetchone()),
+        )
+
+    with pytest.raises(ImportEventDeletionBlockedError, match="durable/replayable"):
+        catalog.delete_import_event(result.import_event_id)
+
+    with connect(database_path) as connection:
+        after = (
+            tuple(connection.execute("SELECT * FROM import_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM profile_observations").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_source_events").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_processing_attempts").fetchone()),
+            tuple(connection.execute("SELECT * FROM discord_projection_links").fetchone()),
+        )
+    assert after == before
+
+
+def test_public_import_event_delete_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    target = catalog.import_roll(
+        ROLL, "Server", "Account", "target roll", "clipboard"
+    )
+    unrelated = catalog.import_roll(
+        ROLL, "Server", "Account", "unrelated roll", "clipboard"
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_target_import_event_delete
+            BEFORE DELETE ON import_events
+            BEGIN
+                SELECT RAISE(FAIL, 'forced public import event delete failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced public import event delete failure"
+    ):
+        catalog.delete_import_event(target.import_event_id)
+
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM roll_observations").fetchone()[0] == 2
+        connection.execute("DROP TRIGGER fail_target_import_event_delete")
+
+    assert catalog.delete_import_event(target.import_event_id) is True
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (target.import_event_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM roll_observations WHERE import_event_id = ?",
+            (target.import_event_id,),
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (unrelated.import_event_id,)
+        ).fetchone() is not None
+        assert connection.execute(
+            "SELECT 1 FROM roll_observations WHERE import_event_id = ?",
+            (unrelated.import_event_id,),
+        ).fetchone() is not None
 
 
 def _kakeraloot_settings_counts(connection: sqlite3.Connection) -> dict[str, int]:
