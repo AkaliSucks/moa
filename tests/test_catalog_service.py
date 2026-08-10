@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from moa.models.character import RollObservation
+from moa.models.character import DivorceConfirmation, RollObservation
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.services.catalog_service import CatalogService
@@ -324,6 +324,67 @@ def test_repair_bugged_imports_preserves_character_with_other_observations(tmp_p
 
     assert service.repair_bugged_imports() == (1, 0)
     assert service.character_count() == 1
+
+
+def test_repair_bugged_imports_preserves_divorce_referenced_character(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    character_name = "Each kakera button consumes 100% of your reaction power."
+    character_series = "Your characters with 10+ keys consume half the power (50%)"
+
+    with repository._connection() as connection:
+        character_id = int(
+            connection.execute(
+                """
+                INSERT INTO characters (
+                    name, series, normalized_name, normalized_series,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    character_name,
+                    character_series,
+                    repository._normalize(character_name),
+                    repository._normalize(character_series),
+                    "2026-08-10T00:00:00+00:00",
+                    "2026-08-10T00:00:00+00:00",
+                ),
+            ).fetchone()[0]
+        )
+
+    divorce = service.import_divorce(
+        DivorceConfirmation(
+            account_name="account",
+            character_name=character_name,
+            kakera_refund=100,
+        ),
+        "Server",
+        "account",
+        "You divorced the character.",
+        "discord",
+    )
+
+    assert divorce.character_id == character_id
+    assert service.inspect_bugged_imports() == (0, 1)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM rank_snapshots WHERE character_id = ?", (character_id,)
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM divorce_observations WHERE character_id = ?", (character_id,)
+        ).fetchone()[0] == 1
+
+    assert service.repair_bugged_imports() == (0, 0)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM characters WHERE id = ?", (character_id,)
+        ).fetchone()[0] == character_id
+        assert connection.execute(
+            "SELECT character_id FROM divorce_observations WHERE import_event_id = ?",
+            (divorce.import_event_id,),
+        ).fetchone()[0] == character_id
 
 
 def test_import_mmy_page_keeps_unresolved_names_without_losing_key_data(tmp_path) -> None:

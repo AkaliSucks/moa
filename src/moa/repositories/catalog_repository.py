@@ -4035,6 +4035,7 @@ class CatalogRepository:
             "server_character_observations",
             "roll_observations",
             "claim_observations",
+            "divorce_observations",
             "harem_key_observations",
             "owned_character_observations",
             "unavailable_character_observations",
