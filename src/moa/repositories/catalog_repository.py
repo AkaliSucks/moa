@@ -1696,7 +1696,8 @@ class CatalogRepository:
     ) -> RankedHaremImportResult:
         """Store direct owned-character evidence from one ranked `$mm` page."""
         observed_at = datetime.now(timezone.utc)
-        with self._connection() as connection:
+
+        def import_with_connection(connection: sqlite3.Connection) -> RankedHaremImportResult:
             cursor = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("ranked_harem_page", source, observed_at.isoformat(), raw_message),
@@ -1763,17 +1764,20 @@ class CatalogRepository:
                     "VALUES (?, ?, ?)",
                     (scan_id, page.page_number, import_event_id),
                 )
-        return RankedHaremImportResult(
-            import_event_id=import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            entries_imported=len(page.entries),
-            entries_linked=linked_entries,
-            observed_at=observed_at,
-            scan_id=scan_id,
-            page_number=page.page_number,
-            page_count=page.page_count,
-        )
+
+            return RankedHaremImportResult(
+                import_event_id=import_event_id,
+                server_name=server_name.strip(),
+                account_name=account_name.strip(),
+                entries_imported=len(page.entries),
+                entries_linked=linked_entries,
+                observed_at=observed_at,
+                scan_id=scan_id,
+                page_number=page.page_number,
+                page_count=page.page_count,
+            )
+
+        return run_write_transaction(self._database_path, import_with_connection)
 
     def owned_characters(
         self, server_name: str, account_name: str
