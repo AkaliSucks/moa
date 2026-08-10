@@ -3728,7 +3728,7 @@ class CatalogRepository:
         removed; older roll and `$im` rows are reparsed with the current parser
         so wrapped series such as `Dungeon ni ... no` + `wa ...` are corrected.
         """
-        with self._connection() as connection:
+        def repair_with_connection(connection: sqlite3.Connection) -> tuple[int, int]:
             import_event_ids, character_ids, repairs = self._bugged_import_candidates(connection)
             for import_event_id in import_event_ids - repairs.keys():
                 self._delete_import_event_from_connection(connection, import_event_id)
@@ -3751,7 +3751,9 @@ class CatalogRepository:
                 )
                 deleted_characters += cursor.rowcount
 
-        return len(import_event_ids), deleted_characters
+            return len(import_event_ids), deleted_characters
+
+        return run_write_transaction(self._database_path, repair_with_connection)
 
     @staticmethod
     def _delete_import_event_from_connection(

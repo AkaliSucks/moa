@@ -1,10 +1,14 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
 from moa.models.character import DivorceConfirmation, RollObservation
 from moa.parser.mudae import MudaeTextParser
-from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.catalog_repository import (
+    CatalogRepository,
+    ImportEventDeletionBlockedError,
+)
 from moa.services.catalog_service import CatalogService
 from moa.services.top_search_service import TopSearchService
 
@@ -19,6 +23,67 @@ Animanga roulette · 929:kakera:
 Claim Rank: #9
 Like Rank: #19
 """
+
+
+def _repair_state(database_path: Path) -> tuple:
+    with sqlite3.connect(database_path) as connection:
+        return (
+            tuple(connection.execute("SELECT * FROM characters ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM import_events ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM roll_observations ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM rank_snapshots ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM server_character_observations ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM harem_key_observations ORDER BY id")),
+            tuple(connection.execute("SELECT * FROM discord_source_events ORDER BY id")),
+        )
+
+
+def _link_durable_source_event(
+    connection: sqlite3.Connection, import_event_id: int
+) -> None:
+    timestamp = "2026-08-10T00:00:00+00:00"
+    aggregate_id = connection.execute(
+        """
+        INSERT INTO discord_message_aggregates (
+            platform, guild_id, channel_id, message_id, first_received_at,
+            last_received_at, created_at, updated_at
+        ) VALUES ('discord', 'guild', 'channel', ?, ?, ?, ?, ?)
+        """,
+        (f"message-{import_event_id}", timestamp, timestamp, timestamp, timestamp),
+    ).lastrowid
+    revision_id = connection.execute(
+        """
+        INSERT INTO discord_message_revisions (
+            aggregate_id, source_revision_marker, normalized_payload_hash,
+            revision_state, first_received_at, last_received_at, created_at, updated_at
+        ) VALUES (?, NULL, ?, 'active', ?, ?, ?, ?)
+        """,
+        (
+            aggregate_id,
+            f"hash-{import_event_id}",
+            timestamp,
+            timestamp,
+            timestamp,
+            timestamp,
+        ),
+    ).lastrowid
+    connection.execute(
+        """
+        INSERT INTO discord_source_events (
+            event_key, revision_id, event_kind, status, raw_text, received_at,
+            last_seen_at, legacy_import_event_id, created_at, updated_at
+        ) VALUES (?, ?, 'MESSAGE_CREATE', 'succeeded', 'durable source', ?, ?, ?, ?, ?)
+        """,
+        (
+            f"event-{import_event_id}",
+            revision_id,
+            timestamp,
+            timestamp,
+            import_event_id,
+            timestamp,
+            timestamp,
+        ),
+    )
 
 
 def test_import_top_page_persists_characters_snapshots_and_raw_message(tmp_path) -> None:
@@ -385,6 +450,249 @@ def test_repair_bugged_imports_preserves_divorce_referenced_character(tmp_path) 
             "SELECT character_id FROM divorce_observations WHERE import_event_id = ?",
             (divorce.import_event_id,),
         ).fetchone()[0] == character_id
+
+
+def test_repair_bugged_imports_repairs_character_details_to_existing_target(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    raw_details = (
+        "Existing Character\n"
+        "Existing Series :female:\n"
+        "Animanga roulette \u00b7 238:kakera: \u00b7 :bronzekey: (**1**)\n"
+        "Claim Rank: #505\n"
+        "Like Rank: #735"
+    )
+    parsed_details = MudaeTextParser().parse_character_details(raw_details)
+    wrong_details = parsed_details.model_copy(
+        update={"name": "Wrong Character", "series": "Wrong Series"}
+    )
+
+    seed = service.import_top_page(
+        MudaeTextParser().parse_top_page("#1 - Existing Character - Existing Series"),
+        "#1 - Existing Character - Existing Series",
+        "seed",
+    )
+    imported = service.import_character_details(
+        wrong_details,
+        "Repair Server",
+        raw_details,
+        "discord",
+        "repair-account",
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        target_character_id = connection.execute(
+            "SELECT id FROM characters WHERE normalized_name = 'existing character'"
+        ).fetchone()[0]
+        import_before = connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        rank_before = connection.execute(
+            "SELECT id, observed_at, import_event_id FROM rank_snapshots WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        server_before = connection.execute(
+            "SELECT id, observed_at, import_event_id FROM server_character_observations "
+            "WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        key_before = connection.execute(
+            "SELECT id, observed_at, import_event_id FROM harem_key_observations "
+            "WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone()
+        unrelated_rank_before = connection.execute(
+            "SELECT * FROM rank_snapshots WHERE import_event_id = ?",
+            (seed.import_event_id,),
+        ).fetchone()
+
+    assert imported.character_id != target_character_id
+    assert service.repair_bugged_imports() == (1, 1)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            (imported.import_event_id,),
+        ).fetchone() == import_before
+        assert connection.execute(
+            "SELECT 1 FROM characters WHERE id = ?", (imported.character_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT character_id, claim_rank, like_rank, observed_at, import_event_id "
+            "FROM rank_snapshots WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone() == (
+            target_character_id,
+            parsed_details.claim_rank,
+            parsed_details.like_rank,
+            rank_before[1],
+            rank_before[2],
+        )
+        assert connection.execute(
+            "SELECT character_id, kakera_value, observed_at, import_event_id "
+            "FROM server_character_observations WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone() == (
+            target_character_id,
+            parsed_details.kakera_value,
+            server_before[1],
+            server_before[2],
+        )
+        assert connection.execute(
+            "SELECT character_id, character_name, normalized_character_name, key_type, "
+            "key_count, kakera_value, observed_at, import_event_id "
+            "FROM harem_key_observations WHERE import_event_id = ?",
+            (imported.import_event_id,),
+        ).fetchone() == (
+            target_character_id,
+            parsed_details.name,
+            repository._normalize(parsed_details.name),
+            parsed_details.key_type,
+            parsed_details.key_count,
+            parsed_details.kakera_value,
+            key_before[1],
+            key_before[2],
+        )
+        assert connection.execute(
+            "SELECT * FROM rank_snapshots WHERE import_event_id = ?",
+            (seed.import_event_id,),
+        ).fetchone() == unrelated_rank_before
+
+
+def test_repair_bugged_imports_durable_refusal_rolls_back_earlier_candidate(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    candidates = (
+        service.import_roll(
+            RollObservation(
+                name="Timer Candidate One",
+                series="Timer Series One",
+                claim_rank=None,
+                kakera_value=0,
+            ),
+            "Server",
+            "account",
+            "You have 0 rolls left. Next rolls reset in 36 min.",
+            "discord",
+        ),
+        service.import_roll(
+            RollObservation(
+                name="Timer Candidate Two",
+                series="Timer Series Two",
+                claim_rank=None,
+                kakera_value=0,
+            ),
+            "Server",
+            "account",
+            "You have 0 rolls left. Next rolls reset in 37 min.",
+            "discord",
+        ),
+    )
+    deletion_order = tuple(
+        {candidate.import_event_id for candidate in candidates} - {}.keys()
+    )
+    earlier_import_event_id, blocked_import_event_id = deletion_order
+    with sqlite3.connect(database_path) as connection:
+        _link_durable_source_event(connection, blocked_import_event_id)
+
+    attempted_deletions: list[int] = []
+    delete_import = repository._delete_import_event_from_connection
+
+    def record_deletion(connection: sqlite3.Connection, import_event_id: int) -> None:
+        attempted_deletions.append(import_event_id)
+        delete_import(connection, import_event_id)
+
+    monkeypatch.setattr(repository, "_delete_import_event_from_connection", record_deletion)
+    before = _repair_state(database_path)
+
+    with pytest.raises(ImportEventDeletionBlockedError):
+        service.repair_bugged_imports()
+
+    assert attempted_deletions == [earlier_import_event_id, blocked_import_event_id]
+    assert _repair_state(database_path) == before
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT legacy_import_event_id FROM discord_source_events"
+        ).fetchone()[0] == blocked_import_event_id
+
+
+def test_repair_bugged_imports_late_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    timer = service.import_roll(
+        RollObservation(
+            name="Timer Candidate",
+            series="Timer Series",
+            claim_rank=None,
+            kakera_value=0,
+        ),
+        "Server",
+        "account",
+        "You have 0 rolls left. Next rolls reset in 36 min.",
+        "discord",
+    )
+    reparsed = service.import_roll(
+        RollObservation(
+            name="Dungeon ni Deai wo Motomeru no",
+            series="wa Machigatteiru Darou ka",
+            claim_rank=None,
+            kakera_value=55,
+        ),
+        "Server",
+        "account",
+        "Hestia\nDungeon ni Deai wo Motomeru no\nwa Machigatteiru Darou ka\n55:kakera:",
+        "discord",
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_late_bugged_import_repair
+            BEFORE UPDATE OF character_id ON roll_observations
+            BEGIN
+                SELECT RAISE(FAIL, 'forced late bugged import repair failure');
+            END
+            """
+        )
+    before = _repair_state(database_path)
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced late bugged import repair failure"
+    ):
+        service.repair_bugged_imports()
+
+    assert _repair_state(database_path) == before
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP TRIGGER fail_late_bugged_import_repair")
+
+    assert service.repair_bugged_imports() == (2, 2)
+    assert service.inspect_bugged_imports() == (0, 0)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (timer.import_event_id,)
+        ).fetchone() is None
+        assert connection.execute(
+            "SELECT raw_message FROM import_events WHERE id = ?", (reparsed.import_event_id,)
+        ).fetchone()[0].startswith("Hestia\n")
+        assert connection.execute(
+            """
+            SELECT characters.name, characters.series
+            FROM roll_observations
+            JOIN characters ON characters.id = roll_observations.character_id
+            WHERE roll_observations.import_event_id = ?
+            """,
+            (reparsed.import_event_id,),
+        ).fetchone() == (
+            "Hestia",
+            "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+        )
 
 
 def test_import_mmy_page_keeps_unresolved_names_without_losing_key_data(tmp_path) -> None:
