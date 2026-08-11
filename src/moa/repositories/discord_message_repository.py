@@ -356,7 +356,7 @@ class DiscordMessageRepository:
             source_observed_at.isoformat() if source_observed_at is not None else None
         )
 
-        with self._connection() as connection:
+        def receive_with_connection(connection: sqlite3.Connection) -> ReceivedMessageEvent:
             aggregate, aggregate_created = self._insert_or_get_aggregate(
                 connection, aggregate_key, received_at_value
             )
@@ -427,6 +427,8 @@ class DiscordMessageRepository:
                 status=str(event["status"]),
                 event_key=str(event["event_key"]),
             )
+
+        return run_write_transaction(self._database_path, receive_with_connection)
 
     def begin_processing_attempt(
         self,

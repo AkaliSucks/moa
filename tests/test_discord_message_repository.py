@@ -327,7 +327,15 @@ def test_conflicting_immutable_payload_rolls_back_without_overwrite(
 def test_mid_transaction_failure_leaves_no_orphan_rows(tmp_path) -> None:
     database_path = tmp_path / "messages.db"
     repository = DiscordMessageRepository(database_path)
+    existing = receive(repository)
     with connect(database_path) as connection:
+        existing_row = tuple(
+            connection.execute(
+                "SELECT id, event_key, revision_id, delivery_count, status "
+                "FROM discord_source_events WHERE id = ?",
+                (existing.source_event_id,),
+            ).fetchone()
+        )
         connection.execute(
             """
             CREATE TRIGGER fail_discord_source_event_insert
@@ -338,10 +346,40 @@ def test_mid_transaction_failure_leaves_no_orphan_rows(tmp_path) -> None:
             """
         )
 
+    other_message = aggregate(message_id="message-2")
     with pytest.raises(sqlite3.IntegrityError, match="forced receive failure"):
-        receive(repository)
+        receive(
+            repository,
+            message=other_message,
+            message_revision=revision(other_message),
+            event_key="event-2",
+        )
 
-    assert counts(database_path) == (0, 0, 0, 0)
+    assert counts(database_path) == (1, 1, 1, 0)
+    with connect(database_path) as connection:
+        row_after_failure = tuple(
+            connection.execute(
+                "SELECT id, event_key, revision_id, delivery_count, status "
+                "FROM discord_source_events WHERE id = ?",
+                (existing.source_event_id,),
+            ).fetchone()
+        )
+        connection.execute("DROP TRIGGER fail_discord_source_event_insert")
+    assert row_after_failure == existing_row
+
+    recovered = receive(
+        repository,
+        message=other_message,
+        message_revision=revision(other_message),
+        event_key="event-2",
+    )
+
+    assert recovered.aggregate_created is True
+    assert recovered.revision_created is True
+    assert recovered.source_event_created is True
+    assert recovered.delivery_count == 1
+    assert recovered.status == "received"
+    assert counts(database_path) == (2, 2, 2, 0)
 
 
 def test_foreign_keys_are_enabled_and_database_is_valid(tmp_path) -> None:
@@ -369,6 +407,211 @@ def test_restart_preserves_replay_identity_and_creates_no_attempt(tmp_path) -> N
     )
     assert second.delivery_count == 2
     assert counts(database_path)[3] == 0
+
+
+def test_public_receive_message_uses_one_runner_callback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    original_runner = discord_message_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            callback_states.append(connection.in_transaction)
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    def unexpected_connection():
+        raise AssertionError("message receipt opened an independent repository connection")
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    monkeypatch.setattr(repository, "_connection", unexpected_connection)
+
+    result = receive(repository)
+
+    assert result.status == "received"
+    assert result.delivery_count == 1
+    assert callback_states == [True]
+
+
+def test_receive_message_serializes_competing_exact_duplicate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_entered = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    results = {}
+    failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "second-message-receipt":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                first_callback_entered.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first message-receipt callback was not released"
+            else:
+                second_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    first_time = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+    duplicate_time = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
+
+    def receive_first() -> None:
+        try:
+            results["first"] = receive(first_repository, received_at=first_time)
+        except BaseException as error:
+            failures.append(error)
+
+    def receive_duplicate() -> None:
+        try:
+            results["duplicate"] = receive(
+                second_repository, received_at=duplicate_time
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    first_thread = threading.Thread(target=receive_first, name="first-message-receipt")
+    second_thread = threading.Thread(
+        target=receive_duplicate, name="second-message-receipt"
+    )
+    first_thread.start()
+    assert first_callback_entered.wait(_THREAD_TIMEOUT), "first callback did not enter"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert failures == []
+    first = results["first"]
+    duplicate = results["duplicate"]
+    assert (
+        duplicate.aggregate_id,
+        duplicate.revision_id,
+        duplicate.source_event_id,
+    ) == (first.aggregate_id, first.revision_id, first.source_event_id)
+    assert first.source_event_created is True
+    assert duplicate.aggregate_created is False
+    assert duplicate.revision_created is False
+    assert duplicate.source_event_created is False
+    assert duplicate.delivery_count == 2
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    assert counts(database_path) == (1, 1, 1, 0)
+    with connect(database_path) as connection:
+        aggregate_row = connection.execute(
+            "SELECT first_received_at, last_received_at FROM discord_message_aggregates"
+        ).fetchone()
+        revision_row = connection.execute(
+            "SELECT first_received_at, last_received_at FROM discord_message_revisions"
+        ).fetchone()
+        event_row = connection.execute(
+            "SELECT received_at, last_seen_at, delivery_count FROM discord_source_events"
+        ).fetchone()
+    assert tuple(aggregate_row) == (first_time.isoformat(), duplicate_time.isoformat())
+    assert tuple(revision_row) == (first_time.isoformat(), duplicate_time.isoformat())
+    assert tuple(event_row) == (first_time.isoformat(), duplicate_time.isoformat(), 2)
+
+
+def test_receive_message_serializes_competing_immutable_conflict(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_entered = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    first_results = []
+    second_failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "conflicting-message-receipt":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                first_callback_entered.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first message-receipt callback was not released"
+            else:
+                second_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+
+    def receive_first() -> None:
+        first_results.append(receive(first_repository))
+
+    def receive_conflict() -> None:
+        try:
+            receive(second_repository, raw_text="conflicting immutable text")
+        except BaseException as error:
+            second_failures.append(error)
+
+    first_thread = threading.Thread(target=receive_first, name="first-message-receipt")
+    second_thread = threading.Thread(
+        target=receive_conflict, name="conflicting-message-receipt"
+    )
+    first_thread.start()
+    assert first_callback_entered.wait(_THREAD_TIMEOUT), "first callback did not enter"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert len(first_results) == 1
+    assert len(second_failures) == 1
+    assert isinstance(second_failures[0], DiscordMessageReceiveConflictError)
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    assert counts(database_path) == (1, 1, 1, 0)
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT raw_text, delivery_count, status FROM discord_source_events"
+        ).fetchone()
+    assert tuple(row) == ("raw message", 1, "received")
 
 
 def test_begin_processing_attempt_creates_attempt_one_and_marks_event_processing(tmp_path) -> None:
