@@ -1476,6 +1476,307 @@ def test_exact_account_attribution_replay_is_idempotent(
     assert tuple(row) == (first_time.isoformat(), first_time.isoformat())
 
 
+def test_public_account_attribution_uses_one_runner_callback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    original_runner = discord_message_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            callback_states.append(connection.in_transaction)
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    def unexpected_connection():
+        raise AssertionError("account attribution opened an independent repository connection")
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    monkeypatch.setattr(repository, "_connection", unexpected_connection)
+
+    result = record_account_attribution(repository, received.source_event_id)
+
+    assert result.status == "resolved"
+    assert result.server_name == "Server A"
+    assert result.account_name == "Account A"
+    assert callback_states == [True]
+
+
+def test_account_attribution_failure_rolls_back_and_same_database_recovers(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    recorded_at = datetime(2026, 7, 18, 3, 2, tzinfo=timezone.utc)
+    with connect(database_path) as connection:
+        source_before = tuple(
+            connection.execute(
+                """
+                SELECT id, event_key, revision_id, delivery_count, status,
+                       legacy_import_event_id
+                FROM discord_source_events
+                WHERE id = ?
+                """,
+                (received.source_event_id,),
+            ).fetchone()
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_account_attribution_insert
+            BEFORE INSERT ON discord_source_event_account_attributions
+            BEGIN
+                SELECT RAISE(ABORT, 'forced account attribution failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced account attribution failure"):
+        record_account_attribution(
+            repository,
+            received.source_event_id,
+            recorded_at=recorded_at,
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_event_account_attributions"
+        ).fetchone()[0] == 0
+        source_after_failure = tuple(
+            connection.execute(
+                """
+                SELECT id, event_key, revision_id, delivery_count, status,
+                       legacy_import_event_id
+                FROM discord_source_events
+                WHERE id = ?
+                """,
+                (received.source_event_id,),
+            ).fetchone()
+        )
+        connection.execute("DROP TRIGGER fail_account_attribution_insert")
+    assert source_after_failure == source_before
+
+    recovered = record_account_attribution(
+        repository,
+        received.source_event_id,
+        recorded_at=recorded_at,
+    )
+
+    assert recovered.status == "resolved"
+    assert recovered.server_name == "Server A"
+    assert recovered.account_name == "Account A"
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM discord_source_event_account_attributions"
+        ).fetchall()
+        source_after_recovery = tuple(
+            connection.execute(
+                """
+                SELECT id, event_key, revision_id, delivery_count, status,
+                       legacy_import_event_id
+                FROM discord_source_events
+                WHERE id = ?
+                """,
+                (received.source_event_id,),
+            ).fetchone()
+        )
+    assert len(rows) == 1
+    assert dict(rows[0]) == {
+        "source_event_id": received.source_event_id,
+        "status": "resolved",
+        "server_name": "Server A",
+        "account_name": "Account A",
+        "created_at": recorded_at.isoformat(),
+        "updated_at": recorded_at.isoformat(),
+    }
+    assert source_after_recovery == source_before
+
+
+def test_account_attribution_serializes_competing_exact_replay(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    received = receive(first_repository)
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_entered = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    results: list[DiscordSourceEventAccountAttribution] = []
+    failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "second-account-attribution":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                first_callback_entered.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first account-attribution callback was not released"
+            else:
+                second_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    first_time = datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc)
+    replay_time = datetime(2026, 7, 18, 4, 0, tzinfo=timezone.utc)
+
+    def record_first() -> None:
+        try:
+            results.append(
+                record_account_attribution(
+                    first_repository,
+                    received.source_event_id,
+                    recorded_at=first_time,
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def record_replay() -> None:
+        try:
+            results.append(
+                record_account_attribution(
+                    second_repository,
+                    received.source_event_id,
+                    recorded_at=replay_time,
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    first_thread = threading.Thread(target=record_first, name="first-account-attribution")
+    second_thread = threading.Thread(target=record_replay, name="second-account-attribution")
+    first_thread.start()
+    assert first_callback_entered.wait(_THREAD_TIMEOUT), "first callback did not enter"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert failures == []
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM discord_source_event_account_attributions"
+        ).fetchall()
+    assert len(rows) == 1
+    assert tuple(rows[0]) == (
+        received.source_event_id,
+        "resolved",
+        "Server A",
+        "Account A",
+        first_time.isoformat(),
+        first_time.isoformat(),
+    )
+
+
+def test_account_attribution_serializes_competing_resolved_conflict(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    received = receive(first_repository)
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_entered = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    first_results: list[DiscordSourceEventAccountAttribution] = []
+    second_failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "conflicting-account-attribution":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            if callback_count == 1:
+                first_callback_entered.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first account-attribution callback was not released"
+            else:
+                second_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+
+    def record_first() -> None:
+        first_results.append(
+            record_account_attribution(first_repository, received.source_event_id)
+        )
+
+    def record_conflict() -> None:
+        try:
+            record_account_attribution(
+                second_repository,
+                received.source_event_id,
+                server_name="Server B",
+                account_name="Account B",
+            )
+        except BaseException as error:
+            second_failures.append(error)
+
+    first_thread = threading.Thread(target=record_first, name="first-account-attribution")
+    second_thread = threading.Thread(
+        target=record_conflict, name="conflicting-account-attribution"
+    )
+    first_thread.start()
+    assert first_callback_entered.wait(_THREAD_TIMEOUT), "first callback did not enter"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert len(first_results) == 1
+    assert len(second_failures) == 1
+    assert isinstance(second_failures[0], DiscordSourceEventAccountAttributionConflictError)
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT status, server_name, account_name "
+            "FROM discord_source_event_account_attributions"
+        ).fetchone()
+    assert tuple(row) == ("resolved", "Server A", "Account A")
+
+
 @pytest.mark.parametrize("initial_status", ["unresolved", "ambiguous"])
 def test_unresolved_or_ambiguous_account_attribution_can_resolve(
     tmp_path, initial_status: str
