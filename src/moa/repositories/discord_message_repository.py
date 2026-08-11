@@ -613,7 +613,7 @@ class DiscordMessageRepository:
             raise TypeError("failure_detail must be a string or None")
         normalized_finished_at = self._normalize_processing_datetime(finished_at, "finished_at")
 
-        with self._connection() as connection:
+        def failure_with_connection(connection: sqlite3.Connection) -> ProcessingAttemptResult:
             event, attempt = self._load_processing_rows(
                 connection, source_event_id=source_event_id, attempt_id=attempt_id
             )
@@ -653,6 +653,8 @@ class DiscordMessageRepository:
                     f"Discord source event {source_event_id} is no longer processing"
                 )
             return self._processing_result(connection, source_event_id, attempt_id)
+
+        return run_write_transaction(self._database_path, failure_with_connection)
 
     def get_server_attribution(
         self, source_event_id: int

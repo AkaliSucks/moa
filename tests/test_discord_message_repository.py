@@ -779,6 +779,51 @@ def test_failed_completion_stores_details_and_marks_event_failed(tmp_path) -> No
     assert row["finished_at"] == finished_at.isoformat()
 
 
+def test_public_mark_processing_failure_uses_one_runner_callback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    original_runner = discord_message_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            callback_states.append(connection.in_transaction)
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    def unexpected_connection():
+        raise AssertionError("processing failure opened an independent repository connection")
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    monkeypatch.setattr(repository, "_connection", unexpected_connection)
+
+    result = repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="failed",
+        retryable=True,
+        failure_code="temporary",
+        failure_detail="retry later",
+        finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+
+    assert result.attempt_status == "failed"
+    assert result.source_event_status == "failed"
+    assert callback_states == [True]
+
+
 def test_unresolved_attribution_marks_both_rows(tmp_path) -> None:
     database_path = tmp_path / "messages.db"
     repository = DiscordMessageRepository(database_path)
@@ -809,6 +854,105 @@ def test_unresolved_attribution_marks_both_rows(tmp_path) -> None:
             "SELECT status FROM discord_processing_attempts"
         ).fetchall()
     assert [row[0] for row in statuses] == ["unresolved_attribution", "unresolved_attribution"]
+
+
+def test_repeated_identical_processing_failure_is_rejected_without_mutation(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    finished_at = datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc)
+    values = {
+        "source_event_id": received.source_event_id,
+        "attempt_id": attempt.attempt_id,
+        "status": "failed",
+        "retryable": True,
+        "failure_code": "temporary",
+        "failure_detail": "retry later",
+        "finished_at": finished_at,
+    }
+    repository.mark_processing_failure(**values)
+    with connect(database_path) as connection:
+        before = tuple(
+            connection.execute(
+                "SELECT status, retryable, finished_at, failure_code, failure_detail "
+                "FROM discord_processing_attempts WHERE id = ?",
+                (attempt.attempt_id,),
+            ).fetchone()
+        ) + tuple(
+            connection.execute(
+                "SELECT status, updated_at FROM discord_source_events WHERE id = ?",
+                (received.source_event_id,),
+            ).fetchone()
+        )
+
+    with pytest.raises(DiscordMessageProcessingConflictError, match="not processing"):
+        repository.mark_processing_failure(**values)
+
+    with connect(database_path) as connection:
+        after = tuple(
+            connection.execute(
+                "SELECT status, retryable, finished_at, failure_code, failure_detail "
+                "FROM discord_processing_attempts WHERE id = ?",
+                (attempt.attempt_id,),
+            ).fetchone()
+        ) + tuple(
+            connection.execute(
+                "SELECT status, updated_at FROM discord_source_events WHERE id = ?",
+                (received.source_event_id,),
+            ).fetchone()
+        )
+    assert after == before
+
+
+def test_processing_failure_rejects_attempt_owned_by_another_source_without_writes(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first = receive(repository)
+    second_message = aggregate(message_id="message-2")
+    second = receive(
+        repository,
+        message=second_message,
+        message_revision=revision(second_message),
+        event_key="event-2",
+    )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=first.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(DiscordMessageProcessingConflictError, match="belongs to another"):
+        repository.mark_processing_failure(
+            source_event_id=second.source_event_id,
+            attempt_id=attempt.attempt_id,
+            status="failed",
+            retryable=True,
+            failure_code="temporary",
+            failure_detail=None,
+            finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+        )
+
+    with connect(database_path) as connection:
+        event_statuses = connection.execute(
+            "SELECT status FROM discord_source_events ORDER BY id"
+        ).fetchall()
+        attempt_rows = connection.execute(
+            "SELECT source_event_id, status, retryable, finished_at, failure_code, failure_detail "
+            "FROM discord_processing_attempts"
+        ).fetchall()
+    assert [row[0] for row in event_statuses] == ["processing", "received"]
+    assert [tuple(row) for row in attempt_rows] == [
+        (first.source_event_id, "processing", 0, None, None, None)
+    ]
 
 
 def test_retryable_unresolved_attribution_allows_next_processing_attempt(tmp_path) -> None:
@@ -1235,6 +1379,233 @@ def test_begin_processing_attempt_serializes_competing_same_event_callers(
     assert event_status == "processing"
 
 
+def test_processing_failure_serializes_competing_same_attempt_callers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    received = receive(first_repository)
+    attempt = first_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_completed = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    first_results = []
+    first_failures: list[BaseException] = []
+    second_failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "second-processing-failure":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            if threading.current_thread().name == "first-processing-failure":
+                result = callback(connection)
+                first_callback_completed.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first processing-failure callback was not released"
+                return result
+            second_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+
+    def fail_first() -> None:
+        try:
+            first_results.append(
+                first_repository.mark_processing_failure(
+                    source_event_id=received.source_event_id,
+                    attempt_id=attempt.attempt_id,
+                    status="failed",
+                    retryable=True,
+                    failure_code="first_failure",
+                    failure_detail="first terminal decision",
+                    finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+                )
+            )
+        except BaseException as error:
+            first_failures.append(error)
+
+    def fail_second() -> None:
+        try:
+            second_repository.mark_processing_failure(
+                source_event_id=received.source_event_id,
+                attempt_id=attempt.attempt_id,
+                status="unresolved_attribution",
+                retryable=False,
+                failure_code="second_failure",
+                failure_detail="competing terminal decision",
+                finished_at=datetime(2026, 7, 18, 2, 2, tzinfo=timezone.utc),
+            )
+        except BaseException as error:
+            second_failures.append(error)
+
+    first_thread = threading.Thread(target=fail_first, name="first-processing-failure")
+    second_thread = threading.Thread(target=fail_second, name="second-processing-failure")
+    first_thread.start()
+    assert first_callback_completed.wait(_THREAD_TIMEOUT), "first callback did not complete"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert first_failures == []
+    assert len(first_results) == 1
+    assert first_results[0].attempt_status == "failed"
+    assert len(second_failures) == 1
+    assert isinstance(second_failures[0], DiscordMessageProcessingConflictError)
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    with connect(database_path) as connection:
+        attempt_row = connection.execute(
+            "SELECT status, retryable, failure_code, failure_detail "
+            "FROM discord_processing_attempts WHERE id = ?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        event_status = connection.execute(
+            "SELECT status FROM discord_source_events WHERE id = ?",
+            (received.source_event_id,),
+        ).fetchone()[0]
+    assert tuple(attempt_row) == (
+        "failed",
+        1,
+        "first_failure",
+        "first terminal decision",
+    )
+    assert event_status == "failed"
+
+
+def test_processing_failure_serializes_after_runner_owned_success(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    success_repository = DiscordMessageRepository(database_path)
+    failure_repository = DiscordMessageRepository(database_path)
+    received = receive(success_repository)
+    attempt = success_repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    original_runner = discord_message_repository_module.run_write_transaction
+    success_callback_completed = threading.Event()
+    release_success_callback = threading.Event()
+    failure_runner_called = threading.Event()
+    failure_callback_entered = threading.Event()
+    success_results = []
+    success_failures: list[BaseException] = []
+    failure_failures: list[BaseException] = []
+
+    def observed_failure_runner(database_path, callback):
+        failure_runner_called.set()
+
+        def observed_failure_callback(connection):
+            failure_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_failure_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module,
+        "run_write_transaction",
+        observed_failure_runner,
+    )
+
+    def complete_success() -> None:
+        try:
+            def success_with_connection(connection):
+                result = success_repository._mark_processing_success_with_connection(
+                    connection,
+                    source_event_id=received.source_event_id,
+                    attempt_id=attempt.attempt_id,
+                    finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+                    legacy_import_event_id=None,
+                )
+                success_callback_completed.set()
+                assert release_success_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "runner-owned success callback was not released"
+                return result
+
+            success_results.append(original_runner(database_path, success_with_connection))
+        except BaseException as error:
+            success_failures.append(error)
+
+    def complete_failure() -> None:
+        try:
+            failure_repository.mark_processing_failure(
+                source_event_id=received.source_event_id,
+                attempt_id=attempt.attempt_id,
+                status="failed",
+                retryable=True,
+                failure_code="late_failure",
+                failure_detail="must not overwrite success",
+                finished_at=datetime(2026, 7, 18, 2, 2, tzinfo=timezone.utc),
+            )
+        except BaseException as error:
+            failure_failures.append(error)
+
+    success_thread = threading.Thread(target=complete_success, name="runner-owned-success")
+    failure_thread = threading.Thread(target=complete_failure, name="public-processing-failure")
+    success_thread.start()
+    assert success_callback_completed.wait(_THREAD_TIMEOUT), "success callback did not complete"
+    failure_thread.start()
+    assert failure_runner_called.wait(_THREAD_TIMEOUT), "failure caller did not reach the runner"
+    assert not failure_callback_entered.is_set()
+
+    release_success_callback.set()
+    success_thread.join(_THREAD_TIMEOUT)
+    failure_thread.join(_THREAD_TIMEOUT)
+
+    assert not success_thread.is_alive()
+    assert not failure_thread.is_alive()
+    assert success_failures == []
+    assert len(success_results) == 1
+    assert success_results[0].attempt_status == "succeeded"
+    assert len(failure_failures) == 1
+    assert isinstance(failure_failures[0], DiscordMessageProcessingConflictError)
+    assert failure_callback_entered.is_set()
+    with connect(database_path) as connection:
+        attempt_row = connection.execute(
+            "SELECT status, retryable, finished_at, failure_code, failure_detail "
+            "FROM discord_processing_attempts WHERE id = ?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        event_status = connection.execute(
+            "SELECT status FROM discord_source_events WHERE id = ?",
+            (received.source_event_id,),
+        ).fetchone()[0]
+    assert tuple(attempt_row) == (
+        "succeeded",
+        0,
+        "2026-07-18T02:01:00+00:00",
+        None,
+        None,
+    )
+    assert event_status == "succeeded"
+
+
 @pytest.mark.parametrize("completion", ["success", "failure"])
 def test_completion_mid_transaction_failure_rolls_back_both_rows(tmp_path, completion: str) -> None:
     database_path = tmp_path / "messages.db"
@@ -1281,6 +1652,92 @@ def test_completion_mid_transaction_failure_rolls_back_both_rows(tmp_path, compl
     assert event == "processing"
     assert row["status"] == "processing"
     assert row["finished_at"] is None
+
+
+def test_processing_failure_second_write_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    finished_at = datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER fail_processing_failure_event_update
+            BEFORE UPDATE OF status ON discord_source_events
+            WHEN NEW.status = 'failed'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced processing failure event update');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced processing failure event update"
+    ):
+        repository.mark_processing_failure(
+            source_event_id=received.source_event_id,
+            attempt_id=attempt.attempt_id,
+            status="failed",
+            retryable=True,
+            failure_code="temporary",
+            failure_detail="retry later",
+            finished_at=finished_at,
+        )
+
+    with connect(database_path) as connection:
+        event_status = connection.execute(
+            "SELECT status FROM discord_source_events WHERE id = ?",
+            (received.source_event_id,),
+        ).fetchone()[0]
+        attempt_after_failure = connection.execute(
+            "SELECT status, retryable, finished_at, failure_code, failure_detail "
+            "FROM discord_processing_attempts WHERE id = ?",
+            (attempt.attempt_id,),
+        ).fetchone()
+        attempt_count = connection.execute(
+            "SELECT COUNT(*) FROM discord_processing_attempts"
+        ).fetchone()[0]
+        connection.execute("DROP TRIGGER fail_processing_failure_event_update")
+    assert event_status == "processing"
+    assert tuple(attempt_after_failure) == ("processing", 0, None, None, None)
+    assert attempt_count == 1
+
+    recovered = repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="failed",
+        retryable=True,
+        failure_code="temporary",
+        failure_detail="retry later",
+        finished_at=finished_at,
+    )
+
+    assert recovered.attempt_status == "failed"
+    assert recovered.source_event_status == "failed"
+    assert recovered.retryable is True
+    assert recovered.finished_at == finished_at
+    assert recovered.failure_code == "temporary"
+    assert recovered.failure_detail == "retry later"
+    with connect(database_path) as connection:
+        final_attempts = connection.execute(
+            "SELECT status, retryable, finished_at, failure_code, failure_detail "
+            "FROM discord_processing_attempts"
+        ).fetchall()
+        final_events = connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchall()
+    assert [tuple(row) for row in final_attempts] == [
+        ("failed", 1, finished_at.isoformat(), "temporary", "retry later")
+    ]
+    assert [row[0] for row in final_events] == ["failed"]
 
 
 def test_processing_lifecycle_survives_repository_reconstruction(tmp_path) -> None:
