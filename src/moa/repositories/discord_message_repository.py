@@ -454,7 +454,7 @@ class DiscordMessageRepository:
             normalized_lease_expires_at.isoformat() if normalized_lease_expires_at is not None else None
         )
 
-        with self._connection() as connection:
+        def begin_with_connection(connection: sqlite3.Connection) -> ProcessingAttemptResult:
             event = connection.execute(
                 "SELECT * FROM discord_source_events WHERE id = ?",
                 (source_event_id,),
@@ -509,6 +509,8 @@ class DiscordMessageRepository:
                     f"Discord source event {source_event_id} could not be marked processing"
                 )
             return self._processing_result(connection, source_event_id, attempt_id)
+
+        return run_write_transaction(self._database_path, begin_with_connection)
 
     def mark_processing_success(
         self,
