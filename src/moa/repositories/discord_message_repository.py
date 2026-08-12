@@ -608,7 +608,8 @@ class DiscordMessageRepository:
         self._validate_processing_identity(source_event_id=source_event_id)
         self._validate_processing_identity(attempt_id=attempt_id)
         normalized_finished_at = self._normalize_processing_datetime(finished_at, "finished_at")
-        with self._connection() as connection:
+
+        def success_with_connection(connection: sqlite3.Connection) -> ProcessingAttemptResult:
             return self._mark_processing_success_with_connection(
                 connection,
                 source_event_id=source_event_id,
@@ -616,6 +617,8 @@ class DiscordMessageRepository:
                 finished_at=normalized_finished_at,
                 legacy_import_event_id=legacy_import_event_id,
             )
+
+        return run_write_transaction(self._database_path, success_with_connection)
 
     def _mark_processing_success_with_connection(
         self,
