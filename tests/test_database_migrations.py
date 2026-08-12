@@ -1,13 +1,16 @@
 import sqlite3
+import threading
 
 import pytest
 
 from moa.database.migrations import (
     CATALOG_MIGRATIONS,
+    CATALOG_TABLES,
     Migration,
     MigrationError,
     run_migrations,
 )
+from moa.database.sqlite import connect
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -431,6 +434,183 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
                 row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
             }
             assert actual == columns
+
+
+def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+
+    class FaultingScriptConnection:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def executescript(self, script):
+            next_table = "CREATE TABLE IF NOT EXISTS import_events"
+            faulting_script = script.replace(
+                next_table,
+                "SELECT * FROM injected_missing_bootstrap_table;\n" + next_table,
+                1,
+            )
+            return self._connection.executescript(faulting_script)
+
+    def faulting_connection(repository):
+        return FaultingScriptConnection(connect(repository._database_path))
+
+    with monkeypatch.context() as fault:
+        fault.setattr(CatalogRepository, "_connection", faulting_connection)
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="no such table: injected_missing_bootstrap_table",
+        ):
+            CatalogRepository(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall() == []
+
+    CatalogRepository(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert CATALOG_TABLES <= tables
+        assert {
+            "discord_message_aggregates",
+            "discord_message_revisions",
+            "discord_source_events",
+            "discord_processing_attempts",
+            "discord_projection_links",
+            "discord_source_event_server_attributions",
+            "discord_source_event_account_attributions",
+            "discord_antidisable_workflows",
+            "discord_antidisable_response_bindings",
+        } <= tables
+        assert "schema_migrations" in tables
+        assert not any(name.endswith("_legacy") for name in tables)
+    assert _migration_rows(database_path) == [
+        (1, "catalog-schema-baseline"),
+        (2, "durable-discord-message-ingestion"),
+        (3, "durable-discord-projection-links"),
+        (4, "durable-discord-source-event-server-attributions"),
+        (5, "durable-discord-source-event-account-attributions"),
+        (6, "durable-discord-antidisable-workflow-bindings"),
+    ]
+
+
+def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    with connect(database_path):
+        pass
+
+    owner_ready = threading.Event()
+    competitor_ready = threading.Event()
+    start_owner = threading.Event()
+    start_competitor = threading.Event()
+    owner_holding_transaction = threading.Event()
+    competitor_attempted_script = threading.Event()
+    release_owner = threading.Event()
+    competitor_finished = threading.Event()
+    failures = []
+
+    class ObservedScriptConnection:
+        def __init__(self, connection, role):
+            self._connection = connection
+            self._role = role
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def executescript(self, script):
+            if self._role == "owner":
+                result = self._connection.executescript(script)
+                assert self._connection.in_transaction is True
+                owner_holding_transaction.set()
+                assert release_owner.wait(5), "schema transaction was not released"
+                return result
+            competitor_attempted_script.set()
+            return self._connection.executescript(script)
+
+    def run_bootstrap(role, ready, start):
+        connection = connect(database_path)
+        repository = object.__new__(CatalogRepository)
+        repository._database_path = database_path
+        repository._connection = lambda: ObservedScriptConnection(connection, role)
+        ready.set()
+        try:
+            assert start.wait(5), f"{role} bootstrap was not started"
+            repository._create_schema()
+            if role == "competitor":
+                competitor_finished.set()
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.close()
+
+    owner_thread = threading.Thread(
+        target=run_bootstrap,
+        args=("owner", owner_ready, start_owner),
+    )
+    competitor_thread = threading.Thread(
+        target=run_bootstrap,
+        args=("competitor", competitor_ready, start_competitor),
+    )
+    owner_thread.start()
+    competitor_thread.start()
+    assert owner_ready.wait(5), "owner connection was not ready"
+    assert competitor_ready.wait(5), "competitor connection was not ready"
+
+    start_owner.set()
+    assert owner_holding_transaction.wait(5), "owner did not acquire schema transaction"
+    start_competitor.set()
+    assert competitor_attempted_script.wait(5), "competitor did not attempt schema script"
+    assert not competitor_finished.is_set()
+
+    release_owner.set()
+    owner_thread.join(timeout=5)
+    competitor_thread.join(timeout=5)
+    assert not owner_thread.is_alive(), "owner bootstrap did not terminate"
+    assert not competitor_thread.is_alive(), "competitor bootstrap did not terminate"
+    assert failures == []
+    assert competitor_finished.is_set()
+
+    CatalogRepository(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        assert CATALOG_TABLES <= tables
+        assert not any(name.endswith("_legacy") for name in tables)
+    assert [row[0] for row in _migration_rows(database_path)] == [1, 2, 3, 4, 5, 6]
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:

@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,6 +99,21 @@ from moa.parser.mudae import MudaeParseError, MudaeTextParser
 
 class ImportEventDeletionBlockedError(RuntimeError):
     """Raised when durable source state still owns an import event."""
+
+
+@contextmanager
+def _schema_bootstrap_transaction(connection: sqlite3.Connection):
+    """Commit or roll back one explicitly started legacy-schema transaction."""
+    try:
+        yield
+        connection.commit()
+    except BaseException:
+        try:
+            connection.rollback()
+        except Exception:
+            # Cleanup must not replace the schema or commit exception being propagated.
+            pass
+        raise
 
 
 class CatalogRepositoryProtocol(Protocol):
@@ -4080,9 +4096,11 @@ class CatalogRepository:
             run_migrations(connection, CATALOG_MIGRATIONS)
 
     def _create_schema(self) -> None:
-        with self._connection() as connection:
+        with self._connection() as connection, _schema_bootstrap_transaction(connection):
             connection.executescript(
                 """
+                BEGIN IMMEDIATE;
+
                 CREATE TABLE IF NOT EXISTS characters (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
