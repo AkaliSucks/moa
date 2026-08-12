@@ -187,43 +187,49 @@ def run_migrations(
     """Apply pending migrations in order, recording each successful migration."""
     definitions = _validate_migrations(migrations)
     known_versions = {migration.version for migration in definitions}
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TEXT NOT NULL
-        )
-        """
-    )
-    applied_rows = connection.execute(
-        "SELECT version, name FROM schema_migrations ORDER BY version"
-    ).fetchall()
-    applied_versions = [row[0] for row in applied_rows]
-    newer = sorted(set(applied_versions) - known_versions)
-    if newer:
-        raise MigrationError(
-            "Database has unknown newer migration version(s): "
-            + ", ".join(str(version) for version in newer)
-            + "."
-        )
-    expected_applied = list(range(1, len(applied_versions) + 1))
-    if applied_versions != expected_applied:
-        raise MigrationError("Applied migrations must form a contiguous prefix.")
-
-    for migration in definitions:
-        if migration.version in applied_versions:
-            continue
+    while True:
         try:
-            connection.execute("BEGIN")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
+            applied_rows = connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            applied_versions = [row[0] for row in applied_rows]
+            newer = sorted(set(applied_versions) - known_versions)
+            if newer:
+                raise MigrationError(
+                    "Database has unknown newer migration version(s): "
+                    + ", ".join(str(version) for version in newer)
+                    + "."
+                )
+            expected_applied = list(range(1, len(applied_versions) + 1))
+            if applied_versions != expected_applied:
+                raise MigrationError("Applied migrations must form a contiguous prefix.")
+            if len(applied_versions) == len(definitions):
+                connection.commit()
+                return
+
+            migration = definitions[len(applied_versions)]
             migration.apply(connection)
             connection.execute(
                 "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
                 (migration.version, migration.name.strip(), datetime.now(timezone.utc).isoformat()),
             )
             connection.commit()
-        except Exception:
-            connection.rollback()
+        except BaseException:
+            try:
+                connection.rollback()
+            except Exception:
+                # Cleanup must not replace the migration or commit exception.
+                pass
             raise
 
 

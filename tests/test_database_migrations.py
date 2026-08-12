@@ -1773,6 +1773,195 @@ def test_ordered_migrations_run_once_in_ascending_order(tmp_path) -> None:
         ).fetchall() == [(1,), (2,)]
 
 
+def test_competing_migrators_recheck_versions_after_immediate_ownership(tmp_path) -> None:
+    database_path = tmp_path / "concurrent-migration.db"
+    _make_version_5_database(database_path)
+
+    migration_a_applied = threading.Event()
+    release_migration_a = threading.Event()
+    migration_b_ready = threading.Event()
+    start_migration_b = threading.Event()
+    migration_b_begin_attempted = threading.Event()
+    migration_b_read_versions = threading.Event()
+    migration_b_body_executed = threading.Event()
+    migration_b_finished = threading.Event()
+    failures = []
+    execution_count = 0
+    execution_count_lock = threading.Lock()
+
+    class ObservedConnection:
+        def __init__(self, connection, role):
+            self._connection = connection
+            self._role = role
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def execute(self, sql, parameters=()):
+            if self._role == "b" and sql == "BEGIN IMMEDIATE":
+                migration_b_begin_attempted.set()
+            result = self._connection.execute(sql, parameters)
+            if (
+                self._role == "b"
+                and sql == "SELECT version, name FROM schema_migrations ORDER BY version"
+            ):
+                migration_b_read_versions.set()
+            return result
+
+    def apply_migration_a(connection):
+        nonlocal execution_count
+        CATALOG_MIGRATIONS[5].apply(connection)
+        with execution_count_lock:
+            execution_count += 1
+        migration_a_applied.set()
+        assert release_migration_a.wait(5), "migration A was not released"
+
+    def apply_migration_b(connection):
+        nonlocal execution_count
+        migration_b_body_executed.set()
+        CATALOG_MIGRATIONS[5].apply(connection)
+        with execution_count_lock:
+            execution_count += 1
+
+    migrations_a = CATALOG_MIGRATIONS[:5] + (
+        Migration(6, CATALOG_MIGRATIONS[5].name, apply_migration_a),
+    )
+    migrations_b = CATALOG_MIGRATIONS[:5] + (
+        Migration(6, CATALOG_MIGRATIONS[5].name, apply_migration_b),
+    )
+
+    with connect(database_path) as observer_a, connect(database_path) as observer_b:
+        assert [
+            row[0]
+            for row in observer_a.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        ] == [1, 2, 3, 4, 5]
+        assert [
+            row[0]
+            for row in observer_b.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        ] == [1, 2, 3, 4, 5]
+
+    def run_migrator(role, migrations):
+        connection = connect(database_path)
+        try:
+            if role == "b":
+                migration_b_ready.set()
+                assert start_migration_b.wait(5), "migration B was not started"
+            run_migrations(ObservedConnection(connection, role), migrations)
+            if role == "b":
+                migration_b_finished.set()
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.close()
+
+    migrator_a = threading.Thread(target=run_migrator, args=("a", migrations_a))
+    migrator_b = threading.Thread(target=run_migrator, args=("b", migrations_b))
+    migrator_b.start()
+    assert migration_b_ready.wait(5), "migration B connection was not ready"
+    migrator_a.start()
+    assert migration_a_applied.wait(5), "migration A did not apply migration 6"
+
+    start_migration_b.set()
+    assert migration_b_begin_attempted.wait(5), "migration B did not attempt ownership"
+    assert not migration_b_read_versions.is_set()
+    assert not migration_b_body_executed.is_set()
+    assert not migration_b_finished.is_set()
+
+    release_migration_a.set()
+    migrator_a.join(timeout=5)
+    migrator_b.join(timeout=5)
+    assert not migrator_a.is_alive(), "migration A did not terminate"
+    assert not migrator_b.is_alive(), "migration B did not terminate"
+    assert failures == []
+    assert migration_b_read_versions.is_set()
+    assert not migration_b_body_executed.is_set()
+    assert migration_b_finished.is_set()
+    assert execution_count == 1
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 6"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name LIKE 'discord_antidisable_%' ORDER BY name"
+        ).fetchall() == [
+            ("discord_antidisable_response_bindings",),
+            ("discord_antidisable_workflows",),
+        ]
+
+
+def test_version_row_failure_rolls_back_and_same_database_retry_succeeds(tmp_path) -> None:
+    database_path = tmp_path / "migration-retry.db"
+    later_ran = False
+
+    def first(connection):
+        connection.execute("CREATE TABLE first_committed (value TEXT)")
+
+    def second(connection):
+        connection.execute("CREATE TABLE second_retried (value TEXT)")
+        connection.execute("INSERT INTO second_retried VALUES ('kept after retry')")
+
+    def third(connection):
+        nonlocal later_ran
+        later_ran = True
+        connection.execute("CREATE TABLE third_committed (value TEXT)")
+
+    migrations = (
+        Migration(1, "first", first),
+        Migration(2, "second", second),
+        Migration(3, "third", third),
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        run_migrations(connection, migrations[:1])
+        connection.execute(
+            """
+            CREATE TRIGGER fail_second_version_row
+            BEFORE INSERT ON schema_migrations
+            WHEN NEW.version = 2
+            BEGIN
+                SELECT RAISE(FAIL, 'forced version-row failure');
+            END
+            """
+        )
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="forced version-row failure"):
+            run_migrations(connection, migrations)
+
+        assert connection.in_transaction is False
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,)]
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'second_retried'"
+        ).fetchone() is None
+        assert later_ran is False
+
+        connection.execute("DROP TRIGGER fail_second_version_row")
+        connection.commit()
+        run_migrations(connection, migrations)
+
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,)]
+        assert connection.execute("SELECT value FROM second_retried").fetchall() == [
+            ("kept after retry",)
+        ]
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'third_committed'"
+        ).fetchone()[0] == "third_committed"
+        assert later_ran is True
+
+
 def test_failed_migration_rolls_back_and_stops_later_migrations(tmp_path) -> None:
     database_path = tmp_path / "failed.db"
     later_ran = False
@@ -1792,7 +1981,10 @@ def test_failed_migration_rolls_back_and_stops_later_migrations(tmp_path) -> Non
         assert connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rolled_back'"
         ).fetchone() is None
-        assert connection.execute("SELECT * FROM schema_migrations").fetchall() == []
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'schema_migrations'"
+        ).fetchone() is None
     assert later_ran is False
 
 
