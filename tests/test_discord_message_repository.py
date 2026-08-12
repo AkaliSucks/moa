@@ -5,13 +5,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from moa.database.sqlite import connect
+from moa.database.sqlite import connect, run_write_transaction
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories import discord_message_repository as discord_message_repository_module
 from moa.repositories.discord_message_repository import (
     AntidisableResponseBinding,
     AntidisableResponseBindingMutationResult,
+    AntidisableResponseResolutionResult,
     AntidisableWorkflow,
     AntidisableWorkflowMutationResult,
     DiscordAntidisableWorkflowConflictError,
@@ -3384,6 +3385,452 @@ def test_active_antidisable_workflows_return_all_compatible_candidates_in_determ
     assert repository.active_antidisable_workflows_for_channel(
         "guild-3", "channel-3", lookup_time
     ) == ()
+
+
+def test_atomic_antidisable_response_resolution_preserves_zero_one_and_multiple_candidates(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    bound_at = datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc)
+
+    with pytest.raises(
+        DiscordAntidisableWorkflowNotFoundError,
+        match="Response message aggregate was not found",
+    ):
+        repository.resolve_antidisable_response(
+            response_message_aggregate_key=aggregate(message_id="missing-response"),
+            bound_at=bound_at,
+        )
+
+    unresolved_response = seed_message(
+        repository, message_id="response-unresolved", payload_hash="response-unresolved"
+    )
+
+    unresolved = repository.resolve_antidisable_response(
+        response_message_aggregate_key=unresolved_response,
+        bound_at=bound_at,
+    )
+
+    assert isinstance(unresolved, AntidisableResponseResolutionResult)
+    assert unresolved.status == "unresolved"
+    assert unresolved.workflow is None
+    assert unresolved.binding_result is None
+
+    first = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="First"),
+        request_message=seed_message(repository, message_id="request-first"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    bound_response = seed_message(
+        repository, message_id="response-bound", payload_hash="response-bound"
+    )
+    bound = repository.resolve_antidisable_response(
+        response_message_aggregate_key=bound_response,
+        bound_at=bound_at,
+    )
+
+    assert bound.status == "bound"
+    assert bound.workflow == first.workflow
+    assert bound.binding_result is not None
+    assert bound.binding_result.created is True
+
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Second"),
+        request_message=seed_message(
+            repository, message_id="request-second", payload_hash="request-second"
+        ),
+        requesting_user_id="user-2",
+        created_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    ambiguous_response = seed_message(
+        repository, message_id="response-ambiguous", payload_hash="response-ambiguous"
+    )
+    ambiguous = repository.resolve_antidisable_response(
+        response_message_aggregate_key=ambiguous_response,
+        bound_at=bound_at,
+    )
+
+    assert ambiguous.status == "ambiguous"
+    assert ambiguous.workflow is None
+    assert ambiguous.binding_result is None
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 1
+
+
+def test_public_antidisable_binding_and_resolution_use_runner_callbacks(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    workflow = create_workflow(
+        repository,
+        database_path,
+        request_message=seed_message(repository, message_id="request"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    explicit_response = seed_message(
+        repository, message_id="response-explicit", payload_hash="explicit"
+    )
+    resolved_response = seed_message(
+        repository, message_id="response-resolved", payload_hash="resolved"
+    )
+    original_runner = discord_message_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            callback_states.append(connection.in_transaction)
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    def unexpected_connection():
+        raise AssertionError("antidisable binding opened an independent repository connection")
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    monkeypatch.setattr(repository, "_connection", unexpected_connection)
+
+    explicit = repository.bind_antidisable_response(
+        scan_id=workflow.workflow.harem_scan_id,
+        response_message_aggregate_key=explicit_response,
+        bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+    )
+    resolved = repository.resolve_antidisable_response(
+        response_message_aggregate_key=resolved_response,
+        bound_at=datetime(2026, 7, 18, 1, 31, tzinfo=timezone.utc),
+    )
+
+    assert explicit.created is True
+    assert resolved.status == "bound"
+    assert resolved.binding_result is not None
+    assert resolved.binding_result.created is True
+    assert callback_states == [True, True]
+
+
+def test_atomic_antidisable_resolution_existing_binding_remains_authoritative(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="First"),
+        request_message=seed_message(repository, message_id="request-first"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    response = seed_message(repository, message_id="response", payload_hash="response")
+    original_bound_at = datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc)
+    initial = repository.resolve_antidisable_response(
+        response_message_aggregate_key=response,
+        bound_at=original_bound_at,
+    )
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="Second"),
+        request_message=seed_message(
+            repository, message_id="request-second", payload_hash="request-second"
+        ),
+        requesting_user_id="user-2",
+        created_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+
+    replay = DiscordMessageRepository(database_path).resolve_antidisable_response(
+        response_message_aggregate_key=response,
+        bound_at=datetime(2026, 7, 18, 1, 45, tzinfo=timezone.utc),
+    )
+
+    assert initial.workflow == first.workflow
+    assert initial.binding_result is not None
+    assert initial.binding_result.created is True
+    assert replay.status == "bound"
+    assert replay.workflow == first.workflow
+    assert replay.binding_result is not None
+    assert replay.binding_result.created is False
+    assert replay.binding_result.binding.bound_at == original_bound_at
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 1
+
+
+def test_atomic_antidisable_resolution_create_first_observes_ambiguity(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    catalog = CatalogRepository(database_path)
+    create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="First"),
+        request_message=seed_message(repository, message_id="request-first"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    second_request = seed_message(
+        repository, message_id="request-second", payload_hash="request-second"
+    )
+    response = seed_message(repository, message_id="response", payload_hash="response")
+    original_runner = discord_message_repository_module.run_write_transaction
+    workflow_committed = threading.Event()
+    resolver_called = threading.Event()
+    resolver_callback_entered = threading.Event()
+    results: list[AntidisableResponseResolutionResult] = []
+    failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        resolver_called.set()
+        assert workflow_committed.wait(_THREAD_TIMEOUT), "workflow creation did not commit"
+
+        def observed_callback(connection):
+            resolver_callback_entered.set()
+            return callback(connection)
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+
+    def resolve_response() -> None:
+        try:
+            results.append(
+                repository.resolve_antidisable_response(
+                    response_message_aggregate_key=response,
+                    bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def create_second_workflow() -> None:
+        try:
+            def create_with_connection(connection):
+                scan_id = catalog._begin_antidisable_scan_with_connection(
+                    connection,
+                    server="Server",
+                    account="Second",
+                    observed_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+                )
+                return repository._create_antidisable_workflow_with_connection(
+                    connection,
+                    scan_id=scan_id,
+                    request_message_aggregate_key=second_request,
+                    requesting_user_id="user-2",
+                    created_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+                    expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+                )
+
+            run_write_transaction(database_path, create_with_connection)
+            workflow_committed.set()
+        except BaseException as error:
+            failures.append(error)
+            workflow_committed.set()
+
+    resolver_thread = threading.Thread(target=resolve_response, name="response-resolver")
+    creator_thread = threading.Thread(target=create_second_workflow, name="workflow-creator")
+    resolver_thread.start()
+    assert resolver_called.wait(_THREAD_TIMEOUT), "resolver did not reach the runner"
+    assert not resolver_callback_entered.is_set()
+    creator_thread.start()
+    creator_thread.join(_THREAD_TIMEOUT)
+    resolver_thread.join(_THREAD_TIMEOUT)
+
+    assert not creator_thread.is_alive(), "workflow creator did not terminate"
+    assert not resolver_thread.is_alive(), "resolver did not terminate"
+    assert failures == []
+    assert resolver_callback_entered.is_set()
+    assert len(results) == 1
+    assert results[0].status == "ambiguous"
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 0
+
+
+def test_atomic_antidisable_resolution_bind_first_precedes_workflow_creation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    catalog = CatalogRepository(database_path)
+    first = create_workflow(
+        repository,
+        database_path,
+        scan_id=begin_scan(database_path, account="First"),
+        request_message=seed_message(repository, message_id="request-first"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    second_request = seed_message(
+        repository, message_id="request-second", payload_hash="request-second"
+    )
+    response = seed_message(repository, message_id="response", payload_hash="response")
+    original_runner = discord_message_repository_module.run_write_transaction
+    binding_created = threading.Event()
+    release_resolver = threading.Event()
+    creator_called = threading.Event()
+    creator_callback_entered = threading.Event()
+    results: list[AntidisableResponseResolutionResult] = []
+    failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            result = callback(connection)
+            binding_created.set()
+            assert release_resolver.wait(_THREAD_TIMEOUT), "resolver was not released"
+            return result
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+
+    def resolve_response() -> None:
+        try:
+            results.append(
+                repository.resolve_antidisable_response(
+                    response_message_aggregate_key=response,
+                    bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+                )
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def create_second_workflow() -> None:
+        creator_called.set()
+        try:
+            def create_with_connection(connection):
+                creator_callback_entered.set()
+                scan_id = catalog._begin_antidisable_scan_with_connection(
+                    connection,
+                    server="Server",
+                    account="Second",
+                    observed_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+                )
+                return repository._create_antidisable_workflow_with_connection(
+                    connection,
+                    scan_id=scan_id,
+                    request_message_aggregate_key=second_request,
+                    requesting_user_id="user-2",
+                    created_at=datetime(2026, 7, 18, 1, 10, tzinfo=timezone.utc),
+                    expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+                )
+
+            run_write_transaction(database_path, create_with_connection)
+        except BaseException as error:
+            failures.append(error)
+
+    resolver_thread = threading.Thread(target=resolve_response, name="response-resolver")
+    creator_thread = threading.Thread(target=create_second_workflow, name="workflow-creator")
+    resolver_thread.start()
+    assert binding_created.wait(_THREAD_TIMEOUT), "resolver did not create the binding"
+    creator_thread.start()
+    assert creator_called.wait(_THREAD_TIMEOUT), "creator did not reach the runner"
+    assert not creator_callback_entered.is_set()
+
+    release_resolver.set()
+    resolver_thread.join(_THREAD_TIMEOUT)
+    creator_thread.join(_THREAD_TIMEOUT)
+
+    assert not resolver_thread.is_alive(), "resolver did not terminate"
+    assert not creator_thread.is_alive(), "workflow creator did not terminate"
+    assert failures == []
+    assert creator_callback_entered.is_set()
+    assert len(results) == 1
+    assert results[0].workflow == first.workflow
+    assert results[0].binding_result is not None
+    assert results[0].binding_result.created is True
+    replay = repository.resolve_antidisable_response(
+        response_message_aggregate_key=response,
+        bound_at=datetime(2026, 7, 18, 1, 45, tzinfo=timezone.utc),
+    )
+    assert replay.workflow == first.workflow
+    assert replay.binding_result is not None
+    assert replay.binding_result.created is False
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 1
+
+
+def test_atomic_antidisable_resolution_write_failure_rolls_back_and_recovers(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    workflow = create_workflow(
+        repository,
+        database_path,
+        request_message=seed_message(repository, message_id="request"),
+        expires_at=datetime(2026, 7, 18, 3, 0, tzinfo=timezone.utc),
+    )
+    response = seed_message(repository, message_id="response", payload_hash="response")
+    with connect(database_path) as connection:
+        response_id = connection.execute(
+            "SELECT id FROM discord_message_aggregates WHERE message_id = 'response'"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            CREATE TRIGGER fail_antidisable_binding_insert
+            BEFORE INSERT ON discord_antidisable_response_bindings
+            BEGIN
+                SELECT RAISE(ABORT, 'forced antidisable binding failure');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced antidisable binding failure"):
+        repository.resolve_antidisable_response(
+            response_message_aggregate_key=response,
+            bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows WHERE harem_scan_id = ?",
+            (workflow.workflow.harem_scan_id,),
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_message_aggregates WHERE id = ?",
+            (response_id,),
+        ).fetchone()[0] == 1
+        connection.execute("DROP TRIGGER fail_antidisable_binding_insert")
+
+    recovered = repository.resolve_antidisable_response(
+        response_message_aggregate_key=response,
+        bound_at=datetime(2026, 7, 18, 1, 30, tzinfo=timezone.utc),
+    )
+
+    assert recovered.status == "bound"
+    assert recovered.workflow == workflow.workflow
+    assert recovered.binding_result is not None
+    assert recovered.binding_result.created is True
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
+        ).fetchone()[0] == 1
 
 
 def test_antidisable_response_binding_supports_multiple_responses_replay_and_lookup(

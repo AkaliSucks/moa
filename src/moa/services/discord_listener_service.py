@@ -2487,12 +2487,29 @@ class DiscordListenerService:
         workflow = repository.get_antidisable_workflow_by_response_message(response_key)
         if workflow is None:
             lookup_time = self._message_received_at(message)
-            candidates = repository.active_antidisable_workflows_for_channel(
-                str(message.guild.id),
-                str(message.channel.id),
-                lookup_time,
-            )
-            if len(candidates) != 1:
+            try:
+                resolution = repository.resolve_antidisable_response(
+                    response_message_aggregate_key=response_key,
+                    bound_at=lookup_time,
+                )
+            except Exception as error:
+                # A concurrent/replayed delivery may have completed the binding
+                # before this resolver entered its transaction. Reload it;
+                # otherwise fail closed without selecting another candidate.
+                workflow = repository.get_antidisable_workflow_by_response_message(response_key)
+                if workflow is None:
+                    self._logger.warning(
+                        "Could not durably bind antidisable response %s: %s",
+                        message.id,
+                        error,
+                    )
+                    return None
+            else:
+                workflow = resolution.workflow
+            if workflow is None:
+                attribution_status: Literal["unresolved", "ambiguous"] = (
+                    "ambiguous" if resolution.status == "ambiguous" else "unresolved"
+                )
                 attribution = self._resolve_and_record_server_attribution(
                     message,
                     raw_message,
@@ -2505,30 +2522,9 @@ class DiscordListenerService:
                     self._record_unresolved_antidisable_attribution(
                         received_event,
                         message.id,
-                        "ambiguous" if len(candidates) > 1 else "unresolved",
+                        attribution_status,
                     )
                 return None
-            candidate = candidates[0]
-            try:
-                repository.bind_antidisable_response(
-                    scan_id=candidate.harem_scan_id,
-                    response_message_aggregate_key=response_key,
-                    bound_at=lookup_time,
-                )
-            except Exception as error:
-                # A concurrent/replayed delivery may have completed the binding
-                # between the candidate read and this write. Reload it; otherwise
-                # fail closed without selecting another candidate.
-                workflow = repository.get_antidisable_workflow_by_response_message(response_key)
-                if workflow is None:
-                    self._logger.warning(
-                        "Could not durably bind antidisable response %s: %s",
-                        message.id,
-                        error,
-                    )
-                    return None
-            else:
-                workflow = candidate
 
         progress = self._catalog.harem_scan_progress(workflow.harem_scan_id)
         if progress is None or progress.scan_kind != "antidisable":

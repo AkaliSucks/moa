@@ -9674,6 +9674,39 @@ def test_listener_adl_response_binds_one_active_workflow_and_projects_same_scan(
     assert tuple(attribution) == ("resolved", "Test Server", "user_a")
 
 
+def test_listener_adl_first_binding_uses_atomic_repository_resolution(tmp_path) -> None:
+    listener, repository, database_path = _durable_listener(tmp_path)
+    request = _adl_request_message()
+    response = _durable_antidisable_message()
+    original_resolve = repository.resolve_antidisable_response
+    resolutions = []
+
+    def resolve_antidisable_response(**kwargs):
+        result = original_resolve(**kwargs)
+        resolutions.append(result)
+        return result
+
+    repository.resolve_antidisable_response = resolve_antidisable_response
+    repository.active_antidisable_workflows_for_channel = Mock(
+        side_effect=AssertionError("listener used the split candidate-read path")
+    )
+    repository.bind_antidisable_response = Mock(
+        side_effect=AssertionError("listener used the explicit fixed-scan bind path")
+    )
+
+    asyncio.run(listener.handle_message(request))
+    asyncio.run(listener.handle_bot_response(response))
+
+    assert len(resolutions) == 1
+    assert resolutions[0].status == "bound"
+    assert resolutions[0].binding_result is not None
+    assert resolutions[0].binding_result.created is True
+    assert repository.get_antidisable_workflow_by_response_message(
+        listener._message_aggregate_key(response)
+    ) == resolutions[0].workflow
+    assert _adl_response_counts(database_path)[:3] == (1, 1, 1)
+
+
 def test_listener_adl_bound_update_skips_active_candidate_lookup_and_reuses_scan(tmp_path) -> None:
     listener, repository, database_path = _durable_listener(tmp_path)
     request = _adl_request_message()
