@@ -1,8 +1,11 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
+import moa.repositories.catalog_repository as catalog_repository_module
 from moa.models.character import DivorceConfirmation, RollObservation
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import (
@@ -367,6 +370,208 @@ def test_repair_bugged_imports_removes_timer_rolls_and_orphaned_split_rows(tmp_p
     assert service.inspect_bugged_imports() == (0, 0)
 
 
+def test_repair_bugged_imports_with_no_candidates_is_noop(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+
+    assert service.repair_bugged_imports() == (0, 0)
+
+
+def test_repair_bugged_imports_parses_before_writer_callback(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    service.import_roll(
+        RollObservation(
+            name="Wrong Name",
+            series="Wrong Series",
+            claim_rank=None,
+            kakera_value=55,
+        ),
+        "Server",
+        "account",
+        "Right Name\nRight Series\n55:kakera:",
+        "discord",
+    )
+    calls: list[str] = []
+    callback_active = False
+    parse_roll = MudaeTextParser.parse_roll
+    run_write_transaction = catalog_repository_module.run_write_transaction
+
+    def observed_parse(parser: MudaeTextParser, text: str):
+        assert not callback_active
+        calls.append("parse")
+        return parse_roll(parser, text)
+
+    def observed_runner(database_path, callback):
+        calls.append("runner")
+
+        def observed_callback(connection):
+            nonlocal callback_active
+            callback_active = True
+            calls.append("callback")
+            try:
+                return callback(connection)
+            finally:
+                callback_active = False
+
+        return run_write_transaction(database_path, observed_callback)
+
+    monkeypatch.setattr(MudaeTextParser, "parse_roll", observed_parse)
+    monkeypatch.setattr(
+        catalog_repository_module, "run_write_transaction", observed_runner
+    )
+
+    assert service.repair_bugged_imports() == (1, 1)
+    assert calls == ["parse", "runner", "callback"]
+
+
+def test_repair_bugged_imports_parser_failure_prevents_writer_start(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    service.import_roll(
+        RollObservation(
+            name="Wrong Name",
+            series="Wrong Series",
+            claim_rank=None,
+            kakera_value=55,
+        ),
+        "Server",
+        "account",
+        "Right Name\nRight Series\n55:kakera:",
+        "discord",
+    )
+    before = _repair_state(database_path)
+
+    def fail_parse(parser: MudaeTextParser, text: str):
+        raise RuntimeError("forced parser failure")
+
+    def reject_runner(database_path, callback):
+        pytest.fail("write runner must not start after parser failure")
+
+    monkeypatch.setattr(MudaeTextParser, "parse_roll", fail_parse)
+    monkeypatch.setattr(
+        catalog_repository_module, "run_write_transaction", reject_runner
+    )
+
+    with pytest.raises(RuntimeError, match="forced parser failure"):
+        service.repair_bugged_imports()
+
+    assert _repair_state(database_path) == before
+
+
+def test_repair_bugged_imports_skips_candidate_deleted_after_planning(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    imported = service.import_roll(
+        RollObservation(
+            name="Timer Candidate",
+            series="Timer Series",
+            claim_rank=None,
+            kakera_value=0,
+        ),
+        "Server",
+        "account",
+        "You have 0 rolls left. Next rolls reset in 36 min.",
+        "discord",
+    )
+    plan_complete = Event()
+    release_repair = Event()
+    plan_repairs = repository._plan_bugged_import_repairs
+
+    def blocked_plan(snapshots):
+        plan = plan_repairs(snapshots)
+        plan_complete.set()
+        assert release_repair.wait(5)
+        return plan
+
+    monkeypatch.setattr(repository, "_plan_bugged_import_repairs", blocked_plan)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repair = executor.submit(service.repair_bugged_imports)
+        assert plan_complete.wait(5)
+        try:
+            assert service.delete_import_event(imported.import_event_id)
+        finally:
+            release_repair.set()
+        assert repair.result(timeout=5) == (0, 0)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM import_events WHERE id = ?", (imported.import_event_id,)
+        ).fetchone() is None
+
+
+def test_repair_bugged_imports_skips_changed_character_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    imported = service.import_roll(
+        RollObservation(
+            name="Wrong Name",
+            series="Wrong Series",
+            claim_rank=None,
+            kakera_value=55,
+        ),
+        "Server",
+        "account",
+        "Right Name\nRight Series\n55:kakera:",
+        "discord",
+    )
+    plan_complete = Event()
+    release_repair = Event()
+    plan_repairs = repository._plan_bugged_import_repairs
+
+    def blocked_plan(snapshots):
+        plan = plan_repairs(snapshots)
+        plan_complete.set()
+        assert release_repair.wait(5)
+        return plan
+
+    monkeypatch.setattr(repository, "_plan_bugged_import_repairs", blocked_plan)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repair = executor.submit(service.repair_bugged_imports)
+        assert plan_complete.wait(5)
+        try:
+            service.import_roll(
+                RollObservation(
+                    name="wrong name",
+                    series="wrong series",
+                    claim_rank=None,
+                    kakera_value=1,
+                ),
+                "Server",
+                "account",
+                "A real roll card",
+                "discord",
+            )
+        finally:
+            release_repair.set()
+        assert repair.result(timeout=5) == (0, 0)
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            """
+            SELECT characters.name, characters.series
+            FROM roll_observations
+            JOIN characters ON characters.id = roll_observations.character_id
+            WHERE roll_observations.import_event_id = ?
+            """,
+            (imported.import_event_id,),
+        ).fetchone() == ("wrong name", "wrong series")
+        assert connection.execute(
+            "SELECT 1 FROM characters WHERE normalized_name = 'right name'"
+        ).fetchone() is None
+
+
 def test_repair_bugged_imports_preserves_character_with_other_observations(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     service = CatalogService(CatalogRepository(database_path))
@@ -391,7 +596,9 @@ def test_repair_bugged_imports_preserves_character_with_other_observations(tmp_p
     assert service.character_count() == 1
 
 
-def test_repair_bugged_imports_preserves_divorce_referenced_character(tmp_path) -> None:
+def test_repair_bugged_imports_preserves_post_parse_divorce_reference(
+    tmp_path, monkeypatch
+) -> None:
     database_path = tmp_path / "catalog.db"
     repository = CatalogRepository(database_path)
     service = CatalogService(repository)
@@ -419,29 +626,44 @@ def test_repair_bugged_imports_preserves_divorce_referenced_character(tmp_path) 
             ).fetchone()[0]
         )
 
-    divorce = service.import_divorce(
-        DivorceConfirmation(
-            account_name="account",
-            character_name=character_name,
-            kakera_refund=100,
-        ),
-        "Server",
-        "account",
-        "You divorced the character.",
-        "discord",
-    )
-
-    assert divorce.character_id == character_id
     assert service.inspect_bugged_imports() == (0, 1)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM rank_snapshots WHERE character_id = ?", (character_id,)
         ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT COUNT(*) FROM divorce_observations WHERE character_id = ?", (character_id,)
-        ).fetchone()[0] == 1
 
-    assert service.repair_bugged_imports() == (0, 0)
+    plan_complete = Event()
+    release_repair = Event()
+    plan_repairs = repository._plan_bugged_import_repairs
+
+    def blocked_plan(snapshots):
+        plan = plan_repairs(snapshots)
+        plan_complete.set()
+        assert release_repair.wait(5)
+        return plan
+
+    monkeypatch.setattr(repository, "_plan_bugged_import_repairs", blocked_plan)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repair = executor.submit(service.repair_bugged_imports)
+        assert plan_complete.wait(5)
+        try:
+            divorce = service.import_divorce(
+                DivorceConfirmation(
+                    account_name="account",
+                    character_name=character_name,
+                    kakera_refund=100,
+                ),
+                "Server",
+                "account",
+                "You divorced the character.",
+                "discord",
+            )
+        finally:
+            release_repair.set()
+        assert repair.result(timeout=5) == (0, 0)
+
+    assert divorce.character_id == character_id
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT id FROM characters WHERE id = ?", (character_id,)
@@ -593,32 +815,105 @@ def test_repair_bugged_imports_durable_refusal_rolls_back_earlier_candidate(
             "discord",
         ),
     )
-    deletion_order = tuple(
-        {candidate.import_event_id for candidate in candidates} - {}.keys()
-    )
-    earlier_import_event_id, blocked_import_event_id = deletion_order
-    with sqlite3.connect(database_path) as connection:
-        _link_durable_source_event(connection, blocked_import_event_id)
+    earlier_import_event_id = candidates[0].import_event_id
+    blocked_import_event_id = candidates[1].import_event_id
 
     attempted_deletions: list[int] = []
     delete_import = repository._delete_import_event_from_connection
+    plan_complete = Event()
+    release_repair = Event()
+    plan_repairs = repository._plan_bugged_import_repairs
 
     def record_deletion(connection: sqlite3.Connection, import_event_id: int) -> None:
         attempted_deletions.append(import_event_id)
         delete_import(connection, import_event_id)
 
+    def blocked_plan(snapshots):
+        plan = plan_repairs(snapshots)
+        plan_complete.set()
+        assert release_repair.wait(5)
+        return plan
+
     monkeypatch.setattr(repository, "_delete_import_event_from_connection", record_deletion)
+    monkeypatch.setattr(repository, "_plan_bugged_import_repairs", blocked_plan)
     before = _repair_state(database_path)
 
-    with pytest.raises(ImportEventDeletionBlockedError):
-        service.repair_bugged_imports()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repair = executor.submit(service.repair_bugged_imports)
+        assert plan_complete.wait(5)
+        try:
+            with sqlite3.connect(database_path) as connection:
+                _link_durable_source_event(connection, blocked_import_event_id)
+        finally:
+            release_repair.set()
+        with pytest.raises(ImportEventDeletionBlockedError):
+            repair.result(timeout=5)
 
     assert attempted_deletions == [earlier_import_event_id, blocked_import_event_id]
-    assert _repair_state(database_path) == before
+    after = _repair_state(database_path)
+    assert after[:-1] == before[:-1]
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT legacy_import_event_id FROM discord_source_events"
         ).fetchone()[0] == blocked_import_event_id
+
+
+def test_competing_repair_bugged_imports_callers_apply_candidate_once(
+    tmp_path, monkeypatch
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository_a = CatalogRepository(database_path)
+    service_a = CatalogService(repository_a)
+    service_a.import_roll(
+        RollObservation(
+            name="Timer Candidate",
+            series="Timer Series",
+            claim_rank=None,
+            kakera_value=0,
+        ),
+        "Server",
+        "account",
+        "You have 0 rolls left. Next rolls reset in 36 min.",
+        "discord",
+    )
+    repository_b = CatalogRepository(database_path)
+    service_b = CatalogService(repository_b)
+    a_planned = Event()
+    b_planned = Event()
+    a_finished = Event()
+    plan_a = repository_a._plan_bugged_import_repairs
+    plan_b = repository_b._plan_bugged_import_repairs
+
+    def coordinate_a(snapshots):
+        plan = plan_a(snapshots)
+        a_planned.set()
+        assert b_planned.wait(5)
+        return plan
+
+    def coordinate_b(snapshots):
+        plan = plan_b(snapshots)
+        b_planned.set()
+        assert a_finished.wait(5)
+        return plan
+
+    def repair_a():
+        try:
+            return service_a.repair_bugged_imports()
+        finally:
+            a_finished.set()
+
+    monkeypatch.setattr(repository_a, "_plan_bugged_import_repairs", coordinate_a)
+    monkeypatch.setattr(repository_b, "_plan_bugged_import_repairs", coordinate_b)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(repair_a)
+        second = executor.submit(service_b.repair_bugged_imports)
+        assert a_planned.wait(5)
+        assert b_planned.wait(5)
+        assert first.result(timeout=5) == (1, 1)
+        assert second.result(timeout=5) == (0, 0)
+
+    assert service_a.inspect_bugged_imports() == (0, 0)
 
 
 def test_repair_bugged_imports_late_failure_rolls_back_and_same_database_recovers(

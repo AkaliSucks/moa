@@ -561,6 +561,51 @@ class _DisableListImportConnectionResult:
     disablelist_observation_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class _RepairEventSnapshot:
+    id: int
+    kind: str
+    source: str
+    observed_at: str
+    raw_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RepairCandidateSnapshot:
+    event: _RepairEventSnapshot
+    observation_id: int
+    character_id: int
+    character_name: str
+    character_series: str
+
+
+@dataclass(frozen=True, slots=True)
+class _MalformedCharacterSnapshot:
+    id: int
+    name: str
+    series: str
+
+
+@dataclass(frozen=True, slots=True)
+class _BuggedImportSnapshots:
+    rolls: tuple[_RepairCandidateSnapshot, ...]
+    character_details: tuple[_RepairCandidateSnapshot, ...]
+    malformed_characters: tuple[_MalformedCharacterSnapshot, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedRepairPlan:
+    candidate: _RepairCandidateSnapshot
+    observation: CharacterDetails | RollObservation
+
+
+@dataclass(frozen=True, slots=True)
+class _BuggedImportRepairPlan:
+    timers: tuple[_RepairCandidateSnapshot, ...]
+    repairs: tuple[_ParsedRepairPlan, ...]
+    malformed_characters: tuple[_MalformedCharacterSnapshot, ...]
+
+
 class CatalogRepository:
     """Persist imported Mudae character and rank observations in SQLite."""
 
@@ -3733,7 +3778,18 @@ class CatalogRepository:
     def inspect_bugged_imports(self) -> tuple[int, int]:
         """Count timer-as-roll imports and imports reparsed by the fixed parser."""
         with self._connection() as connection:
-            import_event_ids, character_ids, _ = self._bugged_import_candidates(connection)
+            snapshots = self._load_bugged_import_snapshots(connection)
+        plan = self._plan_bugged_import_repairs(snapshots)
+        import_event_ids = {
+            candidate.event.id for candidate in plan.timers
+        } | {repair.candidate.event.id for repair in plan.repairs}
+        character_ids = {
+            candidate.character_id for candidate in plan.timers
+        } | {
+            repair.candidate.character_id for repair in plan.repairs
+        } | {
+            character.id for character in plan.malformed_characters
+        }
         return len(import_event_ids), len(character_ids)
 
     def repair_bugged_imports(self) -> tuple[int, int]:
@@ -3744,22 +3800,70 @@ class CatalogRepository:
         removed; older roll and `$im` rows are reparsed with the current parser
         so wrapped series such as `Dungeon ni ... no` + `wa ...` are corrected.
         """
+        with self._connection() as connection:
+            snapshots = self._load_bugged_import_snapshots(connection)
+        plan = self._plan_bugged_import_repairs(snapshots)
+
         def repair_with_connection(connection: sqlite3.Connection) -> tuple[int, int]:
-            import_event_ids, character_ids, repairs = self._bugged_import_candidates(connection)
-            for import_event_id in import_event_ids - repairs.keys():
-                self._delete_import_event_from_connection(connection, import_event_id)
-            for import_event_id, (kind, old_character_id, observation) in repairs.items():
-                if kind == "roll":
+            applied_import_event_ids: set[int] = set()
+            cleanup_characters: dict[int, _MalformedCharacterSnapshot] = {}
+
+            for candidate in plan.timers:
+                if not self._repair_candidate_matches(connection, candidate):
+                    continue
+                if not self._is_timer_like_message(candidate.event.raw_message):
+                    continue
+                self._delete_import_event_from_connection(connection, candidate.event.id)
+                applied_import_event_ids.add(candidate.event.id)
+                cleanup_characters[candidate.character_id] = _MalformedCharacterSnapshot(
+                    id=candidate.character_id,
+                    name=candidate.character_name,
+                    series=candidate.character_series,
+                )
+
+            for repair in plan.repairs:
+                candidate = repair.candidate
+                if not self._repair_candidate_matches(connection, candidate):
+                    continue
+                if not self._parsed_repair_remains_eligible(repair):
+                    continue
+                if candidate.event.kind == "roll":
                     self._repair_roll_event(
-                        connection, import_event_id, old_character_id, observation
+                        connection,
+                        candidate.event.id,
+                        candidate.character_id,
+                        repair.observation,
                     )
                 else:
                     self._repair_character_details_event(
-                        connection, import_event_id, old_character_id, observation
+                        connection,
+                        candidate.event.id,
+                        candidate.character_id,
+                        repair.observation,
                     )
+                applied_import_event_ids.add(candidate.event.id)
+                cleanup_characters[candidate.character_id] = _MalformedCharacterSnapshot(
+                    id=candidate.character_id,
+                    name=candidate.character_name,
+                    series=candidate.character_series,
+                )
+
+            for character in plan.malformed_characters:
+                if self._malformed_character_matches(connection, character):
+                    cleanup_characters.setdefault(character.id, character)
 
             deleted_characters = 0
-            for character_id in character_ids:
+            for character_id in sorted(cleanup_characters):
+                character = cleanup_characters[character_id]
+                current = connection.execute(
+                    "SELECT name, series FROM characters WHERE id = ?",
+                    (character_id,),
+                ).fetchone()
+                if current is None or (current["name"], current["series"]) != (
+                    character.name,
+                    character.series,
+                ):
+                    continue
                 if self._character_has_references(connection, character_id):
                     continue
                 cursor = connection.execute(
@@ -3767,7 +3871,7 @@ class CatalogRepository:
                 )
                 deleted_characters += cursor.rowcount
 
-            return len(import_event_ids), deleted_characters
+            return len(applied_import_event_ids), deleted_characters
 
         return run_write_transaction(self._database_path, repair_with_connection)
 
@@ -3827,51 +3931,31 @@ class CatalogRepository:
             )
         connection.execute("DELETE FROM import_events WHERE id = ?", (import_event_id,))
 
-    def _bugged_import_candidates(
-        self,
-        connection: sqlite3.Connection,
-    ) -> tuple[
-        set[int],
-        set[int],
-        dict[int, tuple[str, int, CharacterDetails | RollObservation]],
-    ]:
-        parser = MudaeTextParser()
-        import_event_ids: set[int] = set()
-        character_ids: set[int] = set()
-        repairs: dict[int, tuple[str, int, CharacterDetails | RollObservation]] = {}
-
+    def _load_bugged_import_snapshots(
+        self, connection: sqlite3.Connection
+    ) -> _BuggedImportSnapshots:
         roll_rows = connection.execute(
             """
-            SELECT import_events.id AS import_event_id, import_events.raw_message,
-                   roll_observations.character_id, characters.name, characters.series
+            SELECT import_events.id AS import_event_id, import_events.kind,
+                   import_events.source, import_events.observed_at,
+                   import_events.raw_message,
+                   roll_observations.id AS observation_id,
+                   roll_observations.character_id,
+                   characters.name, characters.series
             FROM import_events
             JOIN roll_observations ON roll_observations.import_event_id = import_events.id
             JOIN characters ON characters.id = roll_observations.character_id
             WHERE import_events.kind = 'roll'
+            ORDER BY import_events.id, roll_observations.id
             """
         ).fetchall()
-        for row in roll_rows:
-            event_id = int(row["import_event_id"])
-            character_id = int(row["character_id"])
-            if self._is_timer_like_message(row["raw_message"]):
-                import_event_ids.add(event_id)
-                character_ids.add(character_id)
-                continue
-            try:
-                parsed = parser.parse_roll(row["raw_message"])
-            except MudaeParseError:
-                continue
-            if (
-                self._normalize(parsed.name) != self._normalize(row["name"])
-                or self._normalize(parsed.series) != self._normalize(row["series"])
-            ):
-                import_event_ids.add(event_id)
-                character_ids.add(character_id)
-                repairs[event_id] = ("roll", character_id, parsed)
 
         details_rows = connection.execute(
             """
-            SELECT DISTINCT import_events.id AS import_event_id, import_events.raw_message,
+            SELECT DISTINCT import_events.id AS import_event_id, import_events.kind,
+                   import_events.source, import_events.observed_at,
+                   import_events.raw_message,
+                   server_character_observations.id AS observation_id,
                    server_character_observations.character_id,
                    characters.name, characters.series
             FROM import_events
@@ -3879,22 +3963,9 @@ class CatalogRepository:
               ON server_character_observations.import_event_id = import_events.id
             JOIN characters ON characters.id = server_character_observations.character_id
             WHERE import_events.kind = 'character_details'
+            ORDER BY import_events.id, server_character_observations.id
             """
         ).fetchall()
-        for row in details_rows:
-            event_id = int(row["import_event_id"])
-            character_id = int(row["character_id"])
-            try:
-                parsed = parser.parse_character_details(row["raw_message"])
-            except MudaeParseError:
-                continue
-            if (
-                self._normalize(parsed.name) != self._normalize(row["name"])
-                or self._normalize(parsed.series) != self._normalize(row["series"])
-            ):
-                import_event_ids.add(event_id)
-                character_ids.add(character_id)
-                repairs[event_id] = ("character_details", character_id, parsed)
 
         malformed_rows = connection.execute(
             """
@@ -3909,9 +3980,137 @@ class CatalogRepository:
                )
             """
         ).fetchall()
-        character_ids.update(int(row["id"]) for row in malformed_rows)
+        return _BuggedImportSnapshots(
+            rolls=tuple(self._repair_candidate_snapshot(row) for row in roll_rows),
+            character_details=tuple(
+                self._repair_candidate_snapshot(row) for row in details_rows
+            ),
+            malformed_characters=tuple(
+                _MalformedCharacterSnapshot(
+                    id=int(row["id"]),
+                    name=str(row["name"]),
+                    series=str(row["series"]),
+                )
+                for row in malformed_rows
+            ),
+        )
 
-        return import_event_ids, character_ids, repairs
+    def _plan_bugged_import_repairs(
+        self, snapshots: _BuggedImportSnapshots
+    ) -> _BuggedImportRepairPlan:
+        parser = MudaeTextParser() if snapshots.rolls or snapshots.character_details else None
+        timers: dict[int, _RepairCandidateSnapshot] = {}
+        repairs: dict[int, _ParsedRepairPlan] = {}
+
+        for candidate in snapshots.rolls:
+            if self._is_timer_like_message(candidate.event.raw_message):
+                timers[candidate.event.id] = candidate
+                continue
+            try:
+                assert parser is not None
+                parsed = parser.parse_roll(candidate.event.raw_message)
+            except MudaeParseError:
+                continue
+            repair = _ParsedRepairPlan(candidate=candidate, observation=parsed)
+            if self._parsed_repair_remains_eligible(repair):
+                repairs[candidate.event.id] = repair
+
+        for candidate in snapshots.character_details:
+            try:
+                assert parser is not None
+                parsed = parser.parse_character_details(candidate.event.raw_message)
+            except MudaeParseError:
+                continue
+            repair = _ParsedRepairPlan(candidate=candidate, observation=parsed)
+            if self._parsed_repair_remains_eligible(repair):
+                repairs[candidate.event.id] = repair
+
+        return _BuggedImportRepairPlan(
+            timers=tuple(timers.values()),
+            repairs=tuple(repairs.values()),
+            malformed_characters=snapshots.malformed_characters,
+        )
+
+    @staticmethod
+    def _repair_candidate_snapshot(row: sqlite3.Row) -> _RepairCandidateSnapshot:
+        return _RepairCandidateSnapshot(
+            event=_RepairEventSnapshot(
+                id=int(row["import_event_id"]),
+                kind=str(row["kind"]),
+                source=str(row["source"]),
+                observed_at=str(row["observed_at"]),
+                raw_message=str(row["raw_message"]),
+            ),
+            observation_id=int(row["observation_id"]),
+            character_id=int(row["character_id"]),
+            character_name=str(row["name"]),
+            character_series=str(row["series"]),
+        )
+
+    def _repair_candidate_matches(
+        self,
+        connection: sqlite3.Connection,
+        candidate: _RepairCandidateSnapshot,
+    ) -> bool:
+        observation_table = (
+            "roll_observations"
+            if candidate.event.kind == "roll"
+            else "server_character_observations"
+        )
+        row = connection.execute(
+            f"""
+            SELECT import_events.id AS import_event_id, import_events.kind,
+                   import_events.source, import_events.observed_at,
+                   import_events.raw_message,
+                   observations.id AS observation_id, observations.character_id,
+                   characters.name, characters.series
+            FROM import_events
+            JOIN {observation_table} AS observations
+              ON observations.import_event_id = import_events.id
+            JOIN characters ON characters.id = observations.character_id
+            WHERE import_events.id = ? AND observations.id = ?
+            """,
+            (candidate.event.id, candidate.observation_id),
+        ).fetchone()
+        return row is not None and self._repair_candidate_snapshot(row) == candidate
+
+    def _parsed_repair_remains_eligible(self, repair: _ParsedRepairPlan) -> bool:
+        return (
+            self._normalize(repair.observation.name)
+            != self._normalize(repair.candidate.character_name)
+            or self._normalize(repair.observation.series)
+            != self._normalize(repair.candidate.character_series)
+        )
+
+    @staticmethod
+    def _is_malformed_repair_character(name: str, series: str) -> bool:
+        normalized_name = name.lower()
+        normalized_series = series.lower()
+        stripped_name = name.strip()
+        stripped_series = series.strip()
+        return (
+            normalized_name.startswith("each kakera button consumes ")
+            or normalized_series.startswith("your characters with 10+ keys consume ")
+            or (
+                len(stripped_name) >= 20
+                and len(stripped_series) <= 4
+                and stripped_series.endswith(("!", "?", "."))
+            )
+        )
+
+    def _malformed_character_matches(
+        self,
+        connection: sqlite3.Connection,
+        character: _MalformedCharacterSnapshot,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT name, series FROM characters WHERE id = ?", (character.id,)
+        ).fetchone()
+        return (
+            row is not None
+            and (row["name"], row["series"]) == (character.name, character.series)
+            and self._is_malformed_repair_character(row["name"], row["series"])
+        )
 
     @staticmethod
     def _is_timer_like_message(raw_message: str) -> bool:
