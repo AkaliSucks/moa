@@ -195,7 +195,9 @@ class DiscordMessageRepository:
         expires_at: datetime,
     ) -> AntidisableWorkflowMutationResult:
         """Create one durable antidisable workflow in a repository-owned transaction."""
-        with self._connection() as connection:
+        def create_with_connection(
+            connection: sqlite3.Connection,
+        ) -> AntidisableWorkflowMutationResult:
             return self._create_antidisable_workflow_with_connection(
                 connection,
                 scan_id=scan_id,
@@ -204,6 +206,8 @@ class DiscordMessageRepository:
                 created_at=created_at,
                 expires_at=expires_at,
             )
+
+        return run_write_transaction(self._database_path, create_with_connection)
 
     def get_antidisable_workflow_by_request_message(
         self, request_message_aggregate_key: MessageAggregateKey

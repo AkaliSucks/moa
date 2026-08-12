@@ -3406,6 +3406,234 @@ def test_antidisable_workflow_creation_replay_and_reconstruction_are_idempotent(
         ).fetchone()[0] == 1
 
 
+def test_public_antidisable_workflow_create_uses_one_runner_callback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository)
+    original_runner = discord_message_repository_module.run_write_transaction
+    callback_states: list[bool] = []
+    committed_counts: list[int] = []
+
+    def observed_runner(database_path, callback):
+        def observed_callback(connection):
+            callback_states.append(connection.in_transaction)
+            result = callback(connection)
+            with connect(database_path) as observer:
+                assert observer.execute(
+                    "SELECT COUNT(*) FROM discord_antidisable_workflows"
+                ).fetchone()[0] == 0
+            return result
+
+        result = original_runner(database_path, observed_callback)
+        with connect(database_path) as observer:
+            committed_counts.append(
+                observer.execute(
+                    "SELECT COUNT(*) FROM discord_antidisable_workflows"
+                ).fetchone()[0]
+            )
+        return result
+
+    def unexpected_connection():
+        raise AssertionError("workflow creation opened an independent repository connection")
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    monkeypatch.setattr(repository, "_connection", unexpected_connection)
+
+    result = create_workflow(
+        repository,
+        database_path,
+        scan_id=scan_id,
+        request_message=request_message,
+    )
+
+    assert result.created is True
+    assert result.replayed is False
+    assert callback_states == [True]
+    assert committed_counts == [1]
+
+
+def test_antidisable_workflow_insert_failure_rolls_back_and_same_database_recovers(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(repository)
+    created_at = datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc)
+    expires_at = datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc)
+    with connect(database_path) as connection:
+        scan_before = tuple(
+            connection.execute(
+                "SELECT id, account_context_id, expected_page_count, started_at, "
+                "completed_at, scan_kind FROM harem_scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()
+        )
+        request_before = tuple(
+            connection.execute(
+                "SELECT id, platform, guild_id, channel_id, message_id, "
+                "first_received_at, last_received_at FROM discord_message_aggregates"
+            ).fetchone()
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER fail_antidisable_workflow_insert
+            BEFORE INSERT ON discord_antidisable_workflows
+            BEGIN
+                SELECT RAISE(ABORT, 'forced antidisable workflow failure');
+            END
+            """
+        )
+
+    with pytest.raises(
+        sqlite3.IntegrityError, match="forced antidisable workflow failure"
+    ):
+        repository.create_antidisable_workflow(
+            scan_id=scan_id,
+            request_message_aggregate_key=request_message,
+            requesting_user_id="user-1",
+            created_at=created_at,
+            expires_at=expires_at,
+        )
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT id, account_context_id, expected_page_count, started_at, "
+                "completed_at, scan_kind FROM harem_scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()
+        ) == scan_before
+        assert tuple(
+            connection.execute(
+                "SELECT id, platform, guild_id, channel_id, message_id, "
+                "first_received_at, last_received_at FROM discord_message_aggregates"
+            ).fetchone()
+        ) == request_before
+        connection.execute("DROP TRIGGER fail_antidisable_workflow_insert")
+
+    recovered = repository.create_antidisable_workflow(
+        scan_id=scan_id,
+        request_message_aggregate_key=request_message,
+        requesting_user_id="user-1",
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+
+    assert recovered.created is True
+    assert recovered.replayed is False
+    assert recovered.workflow == AntidisableWorkflow(
+        harem_scan_id=scan_id,
+        request_message_aggregate_key=request_message,
+        requesting_user_id="user-1",
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 1
+
+
+def test_competing_public_antidisable_workflow_creates_serialize_to_exact_replay(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "messages.db"
+    first_repository = DiscordMessageRepository(database_path)
+    second_repository = DiscordMessageRepository(database_path)
+    scan_id = begin_scan(database_path)
+    request_message = seed_message(first_repository)
+    original_runner = discord_message_repository_module.run_write_transaction
+    first_callback_completed = threading.Event()
+    release_first_callback = threading.Event()
+    second_runner_called = threading.Event()
+    second_callback_entered = threading.Event()
+    callback_count = 0
+    results: dict[str, AntidisableWorkflowMutationResult] = {}
+    failures: list[BaseException] = []
+
+    def observed_runner(database_path, callback):
+        if threading.current_thread().name == "second-workflow-create":
+            second_runner_called.set()
+
+        def observed_callback(connection):
+            nonlocal callback_count
+            callback_count += 1
+            result = callback(connection)
+            if threading.current_thread().name == "first-workflow-create":
+                first_callback_completed.set()
+                assert release_first_callback.wait(
+                    _THREAD_TIMEOUT
+                ), "first workflow-create callback was not released"
+            else:
+                second_callback_entered.set()
+            return result
+
+        return original_runner(database_path, observed_callback)
+
+    monkeypatch.setattr(
+        discord_message_repository_module, "run_write_transaction", observed_runner
+    )
+    workflow_arguments = {
+        "scan_id": scan_id,
+        "request_message_aggregate_key": request_message,
+        "requesting_user_id": "user-1",
+        "created_at": datetime(2026, 7, 18, 1, 0, tzinfo=timezone.utc),
+        "expires_at": datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    }
+
+    def create_first() -> None:
+        try:
+            results["first"] = first_repository.create_antidisable_workflow(
+                **workflow_arguments
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    def create_second() -> None:
+        try:
+            results["second"] = second_repository.create_antidisable_workflow(
+                **workflow_arguments
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    first_thread = threading.Thread(target=create_first, name="first-workflow-create")
+    second_thread = threading.Thread(target=create_second, name="second-workflow-create")
+    first_thread.start()
+    assert first_callback_completed.wait(_THREAD_TIMEOUT), "first callback did not complete"
+    second_thread.start()
+    assert second_runner_called.wait(_THREAD_TIMEOUT), "second caller did not reach the runner"
+    assert not second_callback_entered.is_set()
+
+    release_first_callback.set()
+    first_thread.join(_THREAD_TIMEOUT)
+    second_thread.join(_THREAD_TIMEOUT)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert failures == []
+    assert results["first"].created is True
+    assert results["first"].replayed is False
+    assert results["second"].created is False
+    assert results["second"].replayed is True
+    assert results["second"].workflow == results["first"].workflow
+    assert second_callback_entered.is_set()
+    assert callback_count == 2
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_antidisable_workflows"
+        ).fetchone()[0] == 1
+
+
 def test_antidisable_workflow_creation_conflicts_do_not_overwrite_identity(tmp_path) -> None:
     database_path = tmp_path / "messages.db"
     repository = DiscordMessageRepository(database_path)
