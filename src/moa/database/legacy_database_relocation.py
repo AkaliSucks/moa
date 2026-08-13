@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -16,6 +17,9 @@ from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_TABLES
 
 
 _INCOMPLETE_RETIREMENT_MARKER_NAME = ".moa-relocation-incomplete"
+_RETIREMENT_TOMBSTONE_MARKER_NAME = ".moa-relocated"
+_RETIREMENT_TOMBSTONE_FORMAT = "moa-legacy-database-retirement"
+_RETIREMENT_TOMBSTONE_VERSION = 1
 _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS = 5000
 
 
@@ -49,6 +53,12 @@ class _DatabaseFingerprint:
     migration_rows: tuple[tuple[int, str], ...]
     table_counts: tuple[tuple[str, int], ...]
     representative_import_event: tuple[object, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RetirementTombstone:
+    target: Path
+    archive: Path
 
 
 def _source_file_path() -> Path:
@@ -87,10 +97,33 @@ def ensure_default_database_authority(target: Path) -> None:
             f"Legacy: {legacy_path.resolve(strict=False)}. Incomplete archive(s): {rendered}. "
             f"New default: {Path(target).resolve(strict=False)}. MOA cannot select an authority."
         )
-    if not legacy_path.exists():
-        return
     resolved_legacy = legacy_path.resolve(strict=False)
     resolved_target = Path(target).resolve(strict=False)
+    if legacy_path.is_dir() or legacy_path.is_symlink():
+        try:
+            _validate_retirement_tombstone(legacy_path, resolved_target)
+        except DatabaseRelocationError as error:
+            raise LegacyDatabaseAuthorityConflictError(
+                "The legacy database pathname is occupied by an invalid or unrecognized "
+                f"retirement obstruction. Legacy: {resolved_legacy}. New default: "
+                f"{resolved_target}. Resolve this state explicitly."
+            ) from error
+        if not resolved_target.is_file():
+            raise LegacyDatabaseAuthorityConflictError(
+                "A valid legacy database retirement tombstone exists, but its relocated "
+                f"target is missing or is not a file. Legacy: {resolved_legacy}. "
+                f"New default: {resolved_target}. Restore or recover the relocated database "
+                "before starting MOA."
+            )
+        return
+    if not legacy_path.exists():
+        return
+    if not legacy_path.is_file():
+        raise LegacyDatabaseAuthorityConflictError(
+            "The legacy database pathname contains an unexpected non-file obstruction. "
+            f"Legacy: {resolved_legacy}. New default: {resolved_target}. Resolve this state "
+            "explicitly."
+        )
     if resolved_target.exists():
         raise LegacyDatabaseAuthorityConflictError(
             "Both the legacy MOA database and the new default database exist. "
@@ -118,13 +151,19 @@ def relocate_database(
     if source_path == target_path:
         raise DatabaseRelocationError("Relocation source and target must be distinct paths.")
     if not source_path.is_file():
-        raise DatabaseRelocationError(f"Relocation source does not exist: {source_path}")
+        raise DatabaseRelocationError(
+            f"Relocation source does not exist as a database file: {source_path}"
+        )
     if target_path.exists():
         raise DatabaseRelocationError(
             f"Relocation target already exists and will not be overwritten: {target_path}"
         )
 
     verified_legacy = verified_legacy_database_path()
+    retirement_tombstone_required = (
+        verified_legacy is not None
+        and source_path == verified_legacy.resolve(strict=False)
+    )
     if verified_legacy is not None and verified_legacy.exists():
         resolved_legacy = verified_legacy.resolve(strict=False)
         if source_path != resolved_legacy:
@@ -193,6 +232,9 @@ def relocate_database(
                 _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_RELEASED")
                 archive_path = _retire_source(source_path)
                 _notify_test_hook(_test_hook, "SOURCE_RETIRED")
+                if retirement_tombstone_required:
+                    _install_retirement_tombstone(source_path, target_path, archive_path)
+                    _notify_test_hook(_test_hook, "RETIREMENT_TOMBSTONE_INSTALLED")
                 if _validate_database(archive_path) != source_fingerprint:
                     raise DatabaseRelocationError(
                         "LEGACY_SOURCE_RETIREMENT_BLOCKER: the archived source changed "
@@ -205,7 +247,14 @@ def relocate_database(
                         "after the final migration snapshot; the promoted target is not "
                         "authoritative."
                     )
-                if source_path.exists():
+                _notify_test_hook(_test_hook, "ARCHIVED_SOURCE_CERTIFIED")
+                if retirement_tombstone_required:
+                    _validate_retirement_tombstone(
+                        source_path,
+                        target_path,
+                        expected_archive=archive_path,
+                    )
+                elif source_path.exists():
                     raise DatabaseRelocationError(
                         "LEGACY_SOURCE_RETIREMENT_BLOCKER: a new legacy source appeared "
                         "during Windows retirement."
@@ -213,8 +262,17 @@ def relocate_database(
             else:
                 archive_path = _retire_source(source_path)
                 _notify_test_hook(_test_hook, "SOURCE_RETIRED")
+                if retirement_tombstone_required:
+                    _install_retirement_tombstone(source_path, target_path, archive_path)
+                    _notify_test_hook(_test_hook, "RETIREMENT_TOMBSTONE_INSTALLED")
                 _release_source_quiescence(source_connection)
                 source_connection = None
+                if retirement_tombstone_required:
+                    _validate_retirement_tombstone(
+                        source_path,
+                        target_path,
+                        expected_archive=archive_path,
+                    )
             _complete_source_retirement(archive_path)
         except BaseException as error:
             raise DatabaseRelocationError(
@@ -234,6 +292,100 @@ def relocate_database(
 def _incomplete_retirement_markers(source: Path) -> tuple[Path, ...]:
     pattern = f"{source.name}.migrated-backup-*/{_INCOMPLETE_RETIREMENT_MARKER_NAME}"
     return tuple(sorted(source.parent.glob(pattern)))
+
+
+def _install_retirement_tombstone(source: Path, target: Path, archive: Path) -> None:
+    try:
+        source.mkdir(exist_ok=False)
+    except OSError as error:
+        raise DatabaseRelocationError(
+            "LEGACY_PATH_RECREATION_BLOCKER: could not atomically install the persistent "
+            f"retirement tombstone at {source}: {error}"
+        ) from error
+
+    marker = source / _RETIREMENT_TOMBSTONE_MARKER_NAME
+    payload = {
+        "format": _RETIREMENT_TOMBSTONE_FORMAT,
+        "version": _RETIREMENT_TOMBSTONE_VERSION,
+        "target": str(target.resolve(strict=False)),
+        "archive": str(archive.resolve(strict=False)),
+    }
+    try:
+        _write_retirement_tombstone_marker(marker, payload)
+    except BaseException as error:
+        raise DatabaseRelocationError(
+            "LEGACY_PATH_RECREATION_BLOCKER: the retirement tombstone directory now blocks "
+            f"legacy database recreation, but its marker could not be completed at {marker}: "
+            f"{error}"
+        ) from error
+    _validate_retirement_tombstone(source, target, expected_archive=archive)
+
+
+def _write_retirement_tombstone_marker(marker: Path, payload: dict[str, object]) -> None:
+    with marker.open("x", encoding="utf-8", newline="\n") as marker_file:
+        json.dump(payload, marker_file, sort_keys=True)
+        marker_file.write("\n")
+        marker_file.flush()
+        os.fsync(marker_file.fileno())
+
+
+def _validate_retirement_tombstone(
+    source: Path,
+    target: Path,
+    *,
+    expected_archive: Path | None = None,
+) -> _RetirementTombstone:
+    if source.is_symlink() or not source.is_dir():
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone is not a real directory: {source}"
+        )
+    marker = source / _RETIREMENT_TOMBSTONE_MARKER_NAME
+    if marker.is_symlink() or not marker.is_file():
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker is missing or invalid: {marker}"
+        )
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise DatabaseRelocationError(
+            f"Could not read legacy retirement tombstone marker {marker}: {error}"
+        ) from error
+    expected_keys = {"format", "version", "target", "archive"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an invalid structure: {marker}"
+        )
+    if (
+        payload["format"] != _RETIREMENT_TOMBSTONE_FORMAT
+        or payload["version"] != _RETIREMENT_TOMBSTONE_VERSION
+        or not isinstance(payload["target"], str)
+        or not isinstance(payload["archive"], str)
+    ):
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an unsupported identity: {marker}"
+        )
+    tombstone = _RetirementTombstone(
+        Path(payload["target"]).resolve(strict=False),
+        Path(payload["archive"]).resolve(strict=False),
+    )
+    resolved_target = target.resolve(strict=False)
+    if tombstone.target != resolved_target:
+        raise DatabaseRelocationError(
+            "Legacy retirement tombstone target does not match the current default. "
+            f"Marker: {tombstone.target}. Current default: {resolved_target}."
+        )
+    if expected_archive is not None and tombstone.archive != expected_archive.resolve(
+        strict=False
+    ):
+        raise DatabaseRelocationError(
+            "Legacy retirement tombstone archive does not match this relocation. "
+            f"Marker: {tombstone.archive}. Relocation: {expected_archive.resolve(strict=False)}."
+        )
+    if not tombstone.archive.is_file():
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone archive is missing or is not a file: {tombstone.archive}"
+        )
+    return tombstone
 
 
 def _notify_test_hook(hook: Callable[[str], None] | None, stage: str) -> None:

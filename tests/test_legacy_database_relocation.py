@@ -10,6 +10,7 @@ from moa.database import legacy_database_relocation, sqlite
 from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     LegacyDatabaseAuthorityConflictError,
+    LegacyDatabaseRelocationRequiredError,
     relocate_database,
 )
 from moa.repositories.catalog_repository import CatalogRepository
@@ -84,6 +85,28 @@ def _hold_writer_transaction_process(database: str, holding, release, result_que
             connection.close()
 
 
+def _create_fresh_legacy_database_process(database: str, start, finished, result_queue) -> None:
+    connection = None
+    try:
+        if not start.wait(10):
+            raise RuntimeError("legacy writer start event was not signaled")
+        connection = sqlite3.connect(database, timeout=10)
+        connection.execute(
+            "CREATE TABLE competing_legacy_write (id INTEGER PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO competing_legacy_write (value) VALUES ('competing authority')"
+        )
+        connection.commit()
+        result_queue.put(("committed", None))
+    except BaseException as error:
+        result_queue.put(("error", repr(error)))
+    finally:
+        if connection is not None:
+            connection.close()
+        finished.set()
+
+
 def _join_process(process: multiprocessing.Process) -> None:
     process.join(10)
     if process.is_alive():
@@ -120,6 +143,18 @@ def _create_moa_database(path: Path, *, message: str = "representative content")
     gc.collect()
 
 
+def _assert_valid_tombstone(source: Path, target: Path, archive: Path) -> None:
+    tombstone = legacy_database_relocation._validate_retirement_tombstone(
+        source,
+        target,
+        expected_archive=archive,
+    )
+    assert source.is_dir()
+    assert (source / ".moa-relocated").is_file()
+    assert tombstone.target == target.resolve()
+    assert tombstone.archive == archive.resolve()
+
+
 def test_successful_relocation_validates_promotes_and_retires_source(
     monkeypatch, tmp_path
 ) -> None:
@@ -133,7 +168,7 @@ def test_successful_relocation_validates_promotes_and_retires_source(
 
     assert result.target == target.resolve()
     assert target.is_file()
-    assert not source.exists()
+    _assert_valid_tombstone(source, target, result.source_archive)
     assert result.source_archive.is_file()
     assert result.source_archive.name == "moa.db"
     assert result.source_archive.parent.name.startswith("moa.db.migrated-backup-")
@@ -146,6 +181,232 @@ def test_successful_relocation_validates_promotes_and_retires_source(
             "SELECT raw_message FROM import_events WHERE source = 'test'"
         ).fetchone()[0] == "representative content"
     assert Path(sqlite.DEFAULT_DATABASE_PATH) == target
+
+
+def test_competing_writer_winning_post_retirement_race_fails_relocation(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    finished = context.Event()
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_create_fresh_legacy_database_process,
+        args=(str(source), start, finished, result_queue),
+    )
+    process.start()
+
+    def let_writer_win(stage: str) -> None:
+        if stage != "SOURCE_RETIRED":
+            return
+        start.set()
+        assert finished.wait(10)
+
+    try:
+        with pytest.raises(DatabaseRelocationError, match="dual-authority") as error:
+            relocate_database(source, target, _test_hook=let_writer_win)
+    finally:
+        _join_process(process)
+
+    assert result_queue.get(timeout=1) == ("committed", None)
+    assert "LEGACY_PATH_RECREATION_BLOCKER" in str(error.value.__cause__)
+    assert source.is_file()
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("SELECT value FROM competing_legacy_write").fetchone()[0] == (
+            "competing authority"
+        )
+    assert target.is_file()
+    archives = list(source.parent.glob("moa.db.migrated-backup-*"))
+    assert len(archives) == 1
+    assert (archives[0] / "moa.db").is_file()
+    assert (archives[0] / ".moa-relocation-incomplete").is_file()
+    with pytest.raises(LegacyDatabaseAuthorityConflictError, match="incomplete"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+
+def test_retirement_tombstone_winning_race_blocks_fresh_legacy_database(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    finished = context.Event()
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_create_fresh_legacy_database_process,
+        args=(str(source), start, finished, result_queue),
+    )
+    process.start()
+
+    def let_tombstone_win(stage: str) -> None:
+        if stage != "RETIREMENT_TOMBSTONE_INSTALLED":
+            return
+        start.set()
+        assert finished.wait(10)
+
+    try:
+        result = relocate_database(source, target, _test_hook=let_tombstone_win)
+    finally:
+        _join_process(process)
+
+    outcome, detail = result_queue.get(timeout=1)
+    assert outcome == "error"
+    assert "OperationalError" in detail
+    assert target.is_file()
+    _assert_valid_tombstone(source, target, result.source_archive)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows final-success recreation boundary")
+def test_windows_tombstone_blocks_recreation_after_archive_certification(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    finished = context.Event()
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_create_fresh_legacy_database_process,
+        args=(str(source), start, finished, result_queue),
+    )
+    process.start()
+
+    def recreate_in_prior_final_check_window(stage: str) -> None:
+        if stage != "ARCHIVED_SOURCE_CERTIFIED":
+            return
+        start.set()
+        assert finished.wait(10)
+
+    try:
+        result = relocate_database(
+            source,
+            target,
+            _test_hook=recreate_in_prior_final_check_window,
+        )
+    finally:
+        _join_process(process)
+
+    outcome, detail = result_queue.get(timeout=1)
+    assert outcome == "error"
+    assert "OperationalError" in detail
+    assert target.is_file()
+    _assert_valid_tombstone(source, target, result.source_archive)
+
+
+def test_valid_tombstone_without_target_fails_closed(monkeypatch, tmp_path) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    result = relocate_database(source, target)
+    target.unlink()
+
+    with pytest.raises(LegacyDatabaseAuthorityConflictError, match="target is missing"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+    assert not target.exists()
+    _assert_valid_tombstone(source, target, result.source_archive)
+
+
+@pytest.mark.parametrize("marker_content", [None, "{"])
+def test_invalid_retirement_tombstone_fails_closed(
+    monkeypatch, tmp_path, marker_content: str | None
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    source.mkdir(parents=True)
+    if marker_content is not None:
+        (source / ".moa-relocated").write_text(marker_content, encoding="utf-8")
+    target = tmp_path / "user-data" / "moa.db"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"preserved target")
+
+    with pytest.raises(LegacyDatabaseAuthorityConflictError, match="invalid or unrecognized"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+    assert target.read_bytes() == b"preserved target"
+
+
+def test_ordinary_legacy_file_and_new_target_remain_dual_authority(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    _create_moa_database(target, message="separate target authority")
+
+    with pytest.raises(LegacyDatabaseAuthorityConflictError, match="Both the legacy"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+    assert source.is_file()
+    assert target.is_file()
+
+
+def test_ordinary_legacy_file_without_target_still_requires_relocation(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+
+    with pytest.raises(LegacyDatabaseRelocationRequiredError, match="relocate-database"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+    assert source.is_file()
+    assert not target.exists()
+
+
+def test_tombstone_marker_failure_preserves_barrier_and_incomplete_state(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+
+    def fail_marker_write(marker: Path, _payload: dict[str, object]) -> None:
+        marker.write_text("{", encoding="utf-8")
+        raise OSError("injected marker write failure")
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_write_retirement_tombstone_marker",
+        fail_marker_write,
+    )
+
+    with pytest.raises(DatabaseRelocationError, match="dual-authority") as error:
+        relocate_database(source, target)
+
+    assert "marker could not be completed" in str(error.value.__cause__)
+    assert source.is_dir()
+    assert (source / ".moa-relocated").read_text(encoding="utf-8") == "{"
+    assert target.is_file()
+    incomplete_markers = list(
+        source.parent.glob("moa.db.migrated-backup-*/.moa-relocation-incomplete")
+    )
+    assert len(incomplete_markers) == 1
+    assert (incomplete_markers[0].parent / "moa.db").is_file()
+    with pytest.raises(LegacyDatabaseAuthorityConflictError, match="incomplete"):
+        legacy_database_relocation.ensure_default_database_authority(target)
+
+
+def test_custom_source_relocation_does_not_install_legacy_tombstone(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(legacy_database_relocation, "verified_legacy_database_path", lambda: None)
+    source = tmp_path / "custom" / "custom.db"
+    _create_moa_database(source)
+    target = tmp_path / "target" / "moa.db"
+
+    result = relocate_database(source, target)
+
+    assert not source.exists()
+    assert target.is_file()
+    assert result.source_archive.is_file()
 
 
 def test_writer_committed_before_source_quiescence_is_included(monkeypatch, tmp_path) -> None:
@@ -237,7 +498,7 @@ def test_writer_after_final_snapshot_cannot_cross_successful_retirement(
         else:
             result = relocate_database(source, target, _test_hook=coordinate_writer)
             assert result.source_archive.is_file()
-            assert not source.exists()
+            _assert_valid_tombstone(source, target, result.source_archive)
         assert committed.wait(10)
     finally:
         allow_close.set()
@@ -319,7 +580,8 @@ def test_windows_writer_commit_in_close_gap_is_detected_before_success(
     else:
         assert "archived source changed" in cause_message
     assert target.is_file()
-    assert not source.exists()
+    assert source.is_dir()
+    assert (source / ".moa-relocated").is_file()
     assert len(
         list(
             source.parent.glob(
