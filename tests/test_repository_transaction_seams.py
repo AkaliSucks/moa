@@ -45,6 +45,7 @@ from moa.models.character import (
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories import catalog_repository as catalog_repository_module
 from moa.repositories import harem_repository as harem_repository_module
+from moa.repositories import profile_repository as profile_repository_module
 from moa.repositories.catalog_repository import (
     CatalogRepository,
     ImportEventDeletionBlockedError,
@@ -5656,6 +5657,34 @@ def test_profile_helper_writes_on_supplied_connection_before_commit(tmp_path) ->
             assert observer.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 0
 
 
+def test_profile_helper_is_transaction_neutral_on_supplied_connection(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+
+    def unexpected_connection(*args, **kwargs):
+        raise AssertionError("profile helper opened an independent connection")
+
+    def unexpected_runner(*args, **kwargs):
+        raise AssertionError("profile helper started an independent transaction")
+
+    monkeypatch.setattr(profile_repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(profile_repository_module, "run_write_transaction", unexpected_runner)
+
+    with connect(database_path) as connection:
+        imported = catalog._import_profile_with_connection(
+            connection,
+            profile=PROFILE,
+            server="Server",
+            account="Account",
+            raw="profile payload",
+            source="discord",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction is True
+        assert imported.profile_observation_id > 0
+
+
 def test_profile_helper_commit_persists_all_rows_and_result_ids(tmp_path) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
@@ -9564,13 +9593,13 @@ def test_public_profile_wrapper_rolls_back_helper_failure_and_remains_usable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_profile_with_connection
+    original_helper = catalog._profile_repository._import_profile_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced profile import failure")
 
-    monkeypatch.setattr(catalog, "_import_profile_with_connection", fail_after_write)
+    monkeypatch.setattr(catalog._profile_repository, "_import_profile_with_connection", fail_after_write)
 
     with pytest.raises(RuntimeError, match="forced profile import failure"):
         catalog.import_profile(PROFILE, "Server", "Account", "failed payload", "discord")
@@ -9588,7 +9617,7 @@ def test_public_profile_wrapper_rolls_back_helper_failure_and_remains_usable(
             "discord_processing_attempts": 0,
         }
 
-    monkeypatch.setattr(catalog, "_import_profile_with_connection", original_helper)
+    monkeypatch.setattr(catalog._profile_repository, "_import_profile_with_connection", original_helper)
     result = catalog.import_profile(
         PROFILE, "Server", "Account", "successful payload", "discord"
     )

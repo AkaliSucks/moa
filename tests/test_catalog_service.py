@@ -6,7 +6,7 @@ from threading import Event
 import pytest
 
 import moa.repositories.catalog_repository as catalog_repository_module
-from moa.models.character import DivorceConfirmation, RollObservation
+from moa.models.character import DivorceConfirmation, ProfileSnapshot, RollObservation
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import (
     CatalogRepository,
@@ -1591,6 +1591,39 @@ def test_import_timer_state_persists_a_short_lived_account_snapshot(tmp_path) ->
     assert state is not None
     assert state.snapshot.claim_reset_minutes == 152
     assert state.snapshot.kakera_stock == 12114
+
+
+def test_catalog_service_profile_round_trip_uses_catalog_facade(tmp_path) -> None:
+    service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    profile = ProfileSnapshot(
+        profile_name="ernieuuu",
+        collection_size=35,
+        female_percent=100,
+        male_percent=0,
+        pokedex_count=2,
+        pokedex_pokemon=("gulpin", "piloswine"),
+        kakera_reacts={":kakeraY:": 497},
+        mudapins_collected=None,
+        mudapins_total=None,
+        kakera_balance=812,
+        bronze_keys=3,
+        silver_keys=0,
+        gold_keys=0,
+        sphere_stock=None,
+        spheres={":spP:": 2},
+        displayed_badges=(":silvmudae:", ":DiamondI:"),
+    )
+
+    result = service.import_profile(
+        profile,
+        "Lake Arrowhead 2025",
+        "ernieuuu",
+        "profile payload",
+        "clipboard",
+    )
+
+    assert result.account_name == "ernieuuu"
+    assert service.profile("lake arrowhead 2025", "ERNIEUUU").snapshot == profile
 
 
 def test_kakera_reaction_summary_groups_receipts_and_scopes_account(tmp_path) -> None:
