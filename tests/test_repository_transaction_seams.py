@@ -4416,14 +4416,15 @@ def test_public_kakera_wrapper_runner_rolls_back_and_recovers(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_kakera_state_with_connection
+    repository = catalog._kakera_state_repository
+    original_helper = repository._import_kakera_state_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced Kakera State import failure")
 
     monkeypatch.setattr(
-        catalog,
+        repository,
         "_import_kakera_state_with_connection",
         fail_after_write,
     )
@@ -4451,7 +4452,7 @@ def test_public_kakera_wrapper_runner_rolls_back_and_recovers(
         }
 
     monkeypatch.setattr(
-        catalog,
+        repository,
         "_import_kakera_state_with_connection",
         original_helper,
     )
