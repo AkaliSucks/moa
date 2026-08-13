@@ -78,25 +78,49 @@ class ListenerProcessGuard:
             )
         self._claim_in_process_identity()
         handle: BinaryIO | None = None
+        os_lock_acquired = False
         try:
-            self._sidecar_path.parent.mkdir(parents=True, exist_ok=True)
-            handle = self._sidecar_path.open("a+b", buffering=0)
-            self._ensure_lock_byte(handle)
-            self._acquire_os_lock(handle)
-        except ListenerProcessGuardError:
-            if handle is not None:
-                handle.close()
-            self._release_in_process_identity()
+            try:
+                self._sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+                handle = self._sidecar_path.open("a+b", buffering=0)
+                self._ensure_lock_byte(handle)
+                self._acquire_os_lock(handle)
+                os_lock_acquired = True
+            except OSError as error:
+                raise ListenerProcessGuardResourceError(
+                    f"Could not create or open the listener lock for database "
+                    f"{self._database_path}."
+                ) from error
+        except BaseException as error:
+            cleanup_errors = self._cleanup_failed_acquisition(handle, os_lock_acquired)
+            for cleanup_error in cleanup_errors:
+                error.add_note(
+                    "Listener guard acquisition cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
             raise
-        except OSError as error:
-            if handle is not None:
-                handle.close()
-            self._release_in_process_identity()
-            raise ListenerProcessGuardResourceError(
-                f"Could not create or open the listener lock for database "
-                f"{self._database_path}."
-            ) from error
         self._handle = handle
+
+    def _cleanup_failed_acquisition(
+        self, handle: BinaryIO | None, os_lock_acquired: bool
+    ) -> tuple[BaseException, ...]:
+        """Release partial acquisition state without replacing its primary failure."""
+        cleanup_errors: list[BaseException] = []
+        self._handle = None
+        try:
+            if handle is not None and os_lock_acquired:
+                try:
+                    self._release_os_lock(handle)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+            if handle is not None:
+                try:
+                    handle.close()
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        finally:
+            self._release_in_process_identity()
+        return tuple(cleanup_errors)
 
     def release(self) -> None:
         """Release ownership; repeated release after success is harmless."""

@@ -96,6 +96,49 @@ from moa.services.tower_state_projection_coordinator import TowerStateProjection
 from moa.services.wishlist_projection_coordinator import WishlistProjectionResult
 
 
+def test_durable_database_identity_apis_are_read_only_and_aggregate_paths(tmp_path) -> None:
+    catalog_path = tmp_path / "catalog.db"
+    other_path = tmp_path / "other.db"
+    catalog_repository = CatalogRepository(catalog_path)
+    catalog = CatalogService(catalog_repository)
+    discord_repository = DiscordMessageRepository(catalog_path)
+
+    assert catalog_repository.database_path == catalog_path
+    assert catalog.database_path == catalog_path
+    assert discord_repository.database_path == catalog_path
+    with pytest.raises(AttributeError):
+        catalog_repository.database_path = other_path
+    with pytest.raises(AttributeError):
+        catalog.database_path = other_path
+    with pytest.raises(AttributeError):
+        discord_repository.database_path = other_path
+
+    catalog_only = AutomaticImportService(catalog)
+    assert catalog_only.durable_database_paths == frozenset({catalog_path})
+
+    same_path_coordinator = RollProjectionCoordinator(
+        CatalogRepository(catalog_path),
+        DiscordMessageRepository(catalog_path),
+    )
+    same_path = AutomaticImportService(
+        catalog,
+        roll_projection_coordinator=same_path_coordinator,
+    )
+    assert same_path.durable_database_paths == frozenset({catalog_path})
+
+    other_coordinator = RollProjectionCoordinator(
+        CatalogRepository(other_path),
+        DiscordMessageRepository(other_path),
+    )
+    distinct_paths = AutomaticImportService(
+        catalog,
+        roll_projection_coordinator=other_coordinator,
+    )
+    assert distinct_paths.durable_database_paths == frozenset(
+        {catalog_path, other_path.resolve()}
+    )
+
+
 ROLL_MESSAGE = "Hips\nDekoboko Majo no Oyako Jijou\n30:kakera:"
 PROFILE_MESSAGE = "moa\nCollection size: 0 (0%:female: 0% :male:)"
 CLAIM_MESSAGE = "ernieuuu and Pakunoda are now married!"

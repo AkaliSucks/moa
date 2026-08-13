@@ -1,5 +1,7 @@
 """Business operations for MOA's persisted character catalog."""
 
+from pathlib import Path
+
 from moa.models.catalog import (
     CharacterDetailsImportResult,
     ClaimImportResult,
@@ -86,6 +88,11 @@ class CatalogService:
 
     def __init__(self, repository: CatalogRepositoryProtocol | None = None) -> None:
         self._repository = repository or CatalogRepository()
+
+    @property
+    def database_path(self) -> Path:
+        """Return the effective SQLite database path used by the catalog."""
+        return self._repository.database_path
 
     def import_command_observation(
         self, command_name: str, raw_message: str, source: str

@@ -103,6 +103,10 @@ class _AccountAttributionDecision:
     authoritative_evidence: bool = False
 
 
+class ListenerDatabaseIdentityError(ValueError):
+    """Raised when one listener is composed with conflicting database identities."""
+
+
 @dataclass(frozen=True, slots=True)
 class DiscordEventCaptureConfig:
     """Explicit filters for a sensitive, diagnostic-only Gateway capture."""
@@ -748,19 +752,15 @@ class DiscordListenerService:
         self._durable_claim_imports_enabled = discord_message_repository is not None
         self._discord_message_repository = discord_message_repository
         if self._discord_message_repository is None and catalog_service is not None:
-            catalog_repository = getattr(catalog_service, "_repository", None)
-            inferred_database_path = getattr(catalog_repository, "_database_path", None)
+            inferred_database_path = getattr(catalog_service, "database_path", None)
             if inferred_database_path is not None:
                 # Preserve the existing direct-construction test and embedding path while
                 # production composition passes this dependency explicitly.
                 self._discord_message_repository = DiscordMessageRepository(
                     inferred_database_path
                 )
-        self._listener_database_path = self._resolve_listener_database_path(
-            database_path,
-            catalog_service,
-            self._discord_message_repository,
-        )
+        self._configured_database_path = database_path
+        self._listener_database_path: Path | None = None
         self._parser = MudaeTextParser()
         self._router = MudaeMessageRouter(self._parser)
         self._profile_name = profile_name
@@ -806,6 +806,7 @@ class DiscordListenerService:
             raise ValueError(
                 "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
             )
+        self._listener_database_path = self._resolve_listener_database_path()
         self._configure_logging()
         self._mudae_user_id = mudae_user_id
         intents = discord.Intents.none()
@@ -824,26 +825,58 @@ class DiscordListenerService:
                     "Discord rejected the bot token (401 Unauthorized). Check that it is the current "
                     "bot token from the Discord Developer Portal, then try again."
                 ) from error
-        finally:
+        except BaseException as error:
+            try:
+                guard.release()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    "Listener guard release also failed: "
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+            raise
+        else:
             guard.release()
 
-    @staticmethod
-    def _resolve_listener_database_path(
-        database_path: Path | None,
-        catalog_service: CatalogService | None,
-        discord_message_repository: DiscordMessageRepository | None,
-    ) -> Path:
-        if database_path is not None:
-            return database_path
-        if discord_message_repository is not None:
-            repository_path = getattr(discord_message_repository, "_database_path", None)
-            return Path(repository_path or DEFAULT_DATABASE_PATH)
-        if catalog_service is not None:
-            catalog_repository = getattr(catalog_service, "_repository", None)
-            repository_path = getattr(catalog_repository, "_database_path", None)
-            if repository_path is not None:
-                return Path(repository_path)
-        return DEFAULT_DATABASE_PATH
+    def _resolve_listener_database_path(self) -> Path:
+        candidates: list[Path] = []
+        catalog_path = getattr(self._catalog, "database_path", None)
+        if isinstance(catalog_path, (str, Path)):
+            candidates.append(Path(catalog_path))
+
+        importer_paths = getattr(self._importer, "durable_database_paths", ())
+        if isinstance(importer_paths, (tuple, list, set, frozenset)):
+            candidates.extend(
+                Path(path) for path in importer_paths if isinstance(path, (str, Path))
+            )
+
+        if self._discord_message_repository is not None:
+            candidates.append(self._discord_message_repository.database_path)
+        if self._configured_database_path is not None:
+            candidates.append(self._configured_database_path)
+        if not candidates:
+            candidates.append(DEFAULT_DATABASE_PATH)
+
+        canonical_paths: set[Path] = set()
+        for path in candidates:
+            path_text = str(path)
+            if path_text == ":memory:" or path_text.startswith("file:"):
+                raise ListenerDatabaseIdentityError(
+                    "The live Discord listener requires file-backed durable database identities."
+                )
+            try:
+                canonical_paths.add(Path(path).resolve(strict=False))
+            except (OSError, ValueError) as error:
+                raise ListenerDatabaseIdentityError(
+                    "A live Discord listener database identity could not be resolved."
+                ) from error
+
+        if len(canonical_paths) != 1:
+            rendered_paths = ", ".join(str(path) for path in sorted(canonical_paths))
+            raise ListenerDatabaseIdentityError(
+                "Live Discord listener durable dependencies must use one database; "
+                f"found: {rendered_paths}"
+            )
+        return next(iter(canonical_paths))
 
     @classmethod
     def _normalize_status_text(cls, status_text: str | None) -> str:

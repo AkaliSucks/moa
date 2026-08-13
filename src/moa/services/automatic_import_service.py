@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 from moa.models.catalog import AutomaticImportResult
 from moa.parser.message_router import MudaeMessageRouter
@@ -255,6 +256,32 @@ class AutomaticImportService:
         self._wishlist_projection_coordinator = wishlist_projection_coordinator
         self._disablelist_projection_coordinator = disablelist_projection_coordinator
         self._antidisable_page_projection_coordinator = antidisable_page_projection_coordinator
+
+    @property
+    def durable_database_paths(self) -> frozenset[Path]:
+        """Return every durable SQLite identity represented by this importer."""
+        paths = {self._catalog.database_path}
+        coordinators = (
+            self._roll_projection_coordinator,
+            self._profile_projection_coordinator,
+            self._claim_projection_coordinator,
+            self._settings_projection_coordinator,
+            self._infokl_projection_coordinator,
+            self._timer_projection_coordinator,
+            self._kakera_state_projection_coordinator,
+            self._mudapins_projection_coordinator,
+            self._tower_state_projection_coordinator,
+            self._kakeraloot_state_projection_coordinator,
+            self._sphere_result_projection_coordinator,
+            self._player_bonus_projection_coordinator,
+            self._wishlist_projection_coordinator,
+            self._disablelist_projection_coordinator,
+            self._antidisable_page_projection_coordinator,
+        )
+        for coordinator in coordinators:
+            if coordinator is not None:
+                paths.add(Path(coordinator._database_path))
+        return frozenset(paths)
 
     def import_message(
         self,

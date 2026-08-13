@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect, run_write_transaction
 from moa.database.migrations import (
     CATALOG_MIGRATIONS,
     run_migrations,
@@ -118,6 +118,11 @@ def _schema_bootstrap_transaction(connection: sqlite3.Connection):
 
 class CatalogRepositoryProtocol(Protocol):
     """Storage contract required by :class:`CatalogService`."""
+
+    @property
+    def database_path(self) -> Path:
+        """Return the effective SQLite database path used by this repository."""
+        ...
 
     def import_command_observation(
         self, command_name: str, raw_message: str, source: str
@@ -612,6 +617,11 @@ class CatalogRepository:
     def __init__(self, database_path: Path | None = None) -> None:
         self._database_path = database_path
         self._initialize()
+
+    @property
+    def database_path(self) -> Path:
+        """Return the effective SQLite database path used by this repository."""
+        return Path(self._database_path or DEFAULT_DATABASE_PATH)
 
     def import_command_observation(
         self, command_name: str, raw_message: str, source: str

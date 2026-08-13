@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect, run_write_transaction
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 
@@ -184,6 +184,11 @@ class DiscordMessageRepository:
         # The current migration bootstrap is owned by CatalogRepository.  Reuse
         # it without exposing any catalog repository methods here.
         CatalogRepository(database_path)
+
+    @property
+    def database_path(self) -> Path:
+        """Return the effective SQLite database path used by this repository."""
+        return Path(self._database_path or DEFAULT_DATABASE_PATH)
 
     def create_antidisable_workflow(
         self,

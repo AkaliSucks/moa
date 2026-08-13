@@ -167,6 +167,70 @@ def test_structurally_invalid_resource_is_not_reported_as_contention(tmp_path) -
     assert not guard.is_acquired
 
 
+def test_acquisition_cleanup_preserves_primary_failure_when_close_also_fails(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "moa.db"
+    guard = ListenerProcessGuard(database_path)
+
+    class CloseFailureHandle:
+        def seek(self, *_args) -> None:
+            pass
+
+        def tell(self) -> int:
+            return 1
+
+        def close(self) -> None:
+            raise RuntimeError("secondary close failure")
+
+    handle = CloseFailureHandle()
+    original_open = Path.open
+
+    def open_sidecar(path, *args, **kwargs):
+        if path == guard.sidecar_path:
+            return handle
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_sidecar)
+    monkeypatch.setattr(
+        guard,
+        "_acquire_os_lock",
+        lambda _handle: (_ for _ in ()).throw(
+            ListenerProcessGuardResourceError("primary acquisition failure")
+        ),
+    )
+
+    with pytest.raises(ListenerProcessGuardResourceError) as error:
+        guard.acquire()
+
+    assert str(error.value) == "primary acquisition failure"
+    assert any("secondary close failure" in note for note in error.value.__notes__)
+    assert not guard.is_acquired
+
+    monkeypatch.undo()
+    recovered = ListenerProcessGuard(database_path)
+    recovered.acquire()
+    recovered.release()
+
+
+def test_baseexception_during_acquisition_releases_local_identity(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    guard = ListenerProcessGuard(database_path)
+    monkeypatch.setattr(
+        guard,
+        "_ensure_lock_byte",
+        lambda _handle: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        guard.acquire()
+
+    assert not guard.is_acquired
+    recovered = ListenerProcessGuard(database_path)
+    recovered.acquire()
+    recovered.release()
+
+
 @pytest.mark.parametrize("database_path", [Path(":memory:"), Path("file:moa.db")])
 def test_non_file_backed_database_forms_fail_closed(database_path) -> None:
     with pytest.raises(ListenerProcessGuardResourceError, match="file-backed"):

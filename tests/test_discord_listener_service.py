@@ -32,6 +32,7 @@ from moa.services.discord_listener_service import (
     DiscordEventCaptureError,
     DiscordEventCaptureService,
     DiscordListenerService,
+    ListenerDatabaseIdentityError,
     _MOADiagnosticDiscordClient,
 )
 from moa.services.discord_component_board_adapter import DiscordComponentBoardProjectionError
@@ -1275,6 +1276,223 @@ def test_listener_guard_conflict_prevents_client_construction(monkeypatch, tmp_p
     assert constructed == 0
 
 
+def test_listener_rejects_explicit_database_mismatch_before_guard_or_client(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    other_path = tmp_path / "other.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    listener = DiscordListenerService(
+        catalog_service=catalog,
+        importer=AutomaticImportService(catalog),
+        discord_message_repository=DiscordMessageRepository(database_path),
+        database_path=other_path,
+    )
+    acquired = 0
+    constructed = 0
+
+    def acquire(_guard) -> None:
+        nonlocal acquired
+        acquired += 1
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(ListenerProcessGuard, "acquire", acquire)
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerDatabaseIdentityError, match="must use one database"):
+        listener.run("test-token")
+
+    assert acquired == 0
+    assert constructed == 0
+    assert not other_path.with_name("other.db.listener.lock").exists()
+
+
+@pytest.mark.parametrize("database_path", [Path(":memory:"), Path("file:listener.db")])
+def test_listener_rejects_unsupported_database_identity_before_guard_or_client(
+    monkeypatch, database_path
+) -> None:
+    listener = DiscordListenerService(
+        catalog_service=SimpleNamespace(),
+        importer=Mock(),
+        database_path=database_path,
+    )
+    acquired = 0
+    constructed = 0
+
+    def acquire(_guard) -> None:
+        nonlocal acquired
+        acquired += 1
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(ListenerProcessGuard, "acquire", acquire)
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerDatabaseIdentityError, match="file-backed"):
+        listener.run("test-token")
+
+    assert acquired == 0
+    assert constructed == 0
+
+
+def test_listener_accepts_explicit_canonical_alias(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    alias_path = tmp_path / "unused" / ".." / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    listener = DiscordListenerService(
+        catalog_service=catalog,
+        importer=AutomaticImportService(catalog),
+        discord_message_repository=DiscordMessageRepository(database_path),
+        database_path=alias_path,
+    )
+
+    class FakeClient:
+        run_calls: list[str] = []
+
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, token) -> None:
+            self.__class__.run_calls.append(token)
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    listener.run("test-token")
+
+    assert listener._listener_database_path == database_path.resolve()
+    assert FakeClient.run_calls == ["test-token"]
+
+
+def test_listener_rejects_catalog_and_discord_database_mismatch(monkeypatch, tmp_path) -> None:
+    catalog_path = tmp_path / "catalog.db"
+    discord_path = tmp_path / "discord.db"
+    catalog = CatalogService(CatalogRepository(catalog_path))
+    listener = DiscordListenerService(
+        catalog_service=catalog,
+        importer=AutomaticImportService(catalog),
+        discord_message_repository=DiscordMessageRepository(discord_path),
+    )
+    constructed = 0
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerDatabaseIdentityError, match="must use one database"):
+        listener.run("test-token")
+
+    assert constructed == 0
+
+
+def test_listener_rejects_importer_database_mismatch(monkeypatch, tmp_path) -> None:
+    listener_path = tmp_path / "listener.db"
+    importer_path = tmp_path / "importer.db"
+    listener_catalog = CatalogService(CatalogRepository(listener_path))
+    importer_catalog = CatalogService(CatalogRepository(importer_path))
+    listener = DiscordListenerService(
+        catalog_service=listener_catalog,
+        importer=AutomaticImportService(importer_catalog),
+        discord_message_repository=DiscordMessageRepository(listener_path),
+    )
+    constructed = 0
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerDatabaseIdentityError, match="must use one database"):
+        listener.run("test-token")
+
+    assert constructed == 0
+
+
+def test_listener_rejects_importer_coordinator_database_mismatch(
+    monkeypatch, tmp_path
+) -> None:
+    listener_path = tmp_path / "listener.db"
+    coordinator_path = tmp_path / "coordinator.db"
+    catalog = CatalogService(CatalogRepository(listener_path))
+    coordinator = RollProjectionCoordinator(
+        CatalogRepository(coordinator_path),
+        DiscordMessageRepository(coordinator_path),
+    )
+    importer = AutomaticImportService(
+        catalog,
+        roll_projection_coordinator=coordinator,
+    )
+    listener = DiscordListenerService(
+        catalog_service=catalog,
+        importer=importer,
+        discord_message_repository=DiscordMessageRepository(listener_path),
+    )
+    constructed = 0
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerDatabaseIdentityError, match="must use one database"):
+        listener.run("test-token")
+
+    assert constructed == 0
+
+
+def test_listener_infers_coherent_durable_database(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    listener = DiscordListenerService(
+        catalog_service=catalog,
+        importer=AutomaticImportService(catalog),
+        discord_message_repository=DiscordMessageRepository(database_path),
+    )
+
+    class FakeClient:
+        run_calls = 0
+
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, _token) -> None:
+            self.__class__.run_calls += 1
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    listener.run("test-token")
+
+    assert listener._listener_database_path == database_path.resolve()
+    assert FakeClient.run_calls == 1
+
+
 def test_listener_holds_guard_through_run_and_releases_for_sequential_runs(
     monkeypatch, tmp_path
 ) -> None:
@@ -1353,12 +1571,80 @@ def test_listener_client_run_failure_releases_guard(monkeypatch, tmp_path) -> No
         assert recovered.is_acquired
 
 
+def test_listener_client_failure_remains_primary_when_guard_release_also_fails(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    listener = DiscordListenerService(catalog_service=catalog, database_path=database_path)
+    client_error = RuntimeError("sentinel client failure")
+    original_release = ListenerProcessGuard.release
+
+    class FailingClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, _token) -> None:
+            raise client_error
+
+    def release_then_fail(guard) -> None:
+        original_release(guard)
+        raise ListenerProcessGuardResourceError("secondary release failure")
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FailingClient
+    )
+    monkeypatch.setattr(ListenerProcessGuard, "release", release_then_fail)
+
+    with pytest.raises(RuntimeError) as error:
+        listener.run("test-token")
+
+    assert error.value is client_error
+    assert any("secondary release failure" in note for note in error.value.__notes__)
+    recovered = ListenerProcessGuard(database_path)
+    recovered.acquire()
+    original_release(recovered)
+
+
+def test_listener_surfaces_guard_release_failure_after_normal_client_exit(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    listener = DiscordListenerService(catalog_service=catalog, database_path=database_path)
+    original_release = ListenerProcessGuard.release
+
+    class SuccessfulClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, _token) -> None:
+            pass
+
+    def release_then_fail(guard) -> None:
+        original_release(guard)
+        raise ListenerProcessGuardResourceError("release failure")
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", SuccessfulClient
+    )
+    monkeypatch.setattr(ListenerProcessGuard, "release", release_then_fail)
+
+    with pytest.raises(ListenerProcessGuardResourceError, match="release failure"):
+        listener.run("test-token")
+
+    recovered = ListenerProcessGuard(database_path)
+    recovered.acquire()
+    original_release(recovered)
+
+
 def test_listener_resource_failure_prevents_client_construction(monkeypatch, tmp_path) -> None:
     parent_file = tmp_path / "not-a-directory"
     parent_file.write_text("ordinary file", encoding="utf-8")
     database_path = parent_file / "catalog.db"
     listener = DiscordListenerService(
-        catalog_service=CatalogService(CatalogRepository(tmp_path / "safe.db")),
+        catalog_service=SimpleNamespace(),
+        importer=Mock(),
         database_path=database_path,
     )
     constructed = 0
