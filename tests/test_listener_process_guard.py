@@ -273,6 +273,45 @@ def test_cli_surfaces_listener_conflict_without_token_or_traceback(monkeypatch, 
     assert "Traceback" not in result.stdout
 
 
+def test_cli_listener_guard_follows_runtime_platform_database(monkeypatch, tmp_path) -> None:
+    from moa.database import legacy_database_relocation, sqlite
+
+    platform_root = tmp_path / "user-data" / "moa"
+    target = platform_root / "moa.db"
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(sqlite, "user_data_path", lambda **_kwargs: platform_root)
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_source_file_path",
+        lambda: tmp_path / "site-packages" / "moa" / "database" / "module.py",
+    )
+
+    class RecordingListener:
+        def __init__(self, **kwargs) -> None:
+            captured["database_path"] = kwargs["database_path"]
+            captured["catalog_path"] = kwargs["catalog_service"].database_path
+            captured["discord_path"] = kwargs["discord_message_repository"].database_path
+            captured["guard"] = ListenerProcessGuard(kwargs["database_path"])
+
+        def run(self, _token, _mudae_user_id) -> None:
+            return None
+
+    monkeypatch.setattr(main, "DiscordListenerService", RecordingListener)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token"],
+    )
+
+    assert result.exit_code == 0
+    assert captured["database_path"] == target
+    assert captured["catalog_path"] == target
+    assert captured["discord_path"] == target
+    guard = captured["guard"]
+    assert guard.sidecar_path == target.with_name("moa.db.listener.lock")
+    assert "test-token" not in result.stdout
+
+
 def test_cli_distinguishes_listener_resource_failure(monkeypatch, tmp_path) -> None:
     database_path = tmp_path / "moa.db"
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)

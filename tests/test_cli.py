@@ -1006,6 +1006,115 @@ def test_catalog_reset_requires_confirmation_and_backs_up_database(monkeypatch, 
     assert len(list(tmp_path.glob("moa.db.bak-full-reset-*"))) == 1
 
 
+def test_catalog_relocate_database_requires_explicit_source() -> None:
+    result = CliRunner().invoke(main.app, ["catalog", "relocate-database", "--apply"])
+
+    assert result.exit_code == 2
+    assert "SOURCE" in result.stderr
+
+
+def test_catalog_relocate_database_warns_and_requires_apply(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+
+    result = CliRunner().invoke(main.app, ["catalog", "relocate-database", str(source)])
+
+    assert result.exit_code == 0
+    unwrapped_output = result.stdout.replace("\n", "")
+    assert str(source.resolve()) in unwrapped_output
+    assert str(target.resolve()) in unwrapped_output
+    assert "listener must be stopped" in result.stdout
+    assert "old MOA checkouts" in result.stdout
+    assert "No changes made" in result.stdout
+    assert not target.exists()
+
+
+def test_catalog_relocate_database_applies_without_traceback(monkeypatch, tmp_path) -> None:
+    from moa.database import legacy_database_relocation, sqlite
+
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    CatalogRepository(source)
+    connection = sqlite.connect(source)
+    connection.execute(
+        "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+        "VALUES ('command_observation', 'cli-test', '2026-08-12T00:00:00+00:00', 'copied')"
+    )
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "verified_legacy_database_path",
+        lambda: None,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "relocate-database", str(source), "--apply"],
+    )
+
+    assert result.exit_code == 0
+    assert "Database relocated" in result.stdout
+    assert "Legacy source archived" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert target.is_file()
+    assert not source.exists()
+
+
+def test_catalog_relocate_database_reports_existing_target_without_traceback(
+    monkeypatch, tmp_path
+) -> None:
+    from moa.database import legacy_database_relocation
+
+    source = tmp_path / "legacy" / "moa.db"
+    source.parent.mkdir()
+    source.write_bytes(b"source")
+    target = tmp_path / "user-data" / "moa.db"
+    target.parent.mkdir()
+    target.write_bytes(b"target")
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "verified_legacy_database_path",
+        lambda: None,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "relocate-database", str(source), "--apply"],
+    )
+
+    assert result.exit_code == 1
+    assert "will not be overwritten" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert source.read_bytes() == b"source"
+    assert target.read_bytes() == b"target"
+
+
+def test_catalog_repair_uses_same_effective_default_for_backup(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "user-data" / "moa.db"
+    database_path.parent.mkdir()
+    database_path.write_bytes(b"catalog")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    class RecordingCatalogService:
+        def inspect_bugged_imports(self):
+            return 1, 0
+
+        def repair_bugged_imports(self):
+            return 1, 0
+
+    monkeypatch.setattr(main, "CatalogService", RecordingCatalogService)
+
+    result = CliRunner().invoke(main.app, ["catalog", "repair-bugged-data", "--apply"])
+
+    assert result.exit_code == 0
+    assert database_path.read_bytes() == b"catalog"
+    assert len(list(database_path.parent.glob("moa.db.bak-*"))) == 1
+
+
 def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> None:
     class BlockingCatalogService:
         def delete_import_event(self, import_event_id):

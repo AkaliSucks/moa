@@ -26,6 +26,26 @@ timestamped claim-rank snapshot, and archives the exact copied message in the
 local SQLite database. The database is intentionally local and ignored by Git:
 it is personal account data, not packaged reference knowledge.
 
+The implicit live database is `moa.db` in the operating system's per-user MOA
+application-data directory (for example, the platform-local application-data
+directory on Windows), not inside the repository checkout. Explicit database
+paths supplied through MOA's Python APIs are unchanged.
+
+Older checkouts used `data/database/moa.db`. MOA does not migrate that database
+automatically: if it detects the verified checkout-local database before the
+new location is initialized, normal implicit startup stops instead of creating
+an empty replacement. Stop the Discord listener and relocate an explicit source:
+
+```powershell
+moa catalog relocate-database data/database/moa.db --apply
+```
+
+The command shows both paths, creates and validates a SQLite snapshot, archives
+the old live pathname only after the new database is valid, and refuses to
+overwrite or merge an existing target. After success, do not resume an old MOA
+checkout that writes the retired location; no cross-version synchronization is
+provided.
+
 `$topo` pages must include the server where the message was observed so owner
 claims do not leak between servers. In Discord, run `$topo` and copy the full
 response, then run the matching command:

@@ -8,7 +8,11 @@ from rich.console import Console
 from rich.table import Table
 
 from moa.core.config import ConfigService
-from moa.database.sqlite import DEFAULT_DATABASE_PATH
+from moa.database.legacy_database_relocation import (
+    DatabaseRelocationError,
+    relocate_database,
+)
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
@@ -304,9 +308,10 @@ def discord_listen(
     )
     logging.getLogger("moa.discord").setLevel(logging.INFO)
     try:
-        catalog_repository = CatalogRepository(DEFAULT_DATABASE_PATH)
+        database_path = Path(DEFAULT_DATABASE_PATH)
+        catalog_repository = CatalogRepository(database_path)
         catalog_service = CatalogService(catalog_repository)
-        discord_message_repository = DiscordMessageRepository(DEFAULT_DATABASE_PATH)
+        discord_message_repository = DiscordMessageRepository(database_path)
         roll_projection_coordinator = RollProjectionCoordinator(
             catalog_repository,
             discord_message_repository,
@@ -383,7 +388,7 @@ def discord_listen(
         DiscordListenerService(
             catalog_service=catalog_service,
             importer=importer,
-            database_path=DEFAULT_DATABASE_PATH,
+            database_path=database_path,
             profile_name=profile,
             status_text=status,
             discord_message_repository=discord_message_repository,
@@ -3081,7 +3086,7 @@ def catalog_reset(
     ),
 ) -> None:
     """Reset imported catalog data while preserving the MOA configuration."""
-    database_path = DEFAULT_DATABASE_PATH
+    database_path = Path(DEFAULT_DATABASE_PATH)
     if not confirm:
         console.print(
             "[yellow]No changes made. This removes all imported catalog data but keeps your "
@@ -3110,6 +3115,37 @@ def catalog_reset(
     console.print(f"Backup saved to: {backup_path}")
 
 
+@catalog_app.command("relocate-database")
+def catalog_relocate_database(
+    source: Path = typer.Argument(..., help="Explicit legacy MOA database path."),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Create the new database and retire the explicit source path.",
+    ),
+) -> None:
+    """Move database authority to MOA's per-user application-data location."""
+    target = default_database_path().resolve(strict=False)
+    resolved_source = source.expanduser().resolve(strict=False)
+    console.print(f"Source: {resolved_source}")
+    console.print(f"Target: {target}")
+    console.print("[yellow]The Discord listener must be stopped before relocation.[/yellow]")
+    console.print(
+        "[yellow]Do not resume old MOA checkouts that write the legacy database after "
+        "relocation; no cross-version synchronization is provided.[/yellow]"
+    )
+    if not apply:
+        console.print("[yellow]No changes made. Rerun with --apply after stopping the listener.[/yellow]")
+        return
+    try:
+        result = relocate_database(resolved_source, target)
+    except DatabaseRelocationError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(f"[green]Database relocated to: {result.target}[/green]")
+    console.print(f"Legacy source archived at: {result.source_archive}")
+
+
 @catalog_app.command("repair-bugged-data")
 def catalog_repair_bugged_data(
     apply: bool = typer.Option(
@@ -3136,7 +3172,7 @@ def catalog_repair_bugged_data(
         console.print("[green]No targeted bugged data was found; nothing changed.[/green]")
         return
 
-    database_path = DEFAULT_DATABASE_PATH
+    database_path = Path(DEFAULT_DATABASE_PATH)
     backup_path = database_path.with_name(
         f"{database_path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     )
