@@ -6649,14 +6649,14 @@ def test_public_player_bonus_wrapper_runner_rolls_back_and_recovers(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_player_bonus_with_connection
+    original_helper = catalog._player_bonus_repository._import_player_bonus_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced Player Bonus import failure")
 
     monkeypatch.setattr(
-        catalog,
+        catalog._player_bonus_repository,
         "_import_player_bonus_with_connection",
         fail_after_write,
     )
@@ -6684,7 +6684,7 @@ def test_public_player_bonus_wrapper_runner_rolls_back_and_recovers(
         }
 
     monkeypatch.setattr(
-        catalog,
+        catalog._player_bonus_repository,
         "_import_player_bonus_with_connection",
         original_helper,
     )
