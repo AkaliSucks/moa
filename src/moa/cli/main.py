@@ -35,6 +35,10 @@ from moa.services.disablelist_projection_coordinator import DisableListProjectio
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
+from moa.services.listener_process_guard import (
+    ListenerAlreadyRunningError,
+    ListenerProcessGuardResourceError,
+)
 from moa.services.keyfarm_service import KeyFarmService
 from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
@@ -379,10 +383,17 @@ def discord_listen(
         DiscordListenerService(
             catalog_service=catalog_service,
             importer=importer,
+            database_path=DEFAULT_DATABASE_PATH,
             profile_name=profile,
             status_text=status,
             discord_message_repository=discord_message_repository,
         ).run(token, parsed_mudae_user_id)
+    except ListenerAlreadyRunningError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    except ListenerProcessGuardResourceError as error:
+        console.print(f"[red]Listener ownership unavailable: {error}[/red]")
+        raise typer.Exit(1) from error
     except ValueError as error:
         console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error

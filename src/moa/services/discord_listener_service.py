@@ -19,7 +19,7 @@ from typing import Any, Literal, Mapping
 import discord
 
 from moa.core.config import ConfigAccount, ConfigService
-from moa.database.sqlite import run_write_transaction
+from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.models.discord_identity import MessageAggregateKey, SourcePlatform
@@ -60,6 +60,7 @@ from moa.services.discord_component_board_adapter import (
     DiscordComponentBoardAdapter,
     DiscordComponentBoardProjectionError,
 )
+from moa.services.listener_process_guard import ListenerProcessGuard
 from moa.services.ourochest_transition_service import OurochestTransitionService
 from moa.services.ourochest_workflow_coordinator import OurochestWorkflowCoordinator
 from moa.services.ourochest_workflow_service import (
@@ -732,6 +733,7 @@ class DiscordListenerService:
         catalog_service: CatalogService | None = None,
         importer: AutomaticImportService | None = None,
         discord_message_repository: DiscordMessageRepository | None = None,
+        database_path: Path | None = None,
         profile_name: str | None = None,
         status_text: str = _DEFAULT_STATUS_TEXT,
         logger: logging.Logger | None = None,
@@ -747,11 +749,18 @@ class DiscordListenerService:
         self._discord_message_repository = discord_message_repository
         if self._discord_message_repository is None and catalog_service is not None:
             catalog_repository = getattr(catalog_service, "_repository", None)
-            database_path = getattr(catalog_repository, "_database_path", None)
-            if database_path is not None:
+            inferred_database_path = getattr(catalog_repository, "_database_path", None)
+            if inferred_database_path is not None:
                 # Preserve the existing direct-construction test and embedding path while
                 # production composition passes this dependency explicitly.
-                self._discord_message_repository = DiscordMessageRepository(database_path)
+                self._discord_message_repository = DiscordMessageRepository(
+                    inferred_database_path
+                )
+        self._listener_database_path = self._resolve_listener_database_path(
+            database_path,
+            catalog_service,
+            self._discord_message_repository,
+        )
         self._parser = MudaeTextParser()
         self._router = MudaeMessageRouter(self._parser)
         self._profile_name = profile_name
@@ -804,14 +813,37 @@ class DiscordListenerService:
         intents.messages = True
         intents.message_content = True
         intents.reactions = True
-        client = _MOADiscordClient(self, intents=intents)
+        guard = ListenerProcessGuard(self._listener_database_path)
+        guard.acquire()
         try:
-            client.run(normalized_token)
-        except discord.LoginFailure as error:
-            raise ValueError(
-                "Discord rejected the bot token (401 Unauthorized). Check that it is the current "
-                "bot token from the Discord Developer Portal, then try again."
-            ) from error
+            client = _MOADiscordClient(self, intents=intents)
+            try:
+                client.run(normalized_token)
+            except discord.LoginFailure as error:
+                raise ValueError(
+                    "Discord rejected the bot token (401 Unauthorized). Check that it is the current "
+                    "bot token from the Discord Developer Portal, then try again."
+                ) from error
+        finally:
+            guard.release()
+
+    @staticmethod
+    def _resolve_listener_database_path(
+        database_path: Path | None,
+        catalog_service: CatalogService | None,
+        discord_message_repository: DiscordMessageRepository | None,
+    ) -> Path:
+        if database_path is not None:
+            return database_path
+        if discord_message_repository is not None:
+            repository_path = getattr(discord_message_repository, "_database_path", None)
+            return Path(repository_path or DEFAULT_DATABASE_PATH)
+        if catalog_service is not None:
+            catalog_repository = getattr(catalog_service, "_repository", None)
+            repository_path = getattr(catalog_repository, "_database_path", None)
+            if repository_path is not None:
+                return Path(repository_path)
+        return DEFAULT_DATABASE_PATH
 
     @classmethod
     def _normalize_status_text(cls, status_text: str | None) -> str:

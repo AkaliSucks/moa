@@ -50,6 +50,11 @@ from moa.services.kakera_state_projection_coordinator import KakeraStateProjecti
 from moa.services.kakeraloot_state_projection_coordinator import (
     KakeralootStateProjectionCoordinator,
 )
+from moa.services.listener_process_guard import (
+    ListenerAlreadyRunningError,
+    ListenerProcessGuard,
+    ListenerProcessGuardResourceError,
+)
 from moa.services.mudapins_projection_coordinator import MudapinsProjectionCoordinator
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
@@ -1239,6 +1244,138 @@ def test_listener_rejects_example_bot_token(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Replace YOUR_DISCORD_BOT_TOKEN"):
         listener.run("YOUR_DISCORD_BOT_TOKEN")
+
+
+def test_listener_guard_conflict_prevents_client_construction(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+    )
+    constructed = 0
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+        def run(self, _token) -> None:
+            raise AssertionError("blocked client must not run")
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+    owner = ListenerProcessGuard(database_path)
+    owner.acquire()
+    try:
+        with pytest.raises(ListenerAlreadyRunningError):
+            listener.run("test-token")
+    finally:
+        owner.release()
+
+    assert constructed == 0
+
+
+def test_listener_holds_guard_through_run_and_releases_for_sequential_runs(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        database_path=database_path,
+    )
+
+    class FakeClient:
+        run_calls: list[str] = []
+
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, token) -> None:
+            self.__class__.run_calls.append(token)
+            with pytest.raises(ListenerAlreadyRunningError):
+                ListenerProcessGuard(database_path).acquire()
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    listener.run("test-token")
+    listener.run("test-token")
+
+    assert FakeClient.run_calls == ["test-token", "test-token"]
+    with ListenerProcessGuard(database_path) as recovered:
+        assert recovered.is_acquired
+
+
+def test_listener_client_construction_failure_releases_guard(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        database_path=database_path,
+    )
+
+    class ConstructionFailureClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            raise RuntimeError("client construction failed")
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient",
+        ConstructionFailureClient,
+    )
+
+    with pytest.raises(RuntimeError, match="client construction failed"):
+        listener.run("test-token")
+    with ListenerProcessGuard(database_path) as recovered:
+        assert recovered.is_acquired
+
+
+def test_listener_client_run_failure_releases_guard(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(database_path)),
+        database_path=database_path,
+    )
+
+    class RunFailureClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            pass
+
+        def run(self, _token) -> None:
+            raise RuntimeError("client run failed")
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", RunFailureClient
+    )
+
+    with pytest.raises(RuntimeError, match="client run failed"):
+        listener.run("test-token")
+    with ListenerProcessGuard(database_path) as recovered:
+        assert recovered.is_acquired
+
+
+def test_listener_resource_failure_prevents_client_construction(monkeypatch, tmp_path) -> None:
+    parent_file = tmp_path / "not-a-directory"
+    parent_file.write_text("ordinary file", encoding="utf-8")
+    database_path = parent_file / "catalog.db"
+    listener = DiscordListenerService(
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "safe.db")),
+        database_path=database_path,
+    )
+    constructed = 0
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs) -> None:
+            nonlocal constructed
+            constructed += 1
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service._MOADiscordClient", FakeClient
+    )
+
+    with pytest.raises(ListenerProcessGuardResourceError):
+        listener.run("test-token")
+
+    assert constructed == 0
 
 
 def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
