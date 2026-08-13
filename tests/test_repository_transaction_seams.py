@@ -44,6 +44,7 @@ from moa.models.character import (
 )
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories import catalog_repository as catalog_repository_module
+from moa.repositories import harem_repository as harem_repository_module
 from moa.repositories.catalog_repository import (
     CatalogRepository,
     ImportEventDeletionBlockedError,
@@ -246,7 +247,7 @@ def test_harem_scan_completion_uses_supplied_connection_and_persists_result(
             ).fetchall()
         ]
 
-    original_helper = catalog._harem_scan_progress_with_connection
+    original_helper = catalog._harem_repository._harem_scan_progress_with_connection
     helper_calls: list[tuple[int, bool]] = []
 
     def observed_helper(connection: sqlite3.Connection, scan_id: int):
@@ -256,8 +257,12 @@ def test_harem_scan_completion_uses_supplied_connection_and_persists_result(
     def unexpected_connection():
         raise AssertionError("completion opened an independent repository connection")
 
-    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", observed_helper)
-    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+    monkeypatch.setattr(
+        catalog._harem_repository,
+        "_harem_scan_progress_with_connection",
+        observed_helper,
+    )
+    monkeypatch.setattr(catalog._harem_repository, "_connection", unexpected_connection)
 
     completed = catalog.complete_harem_scan(scan.id)
 
@@ -284,6 +289,32 @@ def test_harem_scan_completion_uses_supplied_connection_and_persists_result(
         ]
     assert durable == completed
     assert before_pages == after_pages == [(1, imported.import_event_id)]
+
+
+def test_catalog_scan_progress_helper_delegates_on_supplied_connection(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+
+    def unexpected_connection():
+        raise AssertionError("caller-owned helper opened an independent connection")
+
+    def unexpected_runner(_database_path, _callback):
+        raise AssertionError("caller-owned helper opened a runner transaction")
+
+    monkeypatch.setattr(catalog._harem_repository, "_connection", unexpected_connection)
+    monkeypatch.setattr(
+        harem_repository_module, "run_write_transaction", unexpected_runner
+    )
+
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        progress = catalog._harem_scan_progress_with_connection(connection, scan.id)
+        assert connection.in_transaction is True
+        connection.rollback()
+
+    assert progress == scan
 
 
 def test_harem_scan_completion_rejects_incomplete_scan_without_changes(tmp_path) -> None:
@@ -387,7 +418,7 @@ def test_harem_scan_completion_final_read_failure_rolls_back_update(
         "test",
         scan.id,
     )
-    original_helper = catalog._harem_scan_progress_with_connection
+    original_helper = catalog._harem_repository._harem_scan_progress_with_connection
     failure = RuntimeError("forced final harem progress read failure")
     helper_call_count = 0
 
@@ -398,7 +429,11 @@ def test_harem_scan_completion_final_read_failure_rolls_back_update(
             raise failure
         return original_helper(connection, scan_id)
 
-    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", fail_final_read)
+    monkeypatch.setattr(
+        catalog._harem_repository,
+        "_harem_scan_progress_with_connection",
+        fail_final_read,
+    )
 
     with pytest.raises(RuntimeError) as raised:
         catalog.complete_harem_scan(scan.id)
@@ -434,8 +469,8 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
         "test",
         scan.id,
     )
-    original_helper = catalog._harem_scan_progress_with_connection
-    original_runner = catalog_repository_module.run_write_transaction
+    original_helper = catalog._harem_repository._harem_scan_progress_with_connection
+    original_runner = harem_repository_module.run_write_transaction
     validation_finished = threading.Event()
     release_completion = threading.Event()
     writer_started = threading.Event()
@@ -463,8 +498,12 @@ def test_harem_scan_completion_serializes_validation_before_competing_page_write
 
         return original_runner(database_path, observed_callback)
 
-    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", pause_after_validation)
-    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(
+        catalog._harem_repository,
+        "_harem_scan_progress_with_connection",
+        pause_after_validation,
+    )
+    monkeypatch.setattr(harem_repository_module, "run_write_transaction", observed_runner)
 
     def complete_scan() -> None:
         try:
@@ -569,8 +608,8 @@ def test_public_harem_key_page_import_persists_complete_scanned_page(
             (seeded_at, seeded_at),
         )
 
-    original_runner = catalog_repository_module.run_write_transaction
-    original_prepare = catalog._prepare_harem_scan_page
+    original_runner = harem_repository_module.run_write_transaction
+    original_prepare = catalog._harem_repository._prepare_harem_scan_page
     callback_calls: list[tuple[int, bool]] = []
     prepare_calls: list[tuple[int, bool]] = []
 
@@ -588,9 +627,11 @@ def test_public_harem_key_page_import_persists_complete_scanned_page(
     def unexpected_connection():
         raise AssertionError("harem-key page import opened an independent connection")
 
-    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
-    monkeypatch.setattr(catalog, "_prepare_harem_scan_page", observed_prepare)
-    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+    monkeypatch.setattr(harem_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(
+        catalog._harem_repository, "_prepare_harem_scan_page", observed_prepare
+    )
+    monkeypatch.setattr(catalog._harem_repository, "_connection", unexpected_connection)
 
     result = catalog.import_harem_key_page(
         HaremKeyPage(
@@ -1145,8 +1186,8 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
             (seeded_at, seeded_at),
         )
 
-    original_runner = catalog_repository_module.run_write_transaction
-    original_prepare = catalog._prepare_harem_scan_page
+    original_runner = harem_repository_module.run_write_transaction
+    original_prepare = catalog._harem_repository._prepare_harem_scan_page
     callback_calls: list[tuple[int, bool]] = []
     prepare_calls: list[tuple[int, bool, str]] = []
 
@@ -1170,9 +1211,11 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
     def unexpected_connection():
         raise AssertionError("ranked-Harem page import opened an independent connection")
 
-    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
-    monkeypatch.setattr(catalog, "_prepare_harem_scan_page", observed_prepare)
-    monkeypatch.setattr(catalog, "_connection", unexpected_connection)
+    monkeypatch.setattr(harem_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(
+        catalog._harem_repository, "_prepare_harem_scan_page", observed_prepare
+    )
+    monkeypatch.setattr(catalog._harem_repository, "_connection", unexpected_connection)
 
     result = catalog.import_ranked_harem_page(
         RankedHaremPage(
@@ -1817,8 +1860,8 @@ def test_ranked_harem_page_waits_for_completion_then_rejects(
         "test",
         scan.id,
     )
-    original_progress = catalog._harem_scan_progress_with_connection
-    original_runner = catalog_repository_module.run_write_transaction
+    original_progress = catalog._harem_repository._harem_scan_progress_with_connection
+    original_runner = harem_repository_module.run_write_transaction
     validation_finished = threading.Event()
     release_completion = threading.Event()
     writer_started = threading.Event()
@@ -1846,8 +1889,12 @@ def test_ranked_harem_page_waits_for_completion_then_rejects(
 
         return original_runner(database_path, observed_callback)
 
-    monkeypatch.setattr(catalog, "_harem_scan_progress_with_connection", pause_after_validation)
-    monkeypatch.setattr(catalog_repository_module, "run_write_transaction", observed_runner)
+    monkeypatch.setattr(
+        catalog._harem_repository,
+        "_harem_scan_progress_with_connection",
+        pause_after_validation,
+    )
+    monkeypatch.setattr(harem_repository_module, "run_write_transaction", observed_runner)
 
     def complete_scan() -> None:
         try:
