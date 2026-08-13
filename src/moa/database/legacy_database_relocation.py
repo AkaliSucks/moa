@@ -5,12 +5,18 @@ from __future__ import annotations
 import os
 import sqlite3
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import file_digest
 from pathlib import Path
 from uuid import uuid4
 
 from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_TABLES
+
+
+_INCOMPLETE_RETIREMENT_MARKER_NAME = ".moa-relocation-incomplete"
+_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS = 5000
 
 
 class LegacyDatabaseRelocationError(ValueError):
@@ -71,7 +77,17 @@ def verified_legacy_database_path() -> Path | None:
 def ensure_default_database_authority(target: Path) -> None:
     """Fail closed when a verified checkout database remains authoritative."""
     legacy_path = verified_legacy_database_path()
-    if legacy_path is None or not legacy_path.exists():
+    if legacy_path is None:
+        return
+    incomplete_retirements = _incomplete_retirement_markers(legacy_path)
+    if incomplete_retirements:
+        rendered = ", ".join(str(path.parent) for path in incomplete_retirements)
+        raise LegacyDatabaseAuthorityConflictError(
+            "An incomplete legacy database retirement requires explicit recovery. "
+            f"Legacy: {legacy_path.resolve(strict=False)}. Incomplete archive(s): {rendered}. "
+            f"New default: {Path(target).resolve(strict=False)}. MOA cannot select an authority."
+        )
+    if not legacy_path.exists():
         return
     resolved_legacy = legacy_path.resolve(strict=False)
     resolved_target = Path(target).resolve(strict=False)
@@ -90,8 +106,13 @@ def ensure_default_database_authority(target: Path) -> None:
     )
 
 
-def relocate_database(source: Path, target: Path) -> DatabaseRelocationResult:
-    """Relocate one explicit MOA database with backup, validation, and retirement."""
+def relocate_database(
+    source: Path,
+    target: Path,
+    *,
+    _test_hook: Callable[[str], None] | None = None,
+) -> DatabaseRelocationResult:
+    """Relocate one explicit MOA database with backup and fail-closed retirement."""
     source_path = _canonical_file_path(source, label="source")
     target_path = _canonical_file_path(target, label="target")
     if source_path == target_path:
@@ -119,60 +140,158 @@ def relocate_database(source: Path, target: Path) -> DatabaseRelocationResult:
         raise DatabaseRelocationError(
             f"Recognized stale relocation temporary file(s) require cleanup: {rendered}"
         )
-    source_fingerprint = _validate_database(source_path)
+    _validate_database(source_path)
     _checkpoint_source_for_retirement(source_path)
-    if _validate_database(source_path) != source_fingerprint:
-        raise DatabaseRelocationError(
-            "Relocation source changed while it was being prepared for backup."
+    source_connection = _acquire_source_quiescence(source_path)
+    primary_error: BaseException | None = None
+    try:
+        _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_HELD")
+        source_fingerprint = _validate_database(source_path)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f"{target_path.name}.migrating-",
+            dir=target_path.parent,
         )
-
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f"{target_path.name}.migrating-",
-        dir=target_path.parent,
-    )
-    os.close(descriptor)
-    temporary_path = Path(temporary_name)
-    promoted = False
-    try:
-        _backup_database(source_path, temporary_path)
-        _checkpoint_source_for_retirement(temporary_path)
-        target_fingerprint = _validate_database(temporary_path)
-        if target_fingerprint != source_fingerprint:
-            raise DatabaseRelocationError(
-                "Relocation target validation did not match the source database."
-            )
-        _checkpoint_source_for_retirement(source_path)
-        if _validate_database(source_path) != source_fingerprint:
-            raise DatabaseRelocationError(
-                "Relocation source changed while its SQLite backup was being created."
-            )
-        _checkpoint_source_for_retirement(temporary_path)
-        _remove_checkpointed_sidecars(temporary_path)
-        _promote_target(temporary_path, target_path)
-        promoted = True
+        os.close(descriptor)
+        temporary_path = Path(temporary_name)
+        promoted = False
         try:
-            temporary_path.unlink()
-        except OSError as error:
-            raise DatabaseRelocationError(
-                "The new database was promoted, but migration did not complete because "
-                f"the temporary path could not be removed: {temporary_path}. Source: "
-                f"{source_path}. Target: {target_path}. Resolve this dual-authority "
-                "state explicitly."
-            ) from error
-    except BaseException as error:
-        if not promoted:
-            _cleanup_temporary_path(temporary_path, error)
-        raise
+            _backup_database(source_path, temporary_path)
+            _checkpoint_source_for_retirement(temporary_path)
+            target_fingerprint = _validate_database(temporary_path)
+            if target_fingerprint != source_fingerprint:
+                raise DatabaseRelocationError(
+                    "Relocation target validation did not match the source database."
+                )
+            if _validate_database(source_path) != source_fingerprint:
+                raise DatabaseRelocationError(
+                    "Relocation source changed despite source writer exclusion."
+                )
+            _notify_test_hook(_test_hook, "FINAL_SOURCE_SNAPSHOT_ESTABLISHED")
+            _checkpoint_source_for_retirement(temporary_path)
+            _remove_checkpointed_sidecars(temporary_path)
+            target_image_digest = _database_file_digest(temporary_path)
+            _promote_target(temporary_path, target_path)
+            promoted = True
+            try:
+                temporary_path.unlink()
+            except OSError as error:
+                raise DatabaseRelocationError(
+                    "The new database was promoted, but migration did not complete because "
+                    f"the temporary path could not be removed: {temporary_path}. Source: "
+                    f"{source_path}. Target: {target_path}. Resolve this dual-authority "
+                    "state explicitly."
+                ) from error
+        except BaseException as error:
+            if not promoted:
+                _cleanup_temporary_path(temporary_path, error)
+            raise
 
-    try:
-        archive_path = _retire_source(source_path)
+        try:
+            if _source_handle_blocks_retirement():
+                _release_source_quiescence(source_connection)
+                source_connection = None
+                _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_RELEASED")
+                archive_path = _retire_source(source_path)
+                _notify_test_hook(_test_hook, "SOURCE_RETIRED")
+                if _validate_database(archive_path) != source_fingerprint:
+                    raise DatabaseRelocationError(
+                        "LEGACY_SOURCE_RETIREMENT_BLOCKER: the archived source changed "
+                        "after the final migration snapshot; the promoted target is not "
+                        "authoritative."
+                    )
+                if _backup_image_digest(archive_path) != target_image_digest:
+                    raise DatabaseRelocationError(
+                        "LEGACY_SOURCE_RETIREMENT_BLOCKER: the archived source image changed "
+                        "after the final migration snapshot; the promoted target is not "
+                        "authoritative."
+                    )
+                if source_path.exists():
+                    raise DatabaseRelocationError(
+                        "LEGACY_SOURCE_RETIREMENT_BLOCKER: a new legacy source appeared "
+                        "during Windows retirement."
+                    )
+            else:
+                archive_path = _retire_source(source_path)
+                _notify_test_hook(_test_hook, "SOURCE_RETIRED")
+                _release_source_quiescence(source_connection)
+                source_connection = None
+            _complete_source_retirement(archive_path)
+        except BaseException as error:
+            raise DatabaseRelocationError(
+                "The new database was promoted and remains valid, but migration did not "
+                f"complete because the source could not be retired. Source: {source_path}. "
+                f"Target: {target_path}. Resolve this dual-authority state explicitly."
+            ) from error
+        return DatabaseRelocationResult(source_path, target_path, archive_path)
     except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if source_connection is not None:
+            _release_source_quiescence(source_connection, primary_error=primary_error)
+
+
+def _incomplete_retirement_markers(source: Path) -> tuple[Path, ...]:
+    pattern = f"{source.name}.migrated-backup-*/{_INCOMPLETE_RETIREMENT_MARKER_NAME}"
+    return tuple(sorted(source.parent.glob(pattern)))
+
+
+def _notify_test_hook(hook: Callable[[str], None] | None, stage: str) -> None:
+    if hook is not None:
+        hook(stage)
+
+
+def _source_handle_blocks_retirement() -> bool:
+    return os.name == "nt"
+
+
+def _acquire_source_quiescence(source: Path) -> sqlite3.Connection:
+    from moa.database.sqlite import connect
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = connect(source)
+        connection.execute(f"PRAGMA busy_timeout = {_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS}")
+        connection.execute("BEGIN IMMEDIATE")
+        return connection
+    except sqlite3.Error as error:
+        if connection is not None:
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"Could not close source quiescence connection: {cleanup_error}"
+                )
         raise DatabaseRelocationError(
-            "The new database was promoted and remains valid, but migration did not "
-            f"complete because the source could not be retired. Source: {source_path}. "
-            f"Target: {target_path}. Resolve this dual-authority state explicitly."
+            "LEGACY_SOURCE_RETIREMENT_BLOCKER: could not acquire bounded SQLite source "
+            "writer exclusion; stop every listener and source writer."
         ) from error
-    return DatabaseRelocationResult(source_path, target_path, archive_path)
+
+
+def _release_source_quiescence(
+    connection: sqlite3.Connection,
+    *,
+    primary_error: BaseException | None = None,
+) -> None:
+    cleanup_errors: list[BaseException] = []
+    try:
+        if connection.in_transaction:
+            connection.rollback()
+    except BaseException as error:
+        cleanup_errors.append(error)
+    try:
+        connection.close()
+    except BaseException as error:
+        cleanup_errors.append(error)
+    if not cleanup_errors:
+        return
+    rendered = "; ".join(str(error) for error in cleanup_errors)
+    if primary_error is not None:
+        primary_error.add_note(f"Could not release source writer exclusion: {rendered}")
+        return
+    raise DatabaseRelocationError(
+        f"LEGACY_SOURCE_RETIREMENT_BLOCKER: could not release source writer exclusion: {rendered}"
+    )
 
 
 def _canonical_file_path(path: Path, *, label: str) -> Path:
@@ -259,6 +378,40 @@ def _table_count(connection: sqlite3.Connection, table_name: str) -> int:
     return int(connection.execute(f'SELECT COUNT(*) FROM "{quoted_name}"').fetchone()[0])
 
 
+def _database_file_digest(path: Path) -> bytes:
+    with path.open("rb") as database_file:
+        return file_digest(database_file, "sha256").digest()
+
+
+def _backup_image_digest(source: Path) -> bytes:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f"{source.name}.certifying-",
+        dir=source.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        _backup_database(source, temporary_path)
+        _checkpoint_source_for_retirement(temporary_path)
+        _remove_checkpointed_sidecars(temporary_path)
+        digest = _database_file_digest(temporary_path)
+    except BaseException as error:
+        _cleanup_temporary_path(temporary_path, error)
+        raise
+    try:
+        for cleanup_path in (
+            temporary_path,
+            Path(f"{temporary_path}-wal"),
+            Path(f"{temporary_path}-shm"),
+        ):
+            cleanup_path.unlink(missing_ok=True)
+    except OSError as error:
+        raise DatabaseRelocationError(
+            f"Could not remove source certification temporary file {cleanup_path}: {error}"
+        ) from error
+    return digest
+
+
 def _backup_database(source: Path, temporary_target: Path) -> None:
     try:
         source_connection = _open_read_only(source)
@@ -322,6 +475,23 @@ def _retire_source(source: Path) -> Path:
             f"Could not reserve non-authoritative source archive {archive_directory}: {error}"
         ) from error
     archive = archive_directory / source.name
+    incomplete_marker = archive_directory / _INCOMPLETE_RETIREMENT_MARKER_NAME
+    try:
+        incomplete_marker.write_text(
+            "Legacy database retirement did not complete.\n", encoding="utf-8"
+        )
+    except OSError as error:
+        try:
+            archive_directory.rmdir()
+        except BaseException as cleanup_error:
+            error.add_note(
+                f"Could not remove incomplete archive directory {archive_directory}: "
+                f"{cleanup_error}"
+            )
+        raise DatabaseRelocationError(
+            f"Could not establish fail-closed source retirement marker {incomplete_marker}: "
+            f"{error}"
+        ) from error
     moved_paths: list[tuple[Path, Path]] = []
     try:
         source.rename(archive)
@@ -339,15 +509,28 @@ def _retire_source(source: Path) -> Path:
                 error.add_note(
                     f"Could not restore {original} from incomplete archive: {restore_error}"
                 )
-        try:
-            archive_directory.rmdir()
-        except BaseException as cleanup_error:
-            error.add_note(
-                f"Could not remove incomplete archive directory {archive_directory}: "
-                f"{cleanup_error}"
-            )
+        if all(original.exists() for original, _archived_path in moved_paths):
+            try:
+                incomplete_marker.unlink()
+                archive_directory.rmdir()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"Could not remove incomplete archive directory {archive_directory}: "
+                    f"{cleanup_error}"
+                )
         raise
     return archive
+
+
+def _complete_source_retirement(archive: Path) -> None:
+    incomplete_marker = archive.parent / _INCOMPLETE_RETIREMENT_MARKER_NAME
+    try:
+        incomplete_marker.unlink()
+    except OSError as error:
+        raise DatabaseRelocationError(
+            "Source files were archived, but the fail-closed incomplete-retirement marker "
+            f"could not be cleared: {incomplete_marker}"
+        ) from error
 
 
 def _cleanup_temporary_path(path: Path, primary_error: BaseException) -> None:
