@@ -3218,7 +3218,9 @@ class CatalogRepository:
                     kakera_balance INTEGER NOT NULL,
                     built_perk_ids_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
-                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    completed_towers_observed INTEGER
+                        CHECK (completed_towers_observed IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS timer_state_observations (

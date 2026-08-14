@@ -30,6 +30,7 @@ TOWER_STATE = TowerStateSnapshot(
 )
 ZERO_TOWER_STATE = TOWER_STATE.model_copy(update={"completed_towers": 0})
 NO_COMPLETED_TOWER_STATE = TOWER_STATE.model_copy(update={"completed_towers": None})
+NEGATIVE_TOWER_STATE = TOWER_STATE.model_copy(update={"completed_towers": -1})
 
 
 def _repositories(tmp_path):
@@ -198,13 +199,15 @@ def test_first_processing_persists_atomic_tower_projection(tmp_path) -> None:
             FINISHED_AT.isoformat(),
         )
         observation = connection.execute(
-            "SELECT current_level, completed_towers, next_level_cost, kakera_balance, "
+            "SELECT current_level, completed_towers, completed_towers_observed, "
+            "next_level_cost, kakera_balance, "
             "built_perk_ids_json, observed_at, import_event_id "
             "FROM tower_state_observations"
         ).fetchone()
-        assert tuple(observation[:4]) == (
+        assert tuple(observation[:5]) == (
             TOWER_STATE.current_level,
             TOWER_STATE.completed_towers,
+            1,
             TOWER_STATE.next_level_cost,
             TOWER_STATE.kakera_balance,
         )
@@ -252,11 +255,19 @@ def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
 
 
 @pytest.mark.parametrize(
-    ("state", "expected_completed_towers"),
-    ((NO_COMPLETED_TOWER_STATE, 0), (ZERO_TOWER_STATE, 0), (TOWER_STATE, 3)),
+    ("state", "expected_completed_towers", "expected_observed"),
+    (
+        (NO_COMPLETED_TOWER_STATE, 0, 0),
+        (ZERO_TOWER_STATE, 0, 1),
+        (TOWER_STATE, 3, 1),
+        (NEGATIVE_TOWER_STATE, -1, 1),
+    ),
 )
-def test_completed_tower_values_preserve_repository_semantics(
-    tmp_path, state: TowerStateSnapshot, expected_completed_towers: int
+def test_completed_tower_values_preserve_repository_presence_semantics(
+    tmp_path,
+    state: TowerStateSnapshot,
+    expected_completed_towers: int,
+    expected_observed: int,
 ) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -266,10 +277,12 @@ def test_completed_tower_values_preserve_repository_semantics(
 
     with connect(database_path) as connection:
         row = connection.execute(
-            "SELECT completed_towers FROM tower_state_observations WHERE id = ?",
+            "SELECT completed_towers, completed_towers_observed "
+            "FROM tower_state_observations WHERE id = ?",
             (result.tower_state_observation_id,),
         ).fetchone()
         assert row["completed_towers"] == expected_completed_towers
+        assert row["completed_towers_observed"] == expected_observed
 
 
 def test_tower_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
@@ -441,6 +454,107 @@ def test_succeeded_replay_returns_existing_ids_and_reconstructs_from_same_databa
 
 
 @pytest.mark.parametrize(
+    "state",
+    (NO_COMPLETED_TOWER_STATE, ZERO_TOWER_STATE, TOWER_STATE, NEGATIVE_TOWER_STATE),
+)
+def test_succeeded_replay_requires_exact_new_completed_tower_presence(
+    tmp_path, state: TowerStateSnapshot
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id, state=state)
+    before = _snapshot(database_path)
+
+    replay = _coordinate(coordinator, source_event_id, None, state=state)
+
+    assert replay.import_event_id == first.import_event_id
+    assert replay.tower_state_observation_id == first.tower_state_observation_id
+    assert replay.replay_skipped is True
+    assert _snapshot(database_path) == before
+
+
+@pytest.mark.parametrize(
+    ("persisted_state", "stored_observed", "replay_state"),
+    (
+        (NO_COMPLETED_TOWER_STATE, 1, NO_COMPLETED_TOWER_STATE),
+        (ZERO_TOWER_STATE, 0, ZERO_TOWER_STATE),
+        (TOWER_STATE, 0, TOWER_STATE),
+        (TOWER_STATE, None, TOWER_STATE),
+    ),
+)
+def test_succeeded_replay_rejects_completed_tower_presence_mismatches(
+    tmp_path,
+    persisted_state: TowerStateSnapshot,
+    stored_observed: int | None,
+    replay_state: TowerStateSnapshot,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id, state=persisted_state)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE tower_state_observations SET completed_towers_observed = ? WHERE id = ?",
+            (stored_observed, first.tower_state_observation_id),
+        )
+        before_target = tuple(
+            connection.execute(
+                "SELECT completed_towers, completed_towers_observed "
+                "FROM tower_state_observations WHERE id = ?",
+                (first.tower_state_observation_id,),
+            ).fetchone()
+        )
+    before = _snapshot(database_path)
+
+    with pytest.raises(TowerStateProjectionTargetError, match="mismatched"):
+        _coordinate(coordinator, source_event_id, None, state=replay_state)
+
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT completed_towers, completed_towers_observed "
+                "FROM tower_state_observations WHERE id = ?",
+                (first.tower_state_observation_id,),
+            ).fetchone()
+        ) == before_target
+
+
+def test_succeeded_replay_accepts_only_ambiguous_inputs_for_legacy_zero(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id, state=ZERO_TOWER_STATE)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE tower_state_observations SET completed_towers_observed = NULL WHERE id = ?",
+            (first.tower_state_observation_id,),
+        )
+    before = _snapshot(database_path)
+
+    absent_replay = _coordinate(
+        coordinator, source_event_id, None, state=NO_COMPLETED_TOWER_STATE
+    )
+    zero_replay = _coordinate(coordinator, source_event_id, None, state=ZERO_TOWER_STATE)
+
+    assert absent_replay.replay_skipped is True
+    assert zero_replay.replay_skipped is True
+    assert _snapshot(database_path) == before
+    with pytest.raises(TowerStateProjectionTargetError, match="mismatched"):
+        _coordinate(coordinator, source_event_id, None, state=TOWER_STATE)
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT completed_towers, completed_towers_observed "
+                "FROM tower_state_observations WHERE id = ?",
+                (first.tower_state_observation_id,),
+            ).fetchone()
+        ) == (0, None)
+
+
+@pytest.mark.parametrize(
     ("replay_state", "replay_observed_at"),
     (
         pytest.param(TOWER_STATE.model_copy(update={"current_level": 99}), OBSERVED_AT, id="current_level"),
@@ -462,7 +576,8 @@ def test_succeeded_replay_rejects_mismatched_tower_target_values(
     with connect(database_path) as connection:
         before_target = tuple(
             connection.execute(
-                "SELECT current_level, completed_towers, next_level_cost, kakera_balance, "
+                "SELECT current_level, completed_towers, completed_towers_observed, "
+                "next_level_cost, kakera_balance, "
                 "built_perk_ids_json, observed_at, import_event_id FROM tower_state_observations"
             ).fetchone()
         )
@@ -486,7 +601,8 @@ def test_succeeded_replay_rejects_mismatched_tower_target_values(
     with connect(database_path) as connection:
         assert tuple(
             connection.execute(
-                "SELECT current_level, completed_towers, next_level_cost, kakera_balance, "
+                "SELECT current_level, completed_towers, completed_towers_observed, "
+                "next_level_cost, kakera_balance, "
                 "built_perk_ids_json, observed_at, import_event_id FROM tower_state_observations"
             ).fetchone()
         ) == before_target

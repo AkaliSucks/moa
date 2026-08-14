@@ -522,6 +522,29 @@ def _apply_durable_discord_antidisable_workflow_bindings(
         connection.execute(statement)
 
 
+def _apply_tower_completed_towers_presence(connection: sqlite3.Connection) -> None:
+    """Preserve exact Tower completed-count presence without rewriting legacy zeros."""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(tower_state_observations)").fetchall()
+    }
+    if "completed_towers_observed" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE tower_state_observations
+            ADD COLUMN completed_towers_observed INTEGER
+                CHECK (completed_towers_observed IN (0, 1))
+            """
+        )
+    connection.execute(
+        """
+        UPDATE tower_state_observations
+        SET completed_towers_observed = 1
+        WHERE completed_towers != 0
+        """
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -552,5 +575,10 @@ CATALOG_MIGRATIONS = (
         version=6,
         name="durable-discord-antidisable-workflow-bindings",
         apply=_apply_durable_discord_antidisable_workflow_bindings,
+    ),
+    Migration(
+        version=7,
+        name="tower-completed-towers-presence",
+        apply=_apply_tower_completed_towers_presence,
     ),
 )

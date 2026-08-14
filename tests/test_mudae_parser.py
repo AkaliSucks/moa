@@ -860,6 +860,17 @@ def test_parse_tower_state_accepts_current_format_without_completed_tower_count(
     assert state.built_perk_ids == (1,)
 
 
+def test_parse_tower_state_preserves_textual_zero_completed_tower_count() -> None:
+    state = MudaeTextParser().parse_tower_state(
+        "Your current level is:tow2: (+ 0 towers)\n"
+        "The next level costs 75,000:kakera:\n"
+        "You have 7,673:kakera:\n"
+        "☑️ [5] Unveil 1 random button for the $oh command"
+    )
+
+    assert state.completed_towers == 0
+
+
 def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:
     state = MudaeTextParser().parse_kakeraloot_state(
         "ernieuuu - Kakeraloots\n"

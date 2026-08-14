@@ -439,8 +439,9 @@ class TowerStateProjectionCoordinator:
         row = connection.execute(
             """
             SELECT tso.import_event_id, tso.current_level, tso.completed_towers,
-                   tso.next_level_cost, tso.kakera_balance, tso.built_perk_ids_json,
-                   tso.observed_at, ac.normalized_name AS account,
+                   tso.completed_towers_observed, tso.next_level_cost,
+                   tso.kakera_balance, tso.built_perk_ids_json, tso.observed_at,
+                   ac.normalized_name AS account,
                    sc.normalized_name AS server
             FROM tower_state_observations AS tso
             JOIN account_contexts AS ac ON ac.id = tso.account_context_id
@@ -481,10 +482,9 @@ class TowerStateProjectionCoordinator:
             )
         if state is None:
             return
-        expected_completed_towers = state.completed_towers or 0
         if (
             row["current_level"] != state.current_level
-            or row["completed_towers"] != expected_completed_towers
+            or not self._completed_towers_match(row, state.completed_towers)
             or row["next_level_cost"] != state.next_level_cost
             or row["kakera_balance"] != state.kakera_balance
         ):
@@ -505,6 +505,18 @@ class TowerStateProjectionCoordinator:
             raise TowerStateProjectionTargetError(
                 f"projection target tower_state_observations:{observation_id} has mismatched observation time"
             )
+
+    @staticmethod
+    def _completed_towers_match(row: sqlite3.Row, incoming: int | None) -> bool:
+        completed_towers = int(row["completed_towers"])
+        observed = row["completed_towers_observed"]
+        if observed == 1:
+            return incoming is not None and completed_towers == incoming
+        if observed == 0:
+            return completed_towers == 0 and incoming is None
+        if observed is None:
+            return completed_towers == 0 and incoming in (None, 0)
+        return False
 
     @staticmethod
     def _tower_state_slot(server: str, account: str) -> str:

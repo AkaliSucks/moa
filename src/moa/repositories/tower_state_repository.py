@@ -81,23 +81,26 @@ class TowerStateRepository:
         import_event_id = int(cursor.lastrowid)
         server_id = upsert_server(connection, server, observed_at)
         account_id = upsert_account(connection, server_id, account, observed_at)
+        completed_towers = state.completed_towers
         tower_state_observation_id = int(
             connection.execute(
                 """
                 INSERT INTO tower_state_observations (
                     account_context_id, current_level, completed_towers, next_level_cost,
-                    kakera_balance, built_perk_ids_json, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    kakera_balance, built_perk_ids_json, observed_at, import_event_id,
+                    completed_towers_observed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
                     state.current_level,
-                    state.completed_towers or 0,
+                    0 if completed_towers is None else completed_towers,
                     state.next_level_cost,
                     state.kakera_balance,
                     json.dumps(state.built_perk_ids),
                     observed_at.isoformat(),
                     import_event_id,
+                    0 if completed_towers is None else 1,
                 ),
             ).lastrowid
         )
@@ -127,13 +130,26 @@ class TowerStateRepository:
             ).fetchone()
         if row is None:
             return None
+        completed_towers = self._completed_towers_from_row(row)
         return TowerStateObservation(
             server_name=row["server_name"],
             account_name=row["account_name"],
             current_level=row["current_level"],
-            completed_towers=row["completed_towers"] or None,
+            completed_towers=completed_towers,
             next_level_cost=row["next_level_cost"],
             kakera_balance=row["kakera_balance"],
             built_perk_ids=tuple(json.loads(row["built_perk_ids_json"])),
             observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    @staticmethod
+    def _completed_towers_from_row(row: sqlite3.Row) -> int | None:
+        completed_towers = int(row["completed_towers"])
+        observed = row["completed_towers_observed"]
+        if observed == 1:
+            return completed_towers
+        if observed in (0, None) and completed_towers == 0:
+            return None
+        raise sqlite3.IntegrityError(
+            "tower_state_observations has inconsistent completed_towers presence"
         )

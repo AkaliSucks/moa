@@ -3716,6 +3716,8 @@ TOWER_STATE = TowerStateSnapshot(
     built_perk_ids=(2, 7),
 )
 TOWER_STATE_WITHOUT_COMPLETED_TOWERS = TOWER_STATE.model_copy(update={"completed_towers": None})
+ZERO_TOWER_STATE = TOWER_STATE.model_copy(update={"completed_towers": 0})
+NEGATIVE_TOWER_STATE = TOWER_STATE.model_copy(update={"completed_towers": -1})
 MUDAPINS = MudapinSnapshot(pin_markers=(":pin139:", ":pin182:", ":logopin6:"))
 SPHERE_RESULT = SphereResultSnapshot(
     clicks_available=2,
@@ -4853,13 +4855,17 @@ def test_tower_helper_reuses_existing_contexts_and_rollback_preserves_them(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("state", "expected_completed_towers"),
+    ("state", "expected_completed_towers", "expected_observed", "account"),
     [
-        (TOWER_STATE, 3),
-        (TOWER_STATE_WITHOUT_COMPLETED_TOWERS, 0),
+        (TOWER_STATE, 3, 1, "positive"),
+        (TOWER_STATE_WITHOUT_COMPLETED_TOWERS, 0, 0, "absent"),
+        (ZERO_TOWER_STATE, 0, 1, "zero"),
+        (NEGATIVE_TOWER_STATE, -1, 1, "negative"),
     ],
 )
-def test_tower_helper_preserves_completed_tower_values(tmp_path, state, expected_completed_towers) -> None:
+def test_tower_helper_preserves_completed_tower_values_and_presence(
+    tmp_path, state, expected_completed_towers, expected_observed, account
+) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
     with connect(database_path) as connection:
@@ -4867,15 +4873,18 @@ def test_tower_helper_preserves_completed_tower_values(tmp_path, state, expected
             connection,
             state=state,
             server="Server",
-            account=f"Account {expected_completed_towers}",
+            account=account,
             raw="completed towers",
             source="discord",
             observed_at=OBSERVED_AT,
         )
-        assert connection.execute(
-            "SELECT completed_towers FROM tower_state_observations WHERE id = ?",
-            (imported.tower_state_observation_id,),
-        ).fetchone()[0] == expected_completed_towers
+        assert tuple(
+            connection.execute(
+                "SELECT completed_towers, completed_towers_observed "
+                "FROM tower_state_observations WHERE id = ?",
+                (imported.tower_state_observation_id,),
+            ).fetchone()
+        ) == (expected_completed_towers, expected_observed)
 
 
 def test_roll_helper_writes_all_projections_on_supplied_connection(tmp_path) -> None:

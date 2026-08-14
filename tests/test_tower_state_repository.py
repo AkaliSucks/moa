@@ -84,11 +84,20 @@ def test_direct_import_read_latest_linkage_and_account_scope(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("completed_towers", "stored", "read_value"),
-    ((None, 0, None), (0, 0, None), (11, 11, 11)),
+    ("completed_towers", "stored", "stored_observed", "read_value"),
+    (
+        (None, 0, 0, None),
+        (0, 0, 1, 0),
+        (11, 11, 1, 11),
+        (-1, -1, 1, -1),
+    ),
 )
-def test_completed_towers_storage_read_asymmetry(
-    tmp_path, completed_towers: int | None, stored: int, read_value: int | None
+def test_completed_towers_storage_preserves_presence_and_exact_values(
+    tmp_path,
+    completed_towers: int | None,
+    stored: int,
+    stored_observed: int,
+    read_value: int | None,
 ) -> None:
     database_path, repository = _repositories(tmp_path)
     state = TOWER_STATE.model_copy(update={"completed_towers": completed_towers})
@@ -100,10 +109,35 @@ def test_completed_towers_storage_read_asymmetry(
     assert observation.completed_towers == read_value
     with connect(database_path) as connection:
         row = connection.execute(
-            "SELECT completed_towers FROM tower_state_observations WHERE import_event_id = ?",
+            "SELECT completed_towers, completed_towers_observed "
+            "FROM tower_state_observations WHERE import_event_id = ?",
             (result.import_event_id,),
         ).fetchone()
     assert row[0] == stored
+    assert row[1] == stored_observed
+
+
+@pytest.mark.parametrize("stored_observed", (0, None))
+def test_inconsistent_nonzero_completed_tower_presence_fails_closed(
+    tmp_path, stored_observed: int | None
+) -> None:
+    database_path, repository = _repositories(tmp_path)
+    result = repository.import_tower_state(
+        TOWER_STATE.model_copy(update={"completed_towers": 11}),
+        "Server",
+        "Account",
+        "payload",
+        "test",
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE tower_state_observations SET completed_towers_observed = ? "
+            "WHERE import_event_id = ?",
+            (stored_observed, result.import_event_id),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="inconsistent completed_towers presence"):
+        repository.tower_state("Server", "Account")
 
 
 def test_perks_preserve_order_duplicates_and_empty_vs_absent(tmp_path) -> None:

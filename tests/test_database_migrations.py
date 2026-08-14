@@ -11,7 +11,17 @@ from moa.database.migrations import (
     run_migrations,
 )
 from moa.database.sqlite import connect
+from moa.models.character import TowerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
+
+
+TOWER_STATE = TowerStateSnapshot(
+    current_level=2,
+    completed_towers=3,
+    next_level_cost=75_000,
+    kakera_balance=7_673,
+    built_perk_ids=(2, 7),
+)
 
 
 def _migration_rows(database_path):
@@ -45,6 +55,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 7")
 
 
 def _make_version_5_database(database_path):
@@ -53,6 +64,24 @@ def _make_version_5_database(database_path):
         connection.execute("DROP TABLE discord_antidisable_response_bindings")
         connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+
+
+def _make_version_6_database(database_path, completed_towers_by_account):
+    catalog = CatalogRepository(database_path)
+    for account, completed_towers in completed_towers_by_account.items():
+        catalog.import_tower_state(
+            TOWER_STATE.model_copy(update={"completed_towers": completed_towers}),
+            "Server",
+            account,
+            f"legacy {account}",
+            "test",
+        )
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "ALTER TABLE tower_state_observations DROP COLUMN completed_towers_observed"
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 7")
 
 
 def _insert_aggregate(
@@ -314,6 +343,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
+        (7, "tower-completed-towers-presence"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -511,6 +541,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
+        (7, "tower-completed-towers-presence"),
     ]
 
 
@@ -762,8 +793,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            6,
-            "durable-discord-antidisable-workflow-bindings",
+            7,
+            "tower-completed-towers-presence",
         )
 
 
@@ -961,6 +992,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
+        (7, "tower-completed-towers-presence"),
     ]
 
 
@@ -1710,6 +1742,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
+        (7, "tower-completed-towers-presence"),
     ]
 
 
@@ -1736,6 +1769,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (4, "durable-discord-source-event-server-attributions"),
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
+        (7, "tower-completed-towers-presence"),
     ]
 
 
@@ -2005,6 +2039,155 @@ def test_invalid_migration_definitions_are_rejected(tmp_path, migrations, messag
         ).fetchone() is None
 
 
+def test_tower_presence_migration_preserves_legacy_ambiguity_and_nonzero_values(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    historical_values = {
+        "legacy-none": None,
+        "legacy-zero": 0,
+        "legacy-positive": 11,
+        "legacy-negative": -1,
+    }
+    _make_version_6_database(database_path, historical_values)
+
+    with _open_database(database_path) as connection:
+        assert "completed_towers_observed" not in {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(tower_state_observations)"
+            ).fetchall()
+        }
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        rows = connection.execute(
+            """
+            SELECT account_contexts.name, completed_towers, completed_towers_observed
+            FROM tower_state_observations
+            JOIN account_contexts
+              ON account_contexts.id = tower_state_observations.account_context_id
+            ORDER BY tower_state_observations.id
+            """
+        ).fetchall()
+        assert rows == [
+            ("legacy-none", 0, None),
+            ("legacy-zero", 0, None),
+            ("legacy-positive", 11, 1),
+            ("legacy-negative", -1, 1),
+        ]
+        presence_column = next(
+            row
+            for row in connection.execute(
+                "PRAGMA table_info(tower_state_observations)"
+            ).fetchall()
+            if row[1] == "completed_towers_observed"
+        )
+        assert tuple(presence_column[1:5]) == (
+            "completed_towers_observed",
+            "INTEGER",
+            0,
+            None,
+        )
+
+    catalog = CatalogRepository(database_path)
+    assert catalog.tower_state("Server", "legacy-none").completed_towers is None
+    assert catalog.tower_state("Server", "legacy-zero").completed_towers is None
+    assert catalog.tower_state("Server", "legacy-positive").completed_towers == 11
+    assert catalog.tower_state("Server", "legacy-negative").completed_towers == -1
+    CatalogRepository(database_path)
+    assert _migration_rows(database_path).count((7, "tower-completed-towers-presence")) == 1
+    with _open_database(database_path) as connection:
+        assert connection.execute(
+            "SELECT completed_towers, completed_towers_observed "
+            "FROM tower_state_observations ORDER BY id"
+        ).fetchall() == [(0, None), (0, None), (11, 1), (-1, 1)]
+
+
+def test_failed_tower_presence_migration_rolls_back_and_retries_cleanly(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_6_database(
+        database_path,
+        {"legacy-zero": 0, "legacy-positive": 11, "legacy-negative": -1},
+    )
+
+    def fail_after_tower_presence(connection):
+        CATALOG_MIGRATIONS[6].apply(connection)
+        raise RuntimeError("stop after tower presence")
+
+    failing_migrations = CATALOG_MIGRATIONS[:6] + (
+        Migration(7, "failing-tower-presence", fail_after_tower_presence),
+    )
+    with _open_database(database_path) as connection:
+        with pytest.raises(RuntimeError, match="stop after tower presence"):
+            run_migrations(connection, failing_migrations)
+        assert "completed_towers_observed" not in {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(tower_state_observations)"
+            ).fetchall()
+        }
+        assert connection.execute(
+            "SELECT completed_towers FROM tower_state_observations ORDER BY id"
+        ).fetchall() == [(0,), (11,), (-1,)]
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(1,), (2,), (3,), (4,), (5,), (6,)]
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT completed_towers, completed_towers_observed "
+            "FROM tower_state_observations ORDER BY id"
+        ).fetchall() == [(0, None), (11, 1), (-1, 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 7"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_and_migrated_tower_presence_columns_are_equivalent_and_constrained(
+    tmp_path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _make_version_6_database(migrated_path, {"Account": 3})
+    with _open_database(migrated_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        migrated_column = next(
+            tuple(row[1:5])
+            for row in connection.execute(
+                "PRAGMA table_info(tower_state_observations)"
+            ).fetchall()
+            if row[1] == "completed_towers_observed"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE tower_state_observations SET completed_towers_observed = 2"
+            )
+
+    fresh_path = tmp_path / "fresh.db"
+    fresh_catalog = CatalogRepository(fresh_path)
+    result = fresh_catalog.import_tower_state(
+        TOWER_STATE, "Server", "Account", "fresh", "test"
+    )
+    with _open_database(fresh_path) as connection:
+        fresh_column = next(
+            tuple(row[1:5])
+            for row in connection.execute(
+                "PRAGMA table_info(tower_state_observations)"
+            ).fetchall()
+            if row[1] == "completed_towers_observed"
+        )
+        assert fresh_column == migrated_column == (
+            "completed_towers_observed",
+            "INTEGER",
+            0,
+            None,
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE tower_state_observations SET completed_towers_observed = 2 "
+                "WHERE import_event_id = ?",
+                (result.import_event_id,),
+            )
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -2013,11 +2196,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (7, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (8, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(7,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(8,)]
