@@ -1,8 +1,21 @@
 import json
+import sqlite3
+from dataclasses import fields, is_dataclass
+from datetime import datetime, timezone
+
+import pytest
 
 from moa.database.sqlite import connect
 from moa.models.character import TimerStateSnapshot
+from moa.repositories import timer_state_repository as repository_module
 from moa.repositories.catalog_repository import CatalogRepository
+from moa.repositories.timer_state_repository import (
+    TimerStateRepository,
+    _TimerStateImportConnectionResult,
+)
+
+
+OBSERVED_AT = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
 
 
 TIMER_STATE_FIELDS = (
@@ -154,3 +167,142 @@ def test_timer_state_preserves_absence_latest_and_account_within_server_scope(tm
     assert rows[0]["id"] < rows[1]["id"] < rows[2]["id"]
     assert rows[0]["account_context_id"] == rows[1]["account_context_id"]
     assert rows[1]["account_context_id"] != rows[2]["account_context_id"]
+
+
+def _initialized_timer_repository(database_path):
+    CatalogRepository(database_path)
+    return TimerStateRepository(database_path)
+
+
+def test_timer_state_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_TimerStateImportConnectionResult)
+    assert _TimerStateImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_TimerStateImportConnectionResult)] == [
+        "import_event_id",
+        "timer_state_observation_id",
+    ]
+    assert not hasattr(_TimerStateImportConnectionResult(1, 2), "__dict__")
+
+
+def test_timer_state_repository_requires_initialized_explicit_path(tmp_path) -> None:
+    database_path = tmp_path / "timer-state-uninitialized.db"
+    repository = TimerStateRepository(database_path)
+
+    assert repository.database_path == database_path
+    assert not database_path.exists()
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        repository.timer_state("Server", "Account")
+
+    initialized = _initialized_timer_repository(database_path)
+    assert initialized.timer_state("Server", "Account") is None
+
+
+def test_timer_state_repository_standalone_write_read_preserves_scope_and_provenance(tmp_path) -> None:
+    database_path = tmp_path / "timer-state-standalone.db"
+    repository = _initialized_timer_repository(database_path)
+
+    result = repository.import_timer_state(
+        _complete_timer_state(),
+        "  Server One  ",
+        "  Account One  ",
+        "raw timer payload",
+        "clipboard",
+    )
+    observation = repository.timer_state(" server   one ", " account one ")
+
+    assert observation is not None
+    assert observation.server_name == "Server One"
+    assert observation.account_name == "Account One"
+    assert observation.snapshot == _complete_timer_state()
+    with connect(database_path) as connection:
+        event = connection.execute(
+            "SELECT kind, source, raw_message, observed_at FROM import_events WHERE id = ?",
+            (result.import_event_id,),
+        ).fetchone()
+    assert tuple(event) == (
+        "timer_state",
+        "clipboard",
+        "raw timer payload",
+        result.observed_at.isoformat(),
+    )
+
+
+def test_timer_state_repository_standalone_import_owns_exactly_one_runner(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "timer-state-runner.db"
+    repository = _initialized_timer_repository(database_path)
+    original_runner = repository_module.run_write_transaction
+    calls = []
+
+    def observed_runner(path, callback):
+        calls.append(path)
+        return original_runner(path, callback)
+
+    monkeypatch.setattr(repository_module, "run_write_transaction", observed_runner)
+    repository.import_timer_state(_complete_timer_state(), "Server", "Account", "raw", "test")
+
+    assert calls == [database_path]
+
+
+def test_timer_state_repository_supplied_connection_is_neutral_and_caller_commit_persists(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path = tmp_path / "timer-state-connection.db"
+    repository = _initialized_timer_repository(database_path)
+
+    def unexpected_connection(*args, **kwargs):
+        raise AssertionError("supplied helper opened an independent connection")
+
+    def unexpected_runner(*args, **kwargs):
+        raise AssertionError("supplied helper started an independent transaction")
+
+    monkeypatch.setattr(repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(repository_module, "run_write_transaction", unexpected_runner)
+
+    with connect(database_path) as connection:
+        imported = repository._import_timer_state_with_connection(
+            connection,
+            state=_complete_timer_state(),
+            server="Server",
+            account="Account",
+            raw="raw",
+            source="test",
+            observed_at=OBSERVED_AT,
+        )
+        assert connection.in_transaction
+        connection.commit()
+
+    monkeypatch.undo()
+    assert imported.import_event_id > 0
+    assert repository.timer_state("Server", "Account") is not None
+
+
+def test_timer_state_repository_supplied_connection_rolls_back_and_same_db_recovers(tmp_path) -> None:
+    database_path = tmp_path / "timer-state-recovery.db"
+    repository = _initialized_timer_repository(database_path)
+
+    with pytest.raises(RuntimeError, match="forced failure"):
+        with connect(database_path) as connection:
+            repository._import_timer_state_with_connection(
+                connection,
+                state=_complete_timer_state(),
+                server="Server",
+                account="Account",
+                raw="failed raw",
+                source="test",
+                observed_at=OBSERVED_AT,
+            )
+            raise RuntimeError("forced failure")
+
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM timer_state_observations").fetchone()[0] == 0
+
+    result = repository.import_timer_state(
+        _complete_timer_state(), "Server", "Account", "recovery raw", "test"
+    )
+    assert result.import_event_id > 0
+    assert repository.timer_state("Server", "Account") is not None

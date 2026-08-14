@@ -9968,13 +9968,14 @@ def test_public_timer_state_wrapper_rolls_back_helper_failure_and_remains_usable
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_timer_state_with_connection
+    timer_repository = catalog._timer_state_repository
+    original_helper = timer_repository._import_timer_state_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced timer-state import failure")
 
-    monkeypatch.setattr(catalog, "_import_timer_state_with_connection", fail_after_write)
+    monkeypatch.setattr(timer_repository, "_import_timer_state_with_connection", fail_after_write)
 
     with pytest.raises(RuntimeError, match="forced timer-state import failure"):
         catalog.import_timer_state(
@@ -9994,7 +9995,7 @@ def test_public_timer_state_wrapper_rolls_back_helper_failure_and_remains_usable
             "discord_processing_attempts": 0,
         }
 
-    monkeypatch.setattr(catalog, "_import_timer_state_with_connection", original_helper)
+    monkeypatch.setattr(timer_repository, "_import_timer_state_with_connection", original_helper)
     result = catalog.import_timer_state(
         TIMER_STATE, "Server", "Account", "successful payload", "discord"
     )
