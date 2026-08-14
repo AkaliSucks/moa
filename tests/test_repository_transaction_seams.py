@@ -8324,7 +8324,7 @@ def test_public_mudapins_wrapper_runner_rolls_back_recovers_and_preserves_contex
             JOIN account_contexts ON account_contexts.server_context_id = server_contexts.id
             """
         ).fetchone())
-    original_helper = catalog._import_mudapins_with_connection
+    original_helper = catalog._mudapins_repository._import_mudapins_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
@@ -8339,7 +8339,7 @@ def test_public_mudapins_wrapper_runner_rolls_back_recovers_and_preserves_contex
         raise RuntimeError("forced MudaPins import failure")
 
     monkeypatch.setattr(
-        catalog,
+        catalog._mudapins_repository,
         "_import_mudapins_with_connection",
         fail_after_write,
     )
@@ -8369,7 +8369,7 @@ def test_public_mudapins_wrapper_runner_rolls_back_recovers_and_preserves_contex
         assert current_context == before_context
 
     monkeypatch.setattr(
-        catalog,
+        catalog._mudapins_repository,
         "_import_mudapins_with_connection",
         original_helper,
     )

@@ -109,6 +109,10 @@ from moa.repositories.kakeraloot_settings_repository import (
     KakeralootSettingsRepository,
     _KakeralootSettingsImportConnectionResult,
 )
+from moa.repositories.mudapins_repository import (
+    MudapinsRepository,
+    _MudapinImportConnectionResult,
+)
 from moa.repositories.kakeraloot_state_repository import (
     KakeralootStateRepository,
     _KakeralootStateImportConnectionResult,
@@ -496,14 +500,6 @@ class _RollImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _MudapinImportConnectionResult:
-    """Rows created by one Mudapin import on a caller-owned connection."""
-
-    import_event_id: int
-    mudapin_observation_id: int
-
-
-@dataclass(frozen=True, slots=True)
 class _ClaimImportConnectionResult:
     """Rows created by one claim import on a caller-owned connection."""
 
@@ -590,6 +586,7 @@ class CatalogRepository:
         self._tower_state_repository = TowerStateRepository(self.database_path)
         self._sphere_result_repository = SphereResultRepository(self.database_path)
         self._kakeraloot_settings_repository = KakeralootSettingsRepository(self.database_path)
+        self._mudapins_repository = MudapinsRepository(self.database_path)
 
     @property
     def database_path(self) -> Path:
@@ -2392,25 +2389,8 @@ class CatalogRepository:
         raw_message: str,
         source: str,
     ) -> MudapinImportResult:
-        """Store one account-scoped `$mp` Mudapin inventory."""
-        observed_at = datetime.now(timezone.utc)
-        imported = run_write_transaction(
-            self._database_path,
-            lambda connection: self._import_mudapins_with_connection(
-                connection,
-                snapshot=snapshot,
-                server=server_name,
-                account=account_name,
-                raw=raw_message,
-                source=source,
-                observed_at=observed_at,
-            ),
-        )
-        return MudapinImportResult(
-            import_event_id=imported.import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+        return self._mudapins_repository.import_mudapins(
+            snapshot, server_name, account_name, raw_message, source
         )
 
     def _import_mudapins_with_connection(
@@ -2424,62 +2404,18 @@ class CatalogRepository:
         source: str,
         observed_at: datetime,
     ) -> _MudapinImportConnectionResult:
-        """Store one Mudapin inventory without taking transaction ownership."""
-        cursor = connection.execute(
-            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-            ("mudapins", source, observed_at.isoformat(), raw),
-        )
-        import_event_id = int(cursor.lastrowid)
-        server_id = self._upsert_server(connection, server, observed_at)
-        account_id = self._upsert_account(connection, server_id, account, observed_at)
-        mudapin_observation_id = int(
-            connection.execute(
-                """
-                INSERT INTO mudapin_observations (
-                    account_context_id, pin_markers_json, pin_count, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    account_id,
-                    json.dumps(list(snapshot.pin_markers)),
-                    len(snapshot.pin_markers),
-                    observed_at.isoformat(),
-                    import_event_id,
-                ),
-            ).lastrowid
-        )
-        return _MudapinImportConnectionResult(
-            import_event_id=import_event_id,
-            mudapin_observation_id=mudapin_observation_id,
+        return self._mudapins_repository._import_mudapins_with_connection(
+            connection,
+            snapshot=snapshot,
+            server=server,
+            account=account,
+            raw=raw,
+            source=source,
+            observed_at=observed_at,
         )
 
     def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None:
-        """Return the latest `$mp` inventory for one account."""
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT mudapin_observations.*, server_contexts.name AS server_name,
-                       account_contexts.name AS account_name
-                FROM account_contexts
-                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
-                JOIN mudapin_observations ON mudapin_observations.id = (
-                    SELECT observations.id FROM mudapin_observations AS observations
-                    WHERE observations.account_context_id = account_contexts.id
-                    ORDER BY observations.id DESC LIMIT 1
-                )
-                WHERE server_contexts.normalized_name = ?
-                  AND account_contexts.normalized_name = ?
-                """,
-                (self._normalize(server_name), self._normalize(account_name)),
-            ).fetchone()
-        if row is None:
-            return None
-        return MudapinObservation(
-            server_name=row["server_name"],
-            account_name=row["account_name"],
-            snapshot=MudapinSnapshot(pin_markers=tuple(json.loads(row["pin_markers_json"]))),
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-        )
+        return self._mudapins_repository.mudapins(server_name, account_name)
 
     def import_server_settings(
         self,
