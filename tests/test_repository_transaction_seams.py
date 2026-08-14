@@ -6996,13 +6996,16 @@ def test_public_sphere_result_wrapper_rolls_back_helper_failure_and_remains_usab
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_sphere_result_with_connection
+    sphere_result_repository = catalog._sphere_result_repository
+    original_helper = sphere_result_repository._import_sphere_result_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced sphere-result import failure")
 
-    monkeypatch.setattr(catalog, "_import_sphere_result_with_connection", fail_after_write)
+    monkeypatch.setattr(
+        sphere_result_repository, "_import_sphere_result_with_connection", fail_after_write
+    )
 
     with pytest.raises(RuntimeError, match="forced sphere-result import failure"):
         catalog.import_sphere_result(
@@ -7022,7 +7025,9 @@ def test_public_sphere_result_wrapper_rolls_back_helper_failure_and_remains_usab
             "discord_processing_attempts": 0,
         }
 
-    monkeypatch.setattr(catalog, "_import_sphere_result_with_connection", original_helper)
+    monkeypatch.setattr(
+        sphere_result_repository, "_import_sphere_result_with_connection", original_helper
+    )
     result = catalog.import_sphere_result(
         SPHERE_RESULT, "Server", "Account", "successful payload", "discord"
     )
