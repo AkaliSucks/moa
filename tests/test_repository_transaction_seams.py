@@ -9764,14 +9764,14 @@ def test_public_server_settings_wrapper_rolls_back_helper_failure_and_remains_us
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_server_settings_with_connection
+    original_helper = catalog._server_settings_repository._import_server_settings_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced server-settings import failure")
 
     monkeypatch.setattr(
-        catalog,
+        catalog._server_settings_repository,
         "_import_server_settings_with_connection",
         fail_after_write,
     )
@@ -9790,7 +9790,7 @@ def test_public_server_settings_wrapper_rolls_back_helper_failure_and_remains_us
         }
 
     monkeypatch.setattr(
-        catalog,
+        catalog._server_settings_repository,
         "_import_server_settings_with_connection",
         original_helper,
     )

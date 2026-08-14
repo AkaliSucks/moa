@@ -117,6 +117,10 @@ from moa.repositories.disablelist_repository import (
     DisableListRepository,
     _DisableListImportConnectionResult,
 )
+from moa.repositories.server_settings_repository import (
+    ServerSettingsRepository,
+    _ServerSettingsImportConnectionResult,
+)
 
 
 class ImportEventDeletionBlockedError(RuntimeError):
@@ -493,14 +497,6 @@ class _ClaimImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _ServerSettingsImportConnectionResult:
-    """Rows created by one server-settings import on a caller-owned connection."""
-
-    import_event_id: int
-    server_settings_observation_id: int
-
-
-@dataclass(frozen=True, slots=True)
 class _KakeralootSettingsImportConnectionResult:
     """Rows created by one Kakeraloot settings import on a caller-owned connection."""
 
@@ -605,6 +601,7 @@ class CatalogRepository:
         self._kakeraloot_state_repository = KakeralootStateRepository(self.database_path)
         self._kakera_state_repository = KakeraStateRepository(self.database_path)
         self._disablelist_repository = DisableListRepository(self.database_path)
+        self._server_settings_repository = ServerSettingsRepository(self.database_path)
 
     @property
     def database_path(self) -> Path:
@@ -2768,23 +2765,8 @@ class CatalogRepository:
         raw_message: str,
         source: str,
     ) -> ServerSettingsImportResult:
-        """Store a complete server-scoped `$settings` snapshot."""
-        observed_at = datetime.now(timezone.utc)
-        imported = run_write_transaction(
-            self._database_path,
-            lambda connection: self._import_server_settings_with_connection(
-                connection,
-                settings=settings,
-                server=server_name,
-                raw=raw_message,
-                source=source,
-                observed_at=observed_at,
-            ),
-        )
-        return ServerSettingsImportResult(
-            import_event_id=imported.import_event_id,
-            server_name=server_name.strip(),
-            observed_at=observed_at,
+        return self._server_settings_repository.import_server_settings(
+            settings, server_name, raw_message, source
         )
 
     def _import_server_settings_with_connection(
@@ -2797,85 +2779,17 @@ class CatalogRepository:
         source: str,
         observed_at: datetime,
     ) -> _ServerSettingsImportConnectionResult:
-        """Store one server-settings snapshot without owning the transaction."""
-        cursor = connection.execute(
-            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-            ("server_settings", source, observed_at.isoformat(), raw),
-        )
-        import_event_id = int(cursor.lastrowid)
-        server_id = self._upsert_server(connection, server, observed_at)
-        server_settings_observation_id = int(
-            connection.execute(
-                """
-                INSERT INTO server_settings_observations (
-                    server_context_id, server_premium, prefix, language, claim_reset_minutes,
-                    reset_minute, reset_shift_minutes, rolls_per_hour, claim_reaction_expiry_seconds,
-                    claimed_character_rarity_multiplier, kakera_bonus_percent, sphere_bonus_percent,
-                    game_mode, channel_instance, metrics_json, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    server_id,
-                    int(settings.server_premium),
-                    settings.prefix,
-                    settings.language,
-                    settings.claim_reset_minutes,
-                    settings.reset_minute,
-                    settings.reset_shift_minutes,
-                    settings.rolls_per_hour,
-                    settings.claim_reaction_expiry_seconds,
-                    settings.claimed_character_rarity_multiplier,
-                    settings.kakera_bonus_percent,
-                    settings.sphere_bonus_percent,
-                    settings.game_mode,
-                    settings.channel_instance,
-                    json.dumps([metric.model_dump() for metric in settings.metrics]),
-                    observed_at.isoformat(),
-                    import_event_id,
-                ),
-            ).lastrowid
-        )
-        return _ServerSettingsImportConnectionResult(
-            import_event_id=import_event_id,
-            server_settings_observation_id=server_settings_observation_id,
+        return self._server_settings_repository._import_server_settings_with_connection(
+            connection,
+            settings=settings,
+            server=server,
+            raw=raw,
+            source=source,
+            observed_at=observed_at,
         )
 
     def server_settings(self, server_name: str) -> ServerSettingsObservation | None:
-        """Return the latest `$settings` snapshot for one server."""
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT server_settings_observations.*, server_contexts.name AS server_name
-                FROM server_contexts
-                JOIN server_settings_observations ON server_settings_observations.id = (
-                    SELECT observations.id FROM server_settings_observations AS observations
-                    WHERE observations.server_context_id = server_contexts.id
-                    ORDER BY observations.id DESC LIMIT 1
-                )
-                WHERE server_contexts.normalized_name = ?
-                """,
-                (self._normalize(server_name),),
-            ).fetchone()
-        if row is None:
-            return None
-        return ServerSettingsObservation(
-            server_name=row["server_name"],
-            server_premium=bool(row["server_premium"]),
-            prefix=row["prefix"],
-            language=row["language"],
-            claim_reset_minutes=row["claim_reset_minutes"],
-            reset_minute=row["reset_minute"],
-            reset_shift_minutes=row["reset_shift_minutes"],
-            rolls_per_hour=row["rolls_per_hour"],
-            claim_reaction_expiry_seconds=row["claim_reaction_expiry_seconds"],
-            claimed_character_rarity_multiplier=row["claimed_character_rarity_multiplier"],
-            kakera_bonus_percent=row["kakera_bonus_percent"],
-            sphere_bonus_percent=row["sphere_bonus_percent"],
-            game_mode=row["game_mode"],
-            channel_instance=row["channel_instance"],
-            metrics=tuple(json.loads(row["metrics_json"])),
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-        )
+        return self._server_settings_repository.server_settings(server_name)
 
     def delete_import_event(self, import_event_id: int) -> bool:
         """Delete one raw import and all observations derived from it.
