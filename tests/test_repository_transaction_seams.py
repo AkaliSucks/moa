@@ -50,10 +50,10 @@ from moa.repositories.catalog_repository import (
     CatalogRepository,
     ImportEventDeletionBlockedError,
     _AntidisablePageImportConnectionResult,
-    _DisableListImportConnectionResult,
     _PlayerBonusImportConnectionResult,
     _WishlistImportConnectionResult,
 )
+from moa.repositories.disablelist_repository import _DisableListImportConnectionResult
 from moa.repositories.kakeraloot_state_repository import (
     _KakeralootStateImportConnectionResult,
 )
@@ -7846,13 +7846,17 @@ def test_public_disablelist_wrapper_rolls_back_helper_failure_and_remains_usable
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_disablelist_with_connection
+    original_helper = catalog._disablelist_repository._import_disablelist_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced disablelist import failure")
 
-    monkeypatch.setattr(catalog, "_import_disablelist_with_connection", fail_after_write)
+    monkeypatch.setattr(
+        catalog._disablelist_repository,
+        "_import_disablelist_with_connection",
+        fail_after_write,
+    )
 
     with pytest.raises(RuntimeError, match="forced disablelist import failure"):
         catalog.import_disablelist(
@@ -7872,7 +7876,11 @@ def test_public_disablelist_wrapper_rolls_back_helper_failure_and_remains_usable
             "discord_processing_attempts": 0,
         }
 
-    monkeypatch.setattr(catalog, "_import_disablelist_with_connection", original_helper)
+    monkeypatch.setattr(
+        catalog._disablelist_repository,
+        "_import_disablelist_with_connection",
+        original_helper,
+    )
     result = catalog.import_disablelist(
         DISABLELIST, "Server", "Account", "successful payload", "discord"
     )
