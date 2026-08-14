@@ -156,6 +156,7 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     )
     assert main._format_rollability(False, None, "ernieuuu", True) == "Claimed"
     assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
+    assert main._format_rollability(False, None) == "Not observed unavailable"
 
 
 def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:

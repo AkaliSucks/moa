@@ -240,7 +240,7 @@ class TopSearchService:
                 if wishlist_match is True
                 else f"Unavailable ({unavailable_reasons[name] or 'disabled'})"
                 if topx_unavailable and unavailable_reasons is not None
-                else "Enabled"
+                else None
                 if scoped
                 else None
             )

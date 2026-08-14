@@ -170,7 +170,32 @@ def test_top_search_retains_unclaimed_topo_state() -> None:
     assert albedo.topo_observed is True
     assert albedo.owner_name is None
     assert albedo.unavailable is False
-    assert albedo.rollability_status == "Enabled"
+    assert albedo.rollability_status is None
+
+
+def test_top_search_keeps_never_observed_rollability_unknown() -> None:
+    catalog = InMemoryTopCatalog()
+    catalog._unavailable = ()
+
+    entries = TopSearchService(catalog).search(
+        server_name="Lake", account_name="ernieuuu", limit=None
+    )
+
+    assert all(entry.rollability_status is None for entry in entries)
+
+
+def test_top_search_preserves_unavailable_evidence_without_enabling_other_characters() -> None:
+    entries = TopSearchService(InMemoryTopCatalog()).search(
+        server_name="Lake", account_name="ernieuuu", limit=None
+    )
+
+    rem = next(entry for entry in entries if entry.character.name == "Rem")
+    albedo = next(entry for entry in entries if entry.character.name == "Albedo")
+
+    assert rem.rollability_status == "Unavailable ($togglewestern)"
+    assert rem.unavailable_reason == "$togglewestern"
+    assert albedo.rollability_status is None
+    assert albedo.unavailable is False
 
 
 def test_top_search_marks_wishlist_as_rollability_status_and_overrides_disabled() -> None:

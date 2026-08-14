@@ -2426,7 +2426,7 @@ def catalog_top(
     if server and account:
         console.print(
             "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "
-            "A dash in Keys means no imported key row for that character. Enabled means no imported blocking evidence; "
+            "A dash in Keys means no imported key row for that character. Unknown means no explicit rollability evidence; "
             "import fresh $topx/$adl data for stronger rollability evidence.[/dim]"
         )
 
