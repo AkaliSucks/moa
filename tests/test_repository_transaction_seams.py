@@ -45,6 +45,7 @@ from moa.models.character import (
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories import catalog_repository as catalog_repository_module
 from moa.repositories import harem_repository as harem_repository_module
+from moa.repositories import kakeraloot_settings_repository as kakeraloot_settings_repository_module
 from moa.repositories import profile_repository as profile_repository_module
 from moa.repositories.catalog_repository import (
     CatalogRepository,
@@ -55,6 +56,9 @@ from moa.repositories.catalog_repository import (
 from moa.repositories.disablelist_repository import _DisableListImportConnectionResult
 from moa.repositories.kakeraloot_state_repository import (
     _KakeralootStateImportConnectionResult,
+)
+from moa.repositories.kakeraloot_settings_repository import (
+    _KakeralootSettingsImportConnectionResult,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.wishlist_repository import _WishlistImportConnectionResult
@@ -5430,18 +5434,48 @@ def test_public_kakeraloot_settings_wrapper_preserves_result_rows_and_values(tmp
         )
 
 
+def test_kakeraloot_settings_connection_result_is_frozen_slotted_with_exact_fields() -> None:
+    assert is_dataclass(_KakeralootSettingsImportConnectionResult)
+    assert _KakeralootSettingsImportConnectionResult.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(_KakeralootSettingsImportConnectionResult)] == [
+        "import_event_id",
+        "kakeraloot_settings_observation_id",
+    ]
+    assert not hasattr(_KakeralootSettingsImportConnectionResult(1, 2), "__dict__")
+
+
+def test_public_kakeraloot_settings_wrapper_uses_one_specialized_runner(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    original_runner = kakeraloot_settings_repository_module.run_write_transaction
+    calls = []
+
+    def observed_runner(path, callback):
+        calls.append(path)
+        return original_runner(path, callback)
+
+    monkeypatch.setattr(
+        kakeraloot_settings_repository_module, "run_write_transaction", observed_runner
+    )
+    catalog.import_kakeraloot_settings(KAKERALOOT_SETTINGS, "Server", "payload", "discord")
+
+    assert calls == [database_path]
+
+
 def test_public_kakeraloot_settings_wrapper_runner_rolls_back_and_recovers(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_kakeraloot_settings_with_connection
+    repository = catalog._kakeraloot_settings_repository
+    original_helper = repository._import_kakeraloot_settings_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced Kakeraloot settings import failure")
 
     monkeypatch.setattr(
-        catalog,
+        repository,
         "_import_kakeraloot_settings_with_connection",
         fail_after_write,
     )
@@ -5462,7 +5496,7 @@ def test_public_kakeraloot_settings_wrapper_runner_rolls_back_and_recovers(
         }
 
     monkeypatch.setattr(
-        catalog,
+        repository,
         "_import_kakeraloot_settings_with_connection",
         original_helper,
     )

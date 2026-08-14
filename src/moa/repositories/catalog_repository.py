@@ -105,6 +105,10 @@ from moa.repositories.player_bonus_repository import (
     PlayerBonusRepository,
     _PlayerBonusImportConnectionResult,
 )
+from moa.repositories.kakeraloot_settings_repository import (
+    KakeralootSettingsRepository,
+    _KakeralootSettingsImportConnectionResult,
+)
 from moa.repositories.kakeraloot_state_repository import (
     KakeralootStateRepository,
     _KakeralootStateImportConnectionResult,
@@ -509,14 +513,6 @@ class _ClaimImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _KakeralootSettingsImportConnectionResult:
-    """Rows created by one Kakeraloot settings import on a caller-owned connection."""
-
-    import_event_id: int
-    kakeraloot_settings_observation_id: int
-
-
-@dataclass(frozen=True, slots=True)
 class _TimerStateImportConnectionResult:
     """Rows created by one timer-state import on a caller-owned connection."""
 
@@ -593,6 +589,7 @@ class CatalogRepository:
         self._wishlist_repository = WishlistRepository(self.database_path)
         self._tower_state_repository = TowerStateRepository(self.database_path)
         self._sphere_result_repository = SphereResultRepository(self.database_path)
+        self._kakeraloot_settings_repository = KakeralootSettingsRepository(self.database_path)
 
     @property
     def database_path(self) -> Path:
@@ -2325,26 +2322,8 @@ class CatalogRepository:
         raw_message: str,
         source: str,
     ) -> KakeralootSettingsImportResult:
-        """Store the latest server-scoped Kakeraloot price configuration."""
-        observed_at = datetime.now(timezone.utc)
-
-        def import_with_connection(
-            connection: sqlite3.Connection,
-        ) -> _KakeralootSettingsImportConnectionResult:
-            return self._import_kakeraloot_settings_with_connection(
-                connection,
-                settings=settings,
-                server=server_name,
-                raw=raw_message,
-                source=source,
-                observed_at=observed_at,
-            )
-
-        imported = run_write_transaction(self._database_path, import_with_connection)
-        return KakeralootSettingsImportResult(
-            import_event_id=imported.import_event_id,
-            server_name=server_name.strip(),
-            observed_at=observed_at,
+        return self._kakeraloot_settings_repository.import_kakeraloot_settings(
+            settings, server_name, raw_message, source
         )
 
     def _import_kakeraloot_settings_with_connection(
@@ -2357,61 +2336,17 @@ class CatalogRepository:
         source: str,
         observed_at: datetime,
     ) -> _KakeralootSettingsImportConnectionResult:
-        """Store one Kakeraloot settings snapshot without owning the transaction."""
-        cursor = connection.execute(
-            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-            ("kakeraloot_settings", source, observed_at.isoformat(), raw),
-        )
-        import_event_id = int(cursor.lastrowid)
-        server_id = self._upsert_server(connection, server, observed_at)
-        kakeraloot_settings_observation_id = int(
-            connection.execute(
-                """
-                INSERT INTO kakeraloot_settings_observations (
-                    server_context_id, loot_cost, quantity_quality_base_cost,
-                    quantity_quality_level_increment, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    server_id,
-                    settings.loot_cost,
-                    settings.quantity_quality_base_cost,
-                    settings.quantity_quality_level_increment,
-                    observed_at.isoformat(),
-                    import_event_id,
-                ),
-            ).lastrowid
-        )
-        return _KakeralootSettingsImportConnectionResult(
-            import_event_id=import_event_id,
-            kakeraloot_settings_observation_id=kakeraloot_settings_observation_id,
+        return self._kakeraloot_settings_repository._import_kakeraloot_settings_with_connection(
+            connection,
+            settings=settings,
+            server=server,
+            raw=raw,
+            source=source,
+            observed_at=observed_at,
         )
 
     def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
-        """Return the latest `$infokl` price configuration for one server."""
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT kakeraloot_settings_observations.*, server_contexts.name AS server_name
-                FROM server_contexts
-                JOIN kakeraloot_settings_observations ON kakeraloot_settings_observations.id = (
-                    SELECT observations.id FROM kakeraloot_settings_observations AS observations
-                    WHERE observations.server_context_id = server_contexts.id
-                    ORDER BY observations.id DESC LIMIT 1
-                )
-                WHERE server_contexts.normalized_name = ?
-                """,
-                (self._normalize(server_name),),
-            ).fetchone()
-        if row is None:
-            return None
-        return KakeralootSettingsObservation(
-            server_name=row["server_name"],
-            loot_cost=row["loot_cost"],
-            quantity_quality_base_cost=row["quantity_quality_base_cost"],
-            quantity_quality_level_increment=row["quantity_quality_level_increment"],
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-        )
+        return self._kakeraloot_settings_repository.kakeraloot_settings(server_name)
 
     def import_profile(
         self,
