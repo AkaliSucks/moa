@@ -62,14 +62,14 @@ class TopSearchService:
                 "run `moa harem begin --kind owned` and import every `$mmr`/`$mmrk` page."
             )
 
-        owned_names: set[str] | None = None
-        owned_observations: dict[str, OwnedCharacterObservation] | None = None
-        claim_observations: dict[str, ClaimObservation] | None = None
-        keyed_names: set[str] | None = None
-        key_observations: dict[str, HaremKeyObservation] | None = None
+        owned_observations: dict[int, OwnedCharacterObservation] | None = None
+        claim_observations: dict[int, ClaimObservation] | None = None
+        unresolved_owned_names: set[str] | None = None
+        key_observations: dict[int, HaremKeyObservation] | None = None
+        unresolved_key_names: set[str] | None = None
         unavailable_reasons: dict[str, str | None] | None = None
         self_account_names: set[str] | None = None
-        topo_owner_names: dict[str, str | None] | None = None
+        topo_owner_names: dict[int, str | None] | None = None
         wishlist_names: set[str] | None = None
         antidisable_series_names: set[str] | None = None
         server_kakera_values: dict[int, int | None] = {}
@@ -79,24 +79,43 @@ class TopSearchService:
                 account.casefold()
                 for account in (owned_account_names or (account_name,))
             }
+            owned_entries = self._catalog.owned_characters(server_name, account_name)
             owned_observations = {
-                entry.character_name.casefold(): entry
-                for entry in self._catalog.owned_characters(server_name, account_name)
+                entry.character.id: entry
+                for entry in owned_entries
+                if entry.character is not None
             }
+            unresolved_owned_names = {
+                entry.character_name.casefold()
+                for entry in owned_entries
+                if entry.character is None
+            }
+            claim_entries = (
+                self._catalog.claim_observations(server_name, account_name)
+                if hasattr(self._catalog, "claim_observations")
+                else ()
+            )
             claim_observations = {
-                entry.character_name.casefold(): entry
-                for entry in (
-                    self._catalog.claim_observations(server_name, account_name)
-                    if hasattr(self._catalog, "claim_observations")
-                    else ()
-                )
+                entry.character.id: entry
+                for entry in claim_entries
+                if entry.character is not None
             }
-            owned_names = set(owned_observations) | set(claim_observations)
+            unresolved_owned_names.update(
+                entry.character_name.casefold()
+                for entry in claim_entries
+                if entry.character is None
+            )
+            key_entries = self._catalog.harem_keys(server_name, account_name)
             key_observations = {
-                entry.character_name.casefold(): entry
-                for entry in self._catalog.harem_keys(server_name, account_name)
+                entry.character.id: entry
+                for entry in key_entries
+                if entry.character is not None
             }
-            keyed_names = set(key_observations)
+            unresolved_key_names = {
+                entry.character_name.casefold()
+                for entry in key_entries
+                if entry.character is None
+            }
             unavailable_reasons = {
                 entry.character.name.casefold(): entry.reason
                 for entry in self._catalog.unavailable_characters(server_name, account_name)
@@ -109,7 +128,7 @@ class TopSearchService:
                 for series in self._catalog.antidisable_series(server_name, account_name)
             }
             topo_owner_names = {
-                entry.character.name.casefold(): entry.owner_name
+                entry.character.id: entry.owner_name
                 for entry in self._catalog.top_owner_observations(server_name)
             }
 
@@ -126,26 +145,54 @@ class TopSearchService:
                     continue
 
             name = entry.character.name.casefold()
-            owned = name in owned_names if owned_names is not None else None
-            owned_observation = (
-                owned_observations.get(name)
+            character_id = entry.character.id
+            owned = (
+                True
+                if owned_observations is not None
+                and claim_observations is not None
+                and (
+                    character_id in owned_observations
+                    or character_id in claim_observations
+                )
+                else None
+                if unresolved_owned_names is not None
+                and name in unresolved_owned_names
+                else False
                 if owned_observations is not None
                 else None
             )
-            keyed = name in keyed_names if keyed_names is not None else None
-            key_observation = (
-                key_observations.get(name)
+            owned_observation = (
+                owned_observations.get(character_id)
+                if owned_observations is not None
+                else None
+            )
+            keyed = (
+                True
+                if key_observations is not None and character_id in key_observations
+                else None
+                if unresolved_key_names is not None and name in unresolved_key_names
+                else False
                 if key_observations is not None
                 else None
             )
-            topo_observed = name in topo_owner_names if topo_owner_names is not None else None
+            key_observation = (
+                key_observations.get(character_id)
+                if key_observations is not None
+                else None
+            )
+            topo_observed = (
+                character_id in topo_owner_names
+                if topo_owner_names is not None
+                else None
+            )
             owner_name = (
-                topo_owner_names[name]
+                topo_owner_names[character_id]
                 if topo_observed
                 and topo_owner_names is not None
-                and topo_owner_names[name] is not None
+                and topo_owner_names[character_id] is not None
                 else account_name
-                if claim_observations is not None and name in claim_observations
+                if claim_observations is not None
+                and character_id in claim_observations
                 else None
             )
             topx_unavailable = (
@@ -204,7 +251,7 @@ class TopSearchService:
             )
             if owned_only and not owned:
                 continue
-            if unowned_only and owned:
+            if unowned_only and owned is not False:
                 continue
             if keyed_only and not keyed:
                 continue

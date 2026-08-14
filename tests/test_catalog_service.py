@@ -6,7 +6,14 @@ from threading import Event
 import pytest
 
 import moa.repositories.catalog_repository as catalog_repository_module
-from moa.models.character import DivorceConfirmation, ProfileSnapshot, RollObservation
+from moa.models.character import (
+    ClaimConfirmation,
+    DivorceConfirmation,
+    ProfileSnapshot,
+    RankedCharacter,
+    RollObservation,
+    TopPage,
+)
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import (
     CatalogRepository,
@@ -161,6 +168,123 @@ def test_claim_observation_marks_catalog_entry_as_owned(tmp_path) -> None:
     assert entry.owned is True
     assert entry.owner_name == "ernieuuu"
     assert entry.rollability_status == "Claimed"
+
+
+def test_claim_reader_contains_ambiguous_name_only_divorce_by_canonical_id(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    repository = CatalogRepository(database_path)
+    service = CatalogService(repository)
+    service.import_top_page(
+        TopPage(
+            limit=None,
+            page_number=1,
+            page_count=1,
+            characters=(
+                RankedCharacter(name="Duplicate", series="Series A", claim_rank=10),
+                RankedCharacter(name="Duplicate", series="Series B", claim_rank=20),
+            ),
+        ),
+        "seed",
+        "test",
+    )
+    unresolved = service.import_claim(
+        ClaimConfirmation(account_name="Account", character_name="Duplicate"),
+        "Server",
+        "Account",
+        "unresolved claim",
+        "test",
+    )
+    assert unresolved.character_id is None
+
+    timestamp = "2026-08-14T00:00:00+00:00"
+    with repository._connection() as connection:
+        account_id = int(connection.execute("SELECT id FROM account_contexts").fetchone()[0])
+        characters = connection.execute(
+            "SELECT id, series FROM characters WHERE normalized_name = 'duplicate'"
+        ).fetchall()
+        character_ids = {row["series"]: int(row["id"]) for row in characters}
+        for series in ("Series A", "Series B"):
+            event_id = int(
+                connection.execute(
+                    "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                    "VALUES ('claim', 'test', ?, ?)",
+                    (timestamp, f"exact claim {series}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO claim_observations (
+                    account_context_id, character_id, character_name,
+                    normalized_character_name, observed_at, import_event_id
+                ) VALUES (?, ?, 'Duplicate', 'duplicate', ?, ?)
+                """,
+                (account_id, character_ids[series], timestamp, event_id),
+            )
+
+    claims = service.claim_observations("Server", "Account")
+    assert {claim.character.id for claim in claims if claim.character is not None} == set(
+        character_ids.values()
+    )
+    assert sum(claim.character is None for claim in claims) == 1
+
+    with repository._connection() as connection:
+        unresolved_divorce_event_id = int(
+            connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                "VALUES ('divorce', 'test', ?, 'unresolved divorce')",
+                (timestamp,),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO divorce_observations (
+                account_context_id, character_id, character_name,
+                normalized_character_name, observed_at, import_event_id
+            ) VALUES (?, NULL, 'Duplicate', 'duplicate', ?, ?)
+            """,
+            (account_id, timestamp, unresolved_divorce_event_id),
+        )
+
+    assert {
+        claim.character.id
+        for claim in service.claim_observations("Server", "Account")
+        if claim.character is not None
+    } == set(character_ids.values())
+
+    with repository._connection() as connection:
+        exact_divorce_event_id = int(
+            connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                "VALUES ('divorce', 'test', ?, 'exact divorce')",
+                (timestamp,),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO divorce_observations (
+                account_context_id, character_id, character_name,
+                normalized_character_name, observed_at, import_event_id
+            ) VALUES (?, ?, 'Duplicate', 'duplicate', ?, ?)
+            """,
+            (
+                account_id,
+                character_ids["Series A"],
+                timestamp,
+                exact_divorce_event_id,
+            ),
+        )
+
+    remaining = service.claim_observations("Server", "Account")
+    assert [claim.character.id for claim in remaining if claim.character is not None] == [
+        character_ids["Series B"]
+    ]
+    with repository._connection() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM claim_observations "
+            "WHERE character_id IS NULL AND normalized_character_name = 'duplicate'"
+        ).fetchone()[0] == 1
 
 
 def test_import_topo_page_persists_claimed_owner_name(tmp_path) -> None:

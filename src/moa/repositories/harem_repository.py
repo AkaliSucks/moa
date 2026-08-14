@@ -256,7 +256,19 @@ class HaremRepository:
                       SELECT latest.id
                       FROM owned_character_observations AS latest
                       WHERE latest.account_context_id = account_contexts.id
-                        AND latest.normalized_character_name = observations.normalized_character_name
+                        AND (
+                            (
+                                latest.character_id IS NOT NULL
+                                AND observations.character_id IS NOT NULL
+                                AND latest.character_id = observations.character_id
+                            )
+                            OR (
+                                latest.character_id IS NULL
+                                AND observations.character_id IS NULL
+                                AND latest.normalized_character_name =
+                                    observations.normalized_character_name
+                            )
+                        )
                         {latest_scan_filter}
                       ORDER BY latest.id DESC
                       LIMIT 1
@@ -278,8 +290,34 @@ class HaremRepository:
                       SELECT 1
                       FROM divorce_observations AS divorces
                       WHERE divorces.account_context_id = observations.account_context_id
-                        AND divorces.normalized_character_name = observations.normalized_character_name
                         AND divorces.import_event_id > observations.import_event_id
+                        AND (
+                            (
+                                divorces.character_id IS NOT NULL
+                                AND observations.character_id IS NOT NULL
+                                AND divorces.character_id = observations.character_id
+                            )
+                            OR (
+                                divorces.normalized_character_name =
+                                    observations.normalized_character_name
+                                AND (
+                                    (
+                                        divorces.character_id IS NULL
+                                        AND observations.character_id IS NULL
+                                    )
+                                    OR (
+                                        (divorces.character_id IS NULL) !=
+                                            (observations.character_id IS NULL)
+                                        AND 1 = (
+                                            SELECT COUNT(*)
+                                            FROM characters AS candidates
+                                            WHERE candidates.normalized_name =
+                                                observations.normalized_character_name
+                                        )
+                                    )
+                                )
+                            )
+                        )
                   )
                 ORDER BY observations.claim_rank ASC,
                          observations.character_name COLLATE NOCASE
@@ -334,7 +372,20 @@ class HaremRepository:
                     SELECT observations.id
                     FROM harem_key_observations AS observations
                     WHERE observations.account_context_id = account_contexts.id
-                      AND observations.normalized_character_name = harem_key_observations.normalized_character_name
+                      AND (
+                          (
+                              observations.character_id IS NOT NULL
+                              AND harem_key_observations.character_id IS NOT NULL
+                              AND observations.character_id =
+                                  harem_key_observations.character_id
+                          )
+                          OR (
+                              observations.character_id IS NULL
+                              AND harem_key_observations.character_id IS NULL
+                              AND observations.normalized_character_name =
+                                  harem_key_observations.normalized_character_name
+                          )
+                      )
                       AND (observations.harem_scan_id = ? OR observations.harem_scan_id IS NULL)
                     ORDER BY observations.id DESC
                     LIMIT 1
@@ -356,8 +407,35 @@ class HaremRepository:
                       SELECT 1
                       FROM divorce_observations AS divorces
                       WHERE divorces.account_context_id = harem_key_observations.account_context_id
-                        AND divorces.normalized_character_name = harem_key_observations.normalized_character_name
                         AND divorces.import_event_id > harem_key_observations.import_event_id
+                        AND (
+                            (
+                                divorces.character_id IS NOT NULL
+                                AND harem_key_observations.character_id IS NOT NULL
+                                AND divorces.character_id =
+                                    harem_key_observations.character_id
+                            )
+                            OR (
+                                divorces.normalized_character_name =
+                                    harem_key_observations.normalized_character_name
+                                AND (
+                                    (
+                                        divorces.character_id IS NULL
+                                        AND harem_key_observations.character_id IS NULL
+                                    )
+                                    OR (
+                                        (divorces.character_id IS NULL) !=
+                                            (harem_key_observations.character_id IS NULL)
+                                        AND 1 = (
+                                            SELECT COUNT(*)
+                                            FROM characters AS candidates
+                                            WHERE candidates.normalized_name =
+                                                harem_key_observations.normalized_character_name
+                                        )
+                                    )
+                                )
+                            )
+                        )
                   )
                 ORDER BY harem_key_observations.kakera_value DESC NULLS LAST,
                          harem_key_observations.key_count DESC,

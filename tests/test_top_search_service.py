@@ -4,6 +4,7 @@ import pytest
 
 from moa.models.catalog import (
     CatalogCharacter,
+    ClaimObservation,
     HaremKeyObservation,
     OwnedCharacterObservation,
     RankedCatalogCharacter,
@@ -261,6 +262,122 @@ def test_top_search_filters_to_directly_observed_owned_characters() -> None:
     assert [entry.character.name for entry in owned] == ["Rem"]
     assert owned[0].owned is True
     assert owned[0].keyed is False
+
+
+def test_top_search_fails_closed_for_ambiguous_name_only_ownership() -> None:
+    catalog = InMemoryTopCatalog()
+    observed_at = catalog._top[0].observed_at
+    first = RankedCatalogCharacter(
+        character=CatalogCharacter(
+            id=10,
+            name="Duplicate",
+            series="Series A",
+            gender=None,
+            roulette=None,
+        ),
+        claim_rank=10,
+        like_rank=None,
+        observed_at=observed_at,
+    )
+    second = RankedCatalogCharacter(
+        character=CatalogCharacter(
+            id=11,
+            name="Duplicate",
+            series="Series B",
+            gender=None,
+            roulette=None,
+        ),
+        claim_rank=20,
+        like_rank=None,
+        observed_at=observed_at,
+    )
+    catalog._top = (first, second)
+    catalog._owned = (
+        OwnedCharacterObservation(
+            character_name="Duplicate",
+            character=None,
+            claim_rank=10,
+            kakera_value=100,
+            observed_at=observed_at,
+        ),
+    )
+    catalog._harem = (
+        HaremKeyObservation(
+            character_name="Duplicate",
+            character=None,
+            key_type="gold",
+            key_count=7,
+            kakera_value=100,
+            observed_at=observed_at,
+        ),
+    )
+    catalog.claim_observations = lambda server_name, account_name: (
+        ClaimObservation(
+            character_name="Duplicate",
+            character=None,
+            observed_at=observed_at,
+        ),
+    )
+    catalog._unavailable = ()
+    catalog._server_values = {}
+
+    unresolved = TopSearchService(catalog).search(
+        server_name="Server", account_name="Account", limit=None
+    )
+    assert [(entry.character.series, entry.owned, entry.keyed) for entry in unresolved] == [
+        ("Series A", None, None),
+        ("Series B", None, None),
+    ]
+    assert TopSearchService(catalog).search(
+        server_name="Server", account_name="Account", owned_only=True
+    ) == ()
+    assert TopSearchService(catalog).search(
+        server_name="Server", account_name="Account", unowned_only=True
+    ) == ()
+
+    catalog._owned = catalog._owned + (
+        OwnedCharacterObservation(
+            character_name="Duplicate",
+            character=first.character,
+            claim_rank=10,
+            kakera_value=1000,
+            observed_at=observed_at,
+        ),
+    )
+    catalog._harem = catalog._harem + (
+        HaremKeyObservation(
+            character_name="Duplicate",
+            character=first.character,
+            key_type="gold",
+            key_count=10,
+            kakera_value=1000,
+            observed_at=observed_at,
+        ),
+    )
+    catalog.claim_observations = lambda server_name, account_name: (
+        ClaimObservation(
+            character_name="Duplicate",
+            character=None,
+            observed_at=observed_at,
+        ),
+        ClaimObservation(
+            character_name="Duplicate",
+            character=first.character,
+            observed_at=observed_at,
+        ),
+    )
+
+    contained = TopSearchService(catalog).search(
+        server_name="Server", account_name="Account", limit=None
+    )
+    assert [(entry.character.series, entry.owned, entry.keyed) for entry in contained] == [
+        ("Series A", True, True),
+        ("Series B", None, None),
+    ]
+    assert contained[0].owner_name == "Account"
+    assert contained[0].key_count == 10
+    assert contained[1].owner_name is None
+    assert contained[1].key_count is None
 
 
 def test_top_search_filters_to_unowned_characters_only_after_complete_scan() -> None:

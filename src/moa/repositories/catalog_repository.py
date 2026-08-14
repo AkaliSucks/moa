@@ -1189,14 +1189,52 @@ class CatalogRepository:
                       SELECT 1
                       FROM divorce_observations AS divorces
                       WHERE divorces.account_context_id = observations.account_context_id
-                        AND divorces.normalized_character_name = observations.normalized_character_name
                         AND divorces.import_event_id > observations.import_event_id
+                        AND (
+                            (
+                                divorces.character_id IS NOT NULL
+                                AND observations.character_id IS NOT NULL
+                                AND divorces.character_id = observations.character_id
+                            )
+                            OR (
+                                divorces.normalized_character_name =
+                                    observations.normalized_character_name
+                                AND (
+                                    (
+                                        divorces.character_id IS NULL
+                                        AND observations.character_id IS NULL
+                                    )
+                                    OR (
+                                        (divorces.character_id IS NULL) !=
+                                            (observations.character_id IS NULL)
+                                        AND 1 = (
+                                            SELECT COUNT(*)
+                                            FROM characters AS candidates
+                                            WHERE candidates.normalized_name =
+                                                observations.normalized_character_name
+                                        )
+                                    )
+                                )
+                            )
+                        )
                   )
                   AND observations.id = (
                       SELECT latest.id
                       FROM claim_observations AS latest
                       WHERE latest.account_context_id = observations.account_context_id
-                        AND latest.normalized_character_name = observations.normalized_character_name
+                        AND (
+                            (
+                                latest.character_id IS NOT NULL
+                                AND observations.character_id IS NOT NULL
+                                AND latest.character_id = observations.character_id
+                            )
+                            OR (
+                                latest.character_id IS NULL
+                                AND observations.character_id IS NULL
+                                AND latest.normalized_character_name =
+                                    observations.normalized_character_name
+                            )
+                        )
                       ORDER BY latest.id DESC
                       LIMIT 1
                   )

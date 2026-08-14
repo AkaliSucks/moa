@@ -267,6 +267,173 @@ def test_queries_preserve_order_divorce_exclusion_and_recent_gain_order(tmp_path
         repository.recent_key_gains("Server", "Account", 0)
 
 
+def test_ambiguous_name_history_does_not_cross_canonical_harem_identity(tmp_path) -> None:
+    database_path, catalog, repository = _initialized_repositories(tmp_path)
+    _seed_characters(catalog)
+    repository.import_ranked_harem_page(
+        RankedHaremPage(
+            page_number=None,
+            page_count=None,
+            entries=(RankedHaremEntry(name="Duplicate", claim_rank=30),),
+        ),
+        "Server",
+        "Account",
+        "unresolved owned",
+        "test",
+    )
+    repository.import_harem_key_page(
+        HaremKeyPage(
+            page_number=None,
+            page_count=None,
+            entries=(
+                HaremKeyEntry(name="Duplicate", key_type="bronze", key_count=1),
+            ),
+        ),
+        "Server",
+        "Account",
+        "unresolved keys",
+        "test",
+    )
+
+    timestamp = "2026-08-14T00:00:00+00:00"
+    with connect(database_path) as connection:
+        characters = connection.execute(
+            "SELECT id, series FROM characters WHERE normalized_name = 'duplicate' "
+            "ORDER BY normalized_series"
+        ).fetchall()
+        character_ids = {row["series"]: int(row["id"]) for row in characters}
+        account_id = int(connection.execute("SELECT id FROM account_contexts").fetchone()[0])
+
+        for series, claim_rank, key_count in (
+            ("Series C", 3, 7),
+            ("Series D", 4, 9),
+        ):
+            event_id = int(
+                connection.execute(
+                    "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                    "VALUES ('test', 'test', ?, ?)",
+                    (timestamp, f"explicit {series}"),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO owned_character_observations (
+                    account_context_id, character_id, character_name,
+                    normalized_character_name, claim_rank, kakera_value,
+                    roulette_types_json, observed_at, import_event_id
+                ) VALUES (?, ?, 'Duplicate', 'duplicate', ?, ?, '[]', ?, ?)
+                """,
+                (
+                    account_id,
+                    character_ids[series],
+                    claim_rank,
+                    claim_rank * 100,
+                    timestamp,
+                    event_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO harem_key_observations (
+                    account_context_id, character_id, character_name,
+                    normalized_character_name, key_type, key_count,
+                    kakera_value, observed_at, import_event_id
+                ) VALUES (?, ?, 'Duplicate', 'duplicate', 'gold', ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    character_ids[series],
+                    key_count,
+                    claim_rank * 100,
+                    timestamp,
+                    event_id,
+                ),
+            )
+
+    owned = repository.owned_characters("Server", "Account")
+    keys = repository.harem_keys("Server", "Account")
+    assert {entry.character.id for entry in owned if entry.character is not None} == set(
+        character_ids.values()
+    )
+    assert {entry.character.id for entry in keys if entry.character is not None} == set(
+        character_ids.values()
+    )
+    assert sum(entry.character is None for entry in owned) == 1
+    assert sum(entry.character is None for entry in keys) == 1
+
+    with connect(database_path) as connection:
+        unresolved_divorce_event_id = int(
+            connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                "VALUES ('divorce', 'test', ?, 'unresolved divorce')",
+                (timestamp,),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO divorce_observations (
+                account_context_id, character_id, character_name,
+                normalized_character_name, observed_at, import_event_id
+            ) VALUES (?, NULL, 'Duplicate', 'duplicate', ?, ?)
+            """,
+            (account_id, timestamp, unresolved_divorce_event_id),
+        )
+
+    assert {
+        entry.character.id
+        for entry in repository.owned_characters("Server", "Account")
+        if entry.character is not None
+    } == set(character_ids.values())
+    assert {
+        entry.character.id
+        for entry in repository.harem_keys("Server", "Account")
+        if entry.character is not None
+    } == set(character_ids.values())
+
+    with connect(database_path) as connection:
+        exact_divorce_event_id = int(
+            connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                "VALUES ('divorce', 'test', ?, 'exact divorce')",
+                (timestamp,),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO divorce_observations (
+                account_context_id, character_id, character_name,
+                normalized_character_name, observed_at, import_event_id
+            ) VALUES (?, ?, 'Duplicate', 'duplicate', ?, ?)
+            """,
+            (
+                account_id,
+                character_ids["Series C"],
+                timestamp,
+                exact_divorce_event_id,
+            ),
+        )
+
+    assert {
+        entry.character.id
+        for entry in repository.owned_characters("Server", "Account")
+        if entry.character is not None
+    } == {character_ids["Series D"]}
+    assert {
+        entry.character.id
+        for entry in repository.harem_keys("Server", "Account")
+        if entry.character is not None
+    } == {character_ids["Series D"]}
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM owned_character_observations "
+            "WHERE character_id IS NULL AND normalized_character_name = 'duplicate'"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations "
+            "WHERE character_id IS NULL AND normalized_character_name = 'duplicate'"
+        ).fetchone()[0] == 1
+
+
 def test_harem_page_failure_rolls_back_all_rows_and_runner_recovers(tmp_path) -> None:
     database_path, _catalog, repository = _initialized_repositories(tmp_path)
     scan = repository.begin_harem_scan("Server", "Account")
