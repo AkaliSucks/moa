@@ -121,6 +121,10 @@ from moa.repositories.server_settings_repository import (
     ServerSettingsRepository,
     _ServerSettingsImportConnectionResult,
 )
+from moa.repositories.wishlist_repository import (
+    WishlistRepository,
+    _WishlistImportConnectionResult,
+)
 
 
 class ImportEventDeletionBlockedError(RuntimeError):
@@ -529,14 +533,6 @@ class _SphereResultImportConnectionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class _WishlistImportConnectionResult:
-    """Rows created by one wishlist import on a caller-owned connection."""
-
-    import_event_id: int
-    wishlist_observation_id: int
-
-
-@dataclass(frozen=True, slots=True)
 class _AntidisablePageImportConnectionResult:
     """Rows created by one antidisable page import on a caller-owned connection."""
 
@@ -602,6 +598,7 @@ class CatalogRepository:
         self._kakera_state_repository = KakeraStateRepository(self.database_path)
         self._disablelist_repository = DisableListRepository(self.database_path)
         self._server_settings_repository = ServerSettingsRepository(self.database_path)
+        self._wishlist_repository = WishlistRepository(self.database_path)
 
     @property
     def database_path(self) -> Path:
@@ -1775,28 +1772,8 @@ class CatalogRepository:
         raw_message: str,
         source: str,
     ) -> WishlistImportResult:
-        """Store a complete account-scoped `$wl` snapshot."""
-        observed_at = datetime.now(timezone.utc)
-
-        def import_with_connection(
-            connection: sqlite3.Connection,
-        ) -> _WishlistImportConnectionResult:
-            return self._import_wishlist_with_connection(
-                connection,
-                state=wishlist,
-                server=server_name,
-                account=account_name,
-                raw=raw_message,
-                source=source,
-                observed_at=observed_at,
-            )
-
-        imported = run_write_transaction(self._database_path, import_with_connection)
-        return WishlistImportResult(
-            import_event_id=imported.import_event_id,
-            server_name=server_name.strip(),
-            account_name=account_name.strip(),
-            observed_at=observed_at,
+        return self._wishlist_repository.import_wishlist(
+            wishlist, server_name, account_name, raw_message, source
         )
 
     def _import_wishlist_with_connection(
@@ -1810,70 +1787,18 @@ class CatalogRepository:
         source: str,
         observed_at: datetime,
     ) -> _WishlistImportConnectionResult:
-        """Store one wishlist snapshot without taking transaction ownership."""
-        cursor = connection.execute(
-            "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
-            ("wishlist", source, observed_at.isoformat(), raw),
-        )
-        import_event_id = int(cursor.lastrowid)
-        server_id = self._upsert_server(connection, server, observed_at)
-        account_id = self._upsert_account(connection, server_id, account, observed_at)
-        wishlist_observation_id = int(
-            connection.execute(
-                """
-                INSERT INTO wishlist_observations (
-                    account_context_id, wishlist_count, wishlist_capacity, starwish_count,
-                    starwish_capacity, entries_json, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    account_id,
-                    state.wishlist_count,
-                    state.wishlist_capacity,
-                    state.starwish_count,
-                    state.starwish_capacity,
-                    json.dumps([entry.model_dump() for entry in state.entries]),
-                    observed_at.isoformat(),
-                    import_event_id,
-                ),
-            ).lastrowid
-        )
-        return _WishlistImportConnectionResult(
-            import_event_id=import_event_id,
-            wishlist_observation_id=wishlist_observation_id,
+        return self._wishlist_repository._import_wishlist_with_connection(
+            connection,
+            state=state,
+            server=server,
+            account=account,
+            raw=raw,
+            source=source,
+            observed_at=observed_at,
         )
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
-        """Return the latest `$wl` snapshot for one server/account pair."""
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT wishlist_observations.*, server_contexts.name AS server_name,
-                       account_contexts.name AS account_name
-                FROM account_contexts
-                JOIN server_contexts ON server_contexts.id = account_contexts.server_context_id
-                JOIN wishlist_observations ON wishlist_observations.id = (
-                    SELECT observations.id FROM wishlist_observations AS observations
-                    WHERE observations.account_context_id = account_contexts.id
-                    ORDER BY observations.id DESC LIMIT 1
-                )
-                WHERE server_contexts.normalized_name = ?
-                  AND account_contexts.normalized_name = ?
-                """,
-                (self._normalize(server_name), self._normalize(account_name)),
-            ).fetchone()
-        if row is None:
-            return None
-        return WishlistObservation(
-            server_name=row["server_name"],
-            account_name=row["account_name"],
-            wishlist_count=row["wishlist_count"],
-            wishlist_capacity=row["wishlist_capacity"],
-            starwish_count=row["starwish_count"],
-            starwish_capacity=row["starwish_capacity"],
-            entries=tuple(json.loads(row["entries_json"])),
-            observed_at=datetime.fromisoformat(row["observed_at"]),
-        )
+        return self._wishlist_repository.wishlist(server_name, account_name)
 
     def import_antidisable_page(
         self,

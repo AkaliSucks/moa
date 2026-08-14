@@ -51,13 +51,13 @@ from moa.repositories.catalog_repository import (
     ImportEventDeletionBlockedError,
     _AntidisablePageImportConnectionResult,
     _PlayerBonusImportConnectionResult,
-    _WishlistImportConnectionResult,
 )
 from moa.repositories.disablelist_repository import _DisableListImportConnectionResult
 from moa.repositories.kakeraloot_state_repository import (
     _KakeralootStateImportConnectionResult,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.wishlist_repository import _WishlistImportConnectionResult
 from moa.services.disablelist_projection_coordinator import (
     DisableListProjectionCoordinator,
     DisableListProjectionResult,
@@ -7405,13 +7405,17 @@ def test_public_wishlist_wrapper_rolls_back_helper_failure_and_remains_usable(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
-    original_helper = catalog._import_wishlist_with_connection
+    original_helper = catalog._wishlist_repository._import_wishlist_with_connection
 
     def fail_after_write(connection: sqlite3.Connection, **kwargs):
         original_helper(connection, **kwargs)
         raise RuntimeError("forced wishlist import failure")
 
-    monkeypatch.setattr(catalog, "_import_wishlist_with_connection", fail_after_write)
+    monkeypatch.setattr(
+        catalog._wishlist_repository,
+        "_import_wishlist_with_connection",
+        fail_after_write,
+    )
 
     with pytest.raises(RuntimeError, match="forced wishlist import failure"):
         catalog.import_wishlist(
@@ -7431,7 +7435,11 @@ def test_public_wishlist_wrapper_rolls_back_helper_failure_and_remains_usable(
             "discord_processing_attempts": 0,
         }
 
-    monkeypatch.setattr(catalog, "_import_wishlist_with_connection", original_helper)
+    monkeypatch.setattr(
+        catalog._wishlist_repository,
+        "_import_wishlist_with_connection",
+        original_helper,
+    )
     result = catalog.import_wishlist(
         WISHLIST, "Server", "Account", "successful payload", "discord"
     )
