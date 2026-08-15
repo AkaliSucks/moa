@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import sqlite3
 
 
@@ -119,6 +120,17 @@ CATALOG_REQUIRED_COLUMNS = {
             "sphere_stock",
             "observed_at",
             "import_event_id",
+            "pokedex_observed",
+            "reactions_observed",
+            "mudapins_observed",
+            "kakera_balance_observed",
+            "keys_observed",
+            "bronze_keys_observed",
+            "silver_keys_observed",
+            "gold_keys_observed",
+            "sphere_stock_observed",
+            "sphere_counts_observed",
+            "badges_observed",
         }
     ),
     "sphere_result_observations": frozenset(
@@ -588,6 +600,108 @@ def _apply_kakeraloot_state_value_presence(connection: sqlite3.Connection) -> No
         )
 
 
+_PROFILE_PRESENCE_COLUMNS = (
+    "pokedex_observed",
+    "reactions_observed",
+    "mudapins_observed",
+    "kakera_balance_observed",
+    "keys_observed",
+    "bronze_keys_observed",
+    "silver_keys_observed",
+    "gold_keys_observed",
+    "sphere_stock_observed",
+    "sphere_counts_observed",
+    "badges_observed",
+)
+
+
+def _load_profile_json(raw: str, expected_type: type, column_name: str):
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise MigrationError(
+            f"Cannot migrate invalid profile_observations.{column_name} JSON."
+        ) from error
+    if not isinstance(value, expected_type):
+        raise MigrationError(
+            f"Cannot migrate invalid profile_observations.{column_name} shape."
+        )
+    return value
+
+
+def _apply_profile_response_presence(connection: sqlite3.Connection) -> None:
+    """Preserve Profile response presence without manufacturing historical certainty."""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(profile_observations)").fetchall()
+    }
+    for column_name in _PROFILE_PRESENCE_COLUMNS:
+        if column_name not in columns:
+            connection.execute(
+                f"""
+                ALTER TABLE profile_observations
+                ADD COLUMN {column_name} INTEGER
+                    CHECK ({column_name} IN (0, 1))
+                """
+            )
+
+    selected_columns = (
+        "id",
+        "pokedex_count",
+        "pokedex_json",
+        "kakera_reacts_json",
+        "mudapins_collected",
+        "mudapins_total",
+        "kakera_balance",
+        "bronze_keys",
+        "silver_keys",
+        "gold_keys",
+        "sphere_stock",
+        "spheres_json",
+        "displayed_badges_json",
+    )
+    rows = connection.execute(
+        f"SELECT {', '.join(selected_columns)} FROM profile_observations"
+    ).fetchall()
+    for row in rows:
+        values = dict(zip(selected_columns, row, strict=True))
+        pokedex_items = _load_profile_json(values["pokedex_json"], list, "pokedex_json")
+        reactions = _load_profile_json(
+            values["kakera_reacts_json"], dict, "kakera_reacts_json"
+        )
+        spheres = _load_profile_json(values["spheres_json"], dict, "spheres_json")
+        badges = _load_profile_json(
+            values["displayed_badges_json"], list, "displayed_badges_json"
+        )
+        count = values["pokedex_count"]
+        safely_observed = {
+            "pokedex_observed": count is not None and (bool(pokedex_items) or count == 0),
+            "reactions_observed": bool(reactions),
+            "mudapins_observed": (
+                values["mudapins_collected"] is not None
+                and values["mudapins_total"] is not None
+            ),
+            "kakera_balance_observed": values["kakera_balance"] is not None,
+            "keys_observed": any(
+                values[field_name] != 0
+                for field_name in ("bronze_keys", "silver_keys", "gold_keys")
+            ),
+            "bronze_keys_observed": values["bronze_keys"] != 0,
+            "silver_keys_observed": values["silver_keys"] != 0,
+            "gold_keys_observed": values["gold_keys"] != 0,
+            "sphere_stock_observed": values["sphere_stock"] is not None,
+            "sphere_counts_observed": bool(spheres),
+            "badges_observed": bool(badges),
+        }
+        for column_name, observed in safely_observed.items():
+            if observed:
+                connection.execute(
+                    f"UPDATE profile_observations SET {column_name} = 1 "
+                    f"WHERE id = ? AND {column_name} IS NULL",
+                    (values["id"],),
+                )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -628,5 +742,10 @@ CATALOG_MIGRATIONS = (
         version=8,
         name="kakeraloot-state-value-presence",
         apply=_apply_kakeraloot_state_value_presence,
+    ),
+    Migration(
+        version=9,
+        name="profile-response-presence",
+        apply=_apply_profile_response_presence,
     ),
 )

@@ -11,7 +11,7 @@ from moa.database.migrations import (
     run_migrations,
 )
 from moa.database.sqlite import connect
-from moa.models.character import KakeralootStateSnapshot, TowerStateSnapshot
+from moa.models.character import KakeralootStateSnapshot, ProfileSnapshot, TowerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -30,6 +30,40 @@ KAKERALOOT_VALUE_FIELDS = (
     "quality_level",
     "usage_count",
     "kakera_balance",
+)
+
+PROFILE_PRESENCE_FIELDS = (
+    "pokedex_observed",
+    "reactions_observed",
+    "mudapins_observed",
+    "kakera_balance_observed",
+    "keys_observed",
+    "bronze_keys_observed",
+    "silver_keys_observed",
+    "gold_keys_observed",
+    "sphere_stock_observed",
+    "sphere_counts_observed",
+    "badges_observed",
+)
+
+MINIMAL_PROFILE = ProfileSnapshot(
+    profile_name="Account",
+    collection_size=0,
+    female_percent=0,
+    male_percent=0,
+    pokedex_count=None,
+    pokedex_pokemon=None,
+    kakera_reacts=None,
+    mudapins_collected=None,
+    mudapins_total=None,
+    kakera_balance=None,
+    bronze_keys=None,
+    silver_keys=None,
+    gold_keys=None,
+    sphere_stock=None,
+    spheres=None,
+    displayed_badges=None,
+    **{field_name: False for field_name in PROFILE_PRESENCE_FIELDS},
 )
 
 
@@ -75,6 +109,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
 
 
 def _make_version_5_database(database_path):
@@ -85,6 +120,7 @@ def _make_version_5_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
 
 
 def _make_version_6_database(database_path, completed_towers_by_account):
@@ -103,6 +139,7 @@ def _make_version_6_database(database_path, completed_towers_by_account):
         )
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
 
 
 def _make_version_7_kakeraloot_database(database_path, states_by_account):
@@ -121,6 +158,19 @@ def _make_version_7_kakeraloot_database(database_path, states_by_account):
                 f"ALTER TABLE kakeraloot_state_observations DROP COLUMN {field_name}_observed"
             )
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+
+
+def _make_version_8_profile_database(database_path, profiles_by_account):
+    catalog = CatalogRepository(database_path)
+    for account, profile in profiles_by_account.items():
+        catalog.import_profile(profile, "Server", account, f"legacy {account}", "test")
+    with _open_database(database_path) as connection:
+        for field_name in PROFILE_PRESENCE_FIELDS:
+            connection.execute(
+                f"ALTER TABLE profile_observations DROP COLUMN {field_name}"
+            )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
 
 
 def _insert_aggregate(
@@ -384,6 +434,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
+        (9, "profile-response-presence"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -583,6 +634,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
+        (9, "profile-response-presence"),
     ]
 
 
@@ -682,7 +734,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 9))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 10))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -833,10 +885,7 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
         assert connection.execute(
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
-        assert _migration_rows(database_path)[-1] == (
-            8,
-            "kakeraloot-state-value-presence",
-        )
+        assert _migration_rows(database_path)[-1] == (9, "profile-response-presence")
 
 
 def test_failed_antidisable_workflow_migration_rolls_back_schema_and_metadata(
@@ -1035,6 +1084,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
+        (9, "profile-response-presence"),
     ]
 
 
@@ -1121,6 +1171,7 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1788,6 +1839,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
+        (9, "profile-response-presence"),
     ]
 
 
@@ -1816,6 +1868,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
+        (9, "profile-response-presence"),
     ]
 
 
@@ -2392,6 +2445,210 @@ def test_fresh_and_migrated_kakeraloot_presence_columns_are_equivalent_and_const
     assert schema_by_path[migrated_path] == schema_by_path[fresh_path] == expected_schema
 
 
+def test_profile_presence_migration_preserves_safe_evidence_and_legacy_ambiguity(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    rich_profile = MINIMAL_PROFILE.model_copy(
+        update={
+            "profile_name": "rich",
+            "pokedex_count": 2,
+            "pokedex_pokemon": ("gulpin", "piloswine"),
+            "kakera_reacts": {":kakeraY:": 497},
+            "mudapins_collected": 4,
+            "mudapins_total": 12,
+            "kakera_balance": 812,
+            "bronze_keys": 3,
+            "silver_keys": 2,
+            "gold_keys": 1,
+            "sphere_stock": 0,
+            "spheres": {":spP:": 2},
+            "displayed_badges": (":silvmudae:",),
+            **{field_name: True for field_name in PROFILE_PRESENCE_FIELDS},
+        }
+    )
+    zero_profile = MINIMAL_PROFILE.model_copy(
+        update={
+            "profile_name": "zero",
+            "kakera_balance": 0,
+            "keys_observed": True,
+            "bronze_keys": 0,
+            "bronze_keys_observed": True,
+            "sphere_stock": 0,
+            "kakera_balance_observed": True,
+            "sphere_stock_observed": True,
+        }
+    )
+    profiles = {
+        "minimal": MINIMAL_PROFILE.model_copy(update={"profile_name": "minimal"}),
+        "rich": rich_profile,
+        "zero": zero_profile,
+        "partial": MINIMAL_PROFILE.model_copy(update={"profile_name": "partial"}),
+        "partial-items": MINIMAL_PROFILE.model_copy(
+            update={"profile_name": "partial-items"}
+        ),
+    }
+    _make_version_8_profile_database(database_path, profiles)
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "UPDATE profile_observations SET pokedex_count = 5, "
+            "mudapins_collected = 7 WHERE profile_name = 'partial'"
+        )
+        connection.execute(
+            "UPDATE profile_observations SET pokedex_json = '[\"piplup\"]' "
+            "WHERE profile_name = 'partial-items'"
+        )
+        original_values = connection.execute(
+            "SELECT profile_name, pokedex_count, pokedex_json, kakera_reacts_json, "
+            "mudapins_collected, mudapins_total, kakera_balance, bronze_keys, "
+            "silver_keys, gold_keys, sphere_stock, spheres_json, displayed_badges_json "
+            "FROM profile_observations ORDER BY profile_name"
+        ).fetchall()
+        connection.commit()
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        rows = connection.execute(
+            f"SELECT profile_name, {', '.join(PROFILE_PRESENCE_FIELDS)} "
+            "FROM profile_observations ORDER BY profile_name"
+        ).fetchall()
+        assert rows == [
+            ("minimal", *([None] * len(PROFILE_PRESENCE_FIELDS))),
+            ("partial", *([None] * len(PROFILE_PRESENCE_FIELDS))),
+            ("partial-items", *([None] * len(PROFILE_PRESENCE_FIELDS))),
+            ("rich", *([1] * len(PROFILE_PRESENCE_FIELDS))),
+            (
+                "zero",
+                None,
+                None,
+                None,
+                1,
+                None,
+                None,
+                None,
+                None,
+                1,
+                None,
+                None,
+            ),
+        ]
+        assert connection.execute(
+            "SELECT profile_name, pokedex_count, pokedex_json, kakera_reacts_json, "
+            "mudapins_collected, mudapins_total, kakera_balance, bronze_keys, "
+            "silver_keys, gold_keys, sphere_stock, spheres_json, displayed_badges_json "
+            "FROM profile_observations ORDER BY profile_name"
+        ).fetchall() == original_values
+
+    catalog = CatalogRepository(database_path)
+    assert catalog.profile("Server", "minimal").snapshot == profiles["minimal"].model_copy(
+        update={field_name: None for field_name in PROFILE_PRESENCE_FIELDS}
+    )
+    partial = catalog.profile("Server", "partial").snapshot
+    assert (partial.pokedex_count, partial.pokedex_pokemon, partial.pokedex_observed) == (
+        5,
+        None,
+        None,
+    )
+    assert (
+        partial.mudapins_collected,
+        partial.mudapins_total,
+        partial.mudapins_observed,
+    ) == (7, None, None)
+    partial_items = catalog.profile("Server", "partial-items").snapshot
+    assert (
+        partial_items.pokedex_count,
+        partial_items.pokedex_pokemon,
+        partial_items.pokedex_observed,
+    ) == (None, ("piplup",), None)
+    zero = catalog.profile("Server", "zero").snapshot
+    assert (zero.kakera_balance, zero.kakera_balance_observed) == (0, True)
+    assert (zero.sphere_stock, zero.sphere_stock_observed) == (0, True)
+    assert (zero.bronze_keys, zero.bronze_keys_observed, zero.keys_observed) == (
+        None,
+        None,
+        None,
+    )
+
+
+def test_failed_profile_presence_migration_rolls_back_and_retries_cleanly(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_8_profile_database(database_path, {"Account": MINIMAL_PROFILE})
+
+    def fail_after_profile_presence(connection):
+        CATALOG_MIGRATIONS[8].apply(connection)
+        raise RuntimeError("stop after Profile presence")
+
+    failing_migrations = CATALOG_MIGRATIONS[:8] + (
+        Migration(9, "failing-profile-presence", fail_after_profile_presence),
+    )
+    with _open_database(database_path) as connection:
+        with pytest.raises(RuntimeError, match="stop after Profile presence"):
+            run_migrations(connection, failing_migrations)
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(profile_observations)")
+        }
+        assert not set(PROFILE_PRESENCE_FIELDS) & columns
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(version,) for version in range(1, 9)]
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert set(PROFILE_PRESENCE_FIELDS) <= {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(profile_observations)")
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 9"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_and_migrated_profile_presence_schema_are_equivalent_and_idempotent(
+    tmp_path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _make_version_8_profile_database(migrated_path, {"Account": MINIMAL_PROFILE})
+    CatalogRepository(migrated_path)
+    with _open_database(migrated_path) as connection:
+        before = connection.execute("SELECT * FROM profile_observations").fetchall()
+
+    fresh_path = tmp_path / "fresh.db"
+    CatalogRepository(fresh_path).import_profile(
+        MINIMAL_PROFILE, "Server", "Account", "fresh", "test"
+    )
+
+    schema_by_path = {}
+    for database_path in (migrated_path, fresh_path):
+        with _open_database(database_path) as connection:
+            schema_by_path[database_path] = {
+                row[1]: tuple(row[1:5])
+                for row in connection.execute(
+                    "PRAGMA table_info(profile_observations)"
+                ).fetchall()
+            }
+            for field_name in PROFILE_PRESENCE_FIELDS:
+                with pytest.raises(sqlite3.IntegrityError):
+                    connection.execute(
+                        f"UPDATE profile_observations SET {field_name} = 2"
+                    )
+
+    assert schema_by_path[migrated_path] == schema_by_path[fresh_path]
+    CatalogRepository(migrated_path)
+    with _open_database(migrated_path) as connection:
+        assert connection.execute("SELECT * FROM profile_observations").fetchall() == before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 9"
+        ).fetchone()[0] == 1
+        assert all(
+            sum(row[1] == field_name for row in connection.execute(
+                "PRAGMA table_info(profile_observations)"
+            )) == 1
+            for field_name in PROFILE_PRESENCE_FIELDS
+        )
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -2400,11 +2657,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (9, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (10, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(9,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(10,)]

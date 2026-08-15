@@ -21,11 +21,22 @@ PROFILE = ProfileSnapshot(
     mudapins_total=None,
     kakera_balance=812,
     bronze_keys=3,
-    silver_keys=0,
-    gold_keys=0,
+    silver_keys=None,
+    gold_keys=None,
     sphere_stock=None,
     spheres={":spP:": 2},
     displayed_badges=(":silvmudae:", ":DiamondI:"),
+    pokedex_observed=True,
+    reactions_observed=True,
+    mudapins_observed=False,
+    kakera_balance_observed=True,
+    keys_observed=True,
+    bronze_keys_observed=True,
+    silver_keys_observed=False,
+    gold_keys_observed=False,
+    sphere_stock_observed=False,
+    sphere_counts_observed=True,
+    badges_observed=True,
 )
 
 
@@ -101,7 +112,7 @@ def test_profile_write_rolls_back_and_same_database_recovers(tmp_path) -> None:
     assert catalog.profile("Server", "Account").snapshot == PROFILE
 
 
-def test_profile_repository_characterizes_minimal_profile_absence_storage(tmp_path) -> None:
+def test_profile_repository_preserves_minimal_profile_absence_storage(tmp_path) -> None:
     database_path = tmp_path / "catalog.db"
     CatalogRepository(database_path)
     repository = ProfileRepository(database_path)
@@ -121,7 +132,11 @@ def test_profile_repository_characterizes_minimal_profile_absence_storage(tmp_pa
             SELECT pokedex_count, pokedex_json, kakera_reacts_json,
                    mudapins_collected, mudapins_total, kakera_balance,
                    bronze_keys, silver_keys, gold_keys, sphere_stock,
-                   spheres_json, displayed_badges_json
+                   spheres_json, displayed_badges_json,
+                   pokedex_observed, reactions_observed, mudapins_observed,
+                   kakera_balance_observed, keys_observed, bronze_keys_observed,
+                   silver_keys_observed, gold_keys_observed, sphere_stock_observed,
+                   sphere_counts_observed, badges_observed
             FROM profile_observations
             """
         ).fetchone()
@@ -138,6 +153,17 @@ def test_profile_repository_characterizes_minimal_profile_absence_storage(tmp_pa
         None,
         "{}",
         "[]",
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     )
 
     observation = repository.profile("Server", "moa")
@@ -146,8 +172,8 @@ def test_profile_repository_characterizes_minimal_profile_absence_storage(tmp_pa
     assert observation.snapshot.collection_size == 0
     assert (observation.snapshot.female_percent, observation.snapshot.male_percent) == (0, 0)
     assert observation.snapshot.pokedex_count is None
-    assert observation.snapshot.pokedex_pokemon == ()
-    assert observation.snapshot.kakera_reacts == {}
+    assert observation.snapshot.pokedex_pokemon is None
+    assert observation.snapshot.kakera_reacts is None
     assert observation.snapshot.mudapins_collected is None
     assert observation.snapshot.mudapins_total is None
     assert observation.snapshot.kakera_balance is None
@@ -155,7 +181,87 @@ def test_profile_repository_characterizes_minimal_profile_absence_storage(tmp_pa
         observation.snapshot.bronze_keys,
         observation.snapshot.silver_keys,
         observation.snapshot.gold_keys,
-    ) == (0, 0, 0)
+    ) == (None, None, None)
     assert observation.snapshot.sphere_stock is None
-    assert observation.snapshot.spheres == {}
-    assert observation.snapshot.displayed_badges == ()
+    assert observation.snapshot.spheres is None
+    assert observation.snapshot.displayed_badges is None
+    assert observation.snapshot.pokedex_observed is False
+    assert observation.snapshot.reactions_observed is False
+    assert observation.snapshot.mudapins_observed is False
+    assert observation.snapshot.kakera_balance_observed is False
+    assert observation.snapshot.keys_observed is False
+    assert observation.snapshot.bronze_keys_observed is False
+    assert observation.snapshot.silver_keys_observed is False
+    assert observation.snapshot.gold_keys_observed is False
+    assert observation.snapshot.sphere_stock_observed is False
+    assert observation.snapshot.sphere_counts_observed is False
+    assert observation.snapshot.badges_observed is False
+
+
+def test_profile_repository_distinguishes_synthetic_observed_empty_and_zero(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogRepository(database_path)
+    observed = PROFILE.model_copy(
+        update={
+            "pokedex_count": 0,
+            "pokedex_pokemon": (),
+            "kakera_reacts": {},
+            "bronze_keys": 0,
+            "spheres": {},
+            "displayed_badges": (),
+        }
+    )
+
+    catalog.import_profile(observed, "Server", "Account", "synthetic", "test")
+
+    stored = catalog.profile("Server", "Account").snapshot
+    assert (
+        stored.pokedex_count,
+        stored.pokedex_pokemon,
+        stored.pokedex_observed,
+    ) == (0, (), True)
+    assert (stored.kakera_reacts, stored.reactions_observed) == ({}, True)
+    assert (stored.bronze_keys, stored.bronze_keys_observed) == (0, True)
+    assert (stored.spheres, stored.sphere_counts_observed) == ({}, True)
+    assert (stored.displayed_badges, stored.badges_observed) == ((), True)
+
+
+def test_profile_repository_rejects_ambiguous_new_presence_before_writes(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogRepository(database_path)
+    ambiguous = PROFILE.model_copy(update={"reactions_observed": None})
+
+    with pytest.raises(ValueError, match="explicit presence.*reactions_observed"):
+        catalog.import_profile(ambiguous, "Server", "Account", "ambiguous", "test")
+
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        PROFILE.model_copy(update={"reactions_observed": False}),
+        PROFILE.model_copy(update={"keys_observed": False}),
+        PROFILE.model_copy(update={"silver_keys": 0}),
+        PROFILE.model_copy(
+            update={"mudapins_collected": 1, "mudapins_observed": False}
+        ),
+    ],
+    ids=[
+        "absent-reactions-with-value",
+        "absent-keys-with-marker",
+        "key-without-marker",
+        "partial-absent-mudapins",
+    ],
+)
+def test_profile_repository_rejects_inconsistent_new_value_presence(
+    tmp_path, profile
+) -> None:
+    catalog = CatalogRepository(tmp_path / "catalog.db")
+
+    with pytest.raises(ValueError, match="presence|keys section"):
+        catalog.import_profile(profile, "Server", "Account", "inconsistent", "test")

@@ -3322,7 +3322,19 @@ class CatalogRepository:
                     spheres_json TEXT NOT NULL,
                     displayed_badges_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
-                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    pokedex_observed INTEGER CHECK (pokedex_observed IN (0, 1)),
+                    reactions_observed INTEGER CHECK (reactions_observed IN (0, 1)),
+                    mudapins_observed INTEGER CHECK (mudapins_observed IN (0, 1)),
+                    kakera_balance_observed INTEGER
+                        CHECK (kakera_balance_observed IN (0, 1)),
+                    keys_observed INTEGER CHECK (keys_observed IN (0, 1)),
+                    bronze_keys_observed INTEGER CHECK (bronze_keys_observed IN (0, 1)),
+                    silver_keys_observed INTEGER CHECK (silver_keys_observed IN (0, 1)),
+                    gold_keys_observed INTEGER CHECK (gold_keys_observed IN (0, 1)),
+                    sphere_stock_observed INTEGER CHECK (sphere_stock_observed IN (0, 1)),
+                    sphere_counts_observed INTEGER CHECK (sphere_counts_observed IN (0, 1)),
+                    badges_observed INTEGER CHECK (badges_observed IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS mudapin_observations (

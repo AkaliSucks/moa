@@ -1170,6 +1170,17 @@ def test_profile_parser_characterizes_full_grounded_variant() -> None:
         ":sp:": 105,
     }
     assert profile.displayed_badges == (":silvmudae:", ":MudaeBirthday7:", ":BronzeIV:", ":DiamondIV:")
+    assert profile.pokedex_observed is True
+    assert profile.reactions_observed is True
+    assert profile.mudapins_observed is True
+    assert profile.kakera_balance_observed is True
+    assert profile.keys_observed is True
+    assert profile.bronze_keys_observed is True
+    assert profile.silver_keys_observed is True
+    assert profile.gold_keys_observed is True
+    assert profile.sphere_stock_observed is True
+    assert profile.sphere_counts_observed is True
+    assert profile.badges_observed is True
 
 
 def test_profile_parser_characterizes_variant_without_mudapins() -> None:
@@ -1199,8 +1210,7 @@ def test_profile_parser_characterizes_variant_without_mudapins() -> None:
     assert profile.mudapins_collected is None
     assert profile.mudapins_total is None
     assert profile.kakera_balance == 812
-    # These zeroes characterize current marker-omission collapse, not desired semantics.
-    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (3, 0, 0)
+    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (3, None, None)
     assert profile.sphere_stock == 110
     assert profile.spheres == {
         ":spP:": 2,
@@ -1217,9 +1227,20 @@ def test_profile_parser_characterizes_variant_without_mudapins() -> None:
         ":MudaeBirthday8:",
         ":DiamondI:",
     )
+    assert profile.pokedex_observed is True
+    assert profile.reactions_observed is True
+    assert profile.mudapins_observed is False
+    assert profile.kakera_balance_observed is True
+    assert profile.keys_observed is True
+    assert profile.bronze_keys_observed is True
+    assert profile.silver_keys_observed is False
+    assert profile.gold_keys_observed is False
+    assert profile.sphere_stock_observed is True
+    assert profile.sphere_counts_observed is True
+    assert profile.badges_observed is True
 
 
-def test_profile_parser_characterizes_minimal_absence_collapse() -> None:
+def test_profile_parser_preserves_minimal_response_absence() -> None:
     profile = MudaeTextParser().parse_profile(
         "moa\n"
         "Collection size: 0 (0%:female: 0% :male:)"
@@ -1230,15 +1251,26 @@ def test_profile_parser_characterizes_minimal_absence_collapse() -> None:
     assert profile.female_percent == 0
     assert profile.male_percent == 0
     assert profile.pokedex_count is None
-    assert profile.pokedex_pokemon == ()
-    assert profile.kakera_reacts == {}
+    assert profile.pokedex_pokemon is None
+    assert profile.kakera_reacts is None
     assert profile.mudapins_collected is None
     assert profile.mudapins_total is None
     assert profile.kakera_balance is None
-    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (0, 0, 0)
+    assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (None, None, None)
     assert profile.sphere_stock is None
-    assert profile.spheres == {}
-    assert profile.displayed_badges == ()
+    assert profile.spheres is None
+    assert profile.displayed_badges is None
+    assert profile.pokedex_observed is False
+    assert profile.reactions_observed is False
+    assert profile.mudapins_observed is False
+    assert profile.kakera_balance_observed is False
+    assert profile.keys_observed is False
+    assert profile.bronze_keys_observed is False
+    assert profile.silver_keys_observed is False
+    assert profile.gold_keys_observed is False
+    assert profile.sphere_stock_observed is False
+    assert profile.sphere_counts_observed is False
+    assert profile.badges_observed is False
 
 
 def test_profile_parser_requires_collection_section() -> None:
@@ -1265,16 +1297,14 @@ def test_profile_parser_characterizes_identity_line_assumption() -> None:
     assert profile.collection_size == 35
 
 
-def test_profile_parser_characterizes_known_reaction_shape_silent_containment() -> None:
-    profile = MudaeTextParser().parse_profile(
-        "moa\n"
-        "Collection size: 35 (100%:female: 0% :male:)\n"
-        "Reacts:\n"
-        "48:kakeraP:"
-    )
-
-    # The heading and known marker are present, but the current body regex requires `x`.
-    assert profile.kakera_reacts == {}
+def test_profile_parser_known_malformed_reaction_shape_fails_closed() -> None:
+    with pytest.raises(MudaeParseError):
+        MudaeTextParser().parse_profile(
+            "moa\n"
+            "Collection size: 35 (100%:female: 0% :male:)\n"
+            "Reacts:\n"
+            "48:kakeraP:"
+        )
 
 
 def test_parse_mudapins_reads_pin_and_logopin_markers() -> None:

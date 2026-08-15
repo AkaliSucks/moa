@@ -312,17 +312,28 @@ class ProfileSnapshot(MOAModel):
     female_percent: int
     male_percent: int
     pokedex_count: int | None
-    pokedex_pokemon: tuple[str, ...]
-    kakera_reacts: dict[str, int]
+    pokedex_pokemon: tuple[str, ...] | None
+    kakera_reacts: dict[str, int] | None
     mudapins_collected: int | None
     mudapins_total: int | None
     kakera_balance: int | None
-    bronze_keys: int
-    silver_keys: int
-    gold_keys: int
+    bronze_keys: int | None
+    silver_keys: int | None
+    gold_keys: int | None
     sphere_stock: int | None
-    spheres: dict[str, int]
-    displayed_badges: tuple[str, ...]
+    spheres: dict[str, int] | None
+    displayed_badges: tuple[str, ...] | None
+    pokedex_observed: bool | None
+    reactions_observed: bool | None
+    mudapins_observed: bool | None
+    kakera_balance_observed: bool | None
+    keys_observed: bool | None
+    bronze_keys_observed: bool | None
+    silver_keys_observed: bool | None
+    gold_keys_observed: bool | None
+    sphere_stock_observed: bool | None
+    sphere_counts_observed: bool | None
+    badges_observed: bool | None
 
 
 class MudapinSnapshot(MOAModel):

@@ -35,11 +35,30 @@ PROFILE = ProfileSnapshot(
     mudapins_total=None,
     kakera_balance=812,
     bronze_keys=3,
-    silver_keys=0,
-    gold_keys=0,
+    silver_keys=None,
+    gold_keys=None,
     sphere_stock=None,
     spheres={":spP:": 2},
     displayed_badges=(":silvmudae:", ":DiamondI:"),
+    pokedex_observed=True,
+    reactions_observed=True,
+    mudapins_observed=False,
+    kakera_balance_observed=True,
+    keys_observed=True,
+    bronze_keys_observed=True,
+    silver_keys_observed=False,
+    gold_keys_observed=False,
+    sphere_stock_observed=False,
+    sphere_counts_observed=True,
+    badges_observed=True,
+)
+ABSENT_REACTIONS_PROFILE = PROFILE.model_copy(
+    update={"kakera_reacts": None, "reactions_observed": False}
+)
+EMPTY_REACTIONS_PROFILE = PROFILE.model_copy(update={"kakera_reacts": {}})
+ZERO_BRONZE_KEY_PROFILE = PROFILE.model_copy(update={"bronze_keys": 0})
+ABSENT_BALANCE_PROFILE = PROFILE.model_copy(
+    update={"kakera_balance": None, "kakera_balance_observed": False}
 )
 
 
@@ -280,14 +299,21 @@ def test_retry_after_rollback_succeeds_once_without_duplicates(tmp_path, monkeyp
         }
 
 
-def test_successful_replay_validates_target_and_inserts_nothing(tmp_path) -> None:
+@pytest.mark.parametrize(
+    "profile",
+    [PROFILE, ABSENT_REACTIONS_PROFILE, EMPTY_REACTIONS_PROFILE, ZERO_BRONZE_KEY_PROFILE],
+    ids=["present", "absent", "observed-empty", "observed-zero"],
+)
+def test_successful_replay_validates_exact_new_value_and_presence(
+    tmp_path, profile
+) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
-    first = _coordinate(coordinator, source_event_id, attempt_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id, profile=profile)
     with connect(database_path) as connection:
         before = _counts(connection)
 
-    replay = _coordinate(coordinator, source_event_id, None)
+    replay = _coordinate(coordinator, source_event_id, None, profile=profile)
 
     assert replay == ProfileProjectionResult(
         imported_count=0,
@@ -300,6 +326,146 @@ def test_successful_replay_validates_target_and_inserts_nothing(tmp_path) -> Non
     with connect(database_path) as connection:
         assert _counts(connection) == before
         assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+
+
+def test_new_profile_replay_rejects_presence_mismatch_with_same_storage_value(
+    tmp_path,
+) -> None:
+    _database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        profile=EMPTY_REACTIONS_PROFILE,
+    )
+
+    with pytest.raises(ProfileProjectionTargetError, match="values or presence"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            profile=ABSENT_REACTIONS_PROFILE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("replay_profile", "compatible"),
+    [
+        (ABSENT_REACTIONS_PROFILE, True),
+        (EMPTY_REACTIONS_PROFILE, True),
+        (PROFILE, False),
+    ],
+    ids=["absent", "observed-empty", "nonempty"],
+)
+def test_legacy_empty_reaction_replay_uses_old_serialization_without_mutation(
+    tmp_path, replay_profile, compatible
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        profile=EMPTY_REACTIONS_PROFILE,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE profile_observations SET reactions_observed = NULL"
+        )
+
+    if compatible:
+        replay = _coordinate(
+            coordinator, source_event_id, None, profile=replay_profile
+        )
+        assert replay.replay_skipped is True
+    else:
+        with pytest.raises(ProfileProjectionTargetError, match="values or presence"):
+            _coordinate(coordinator, source_event_id, None, profile=replay_profile)
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT reactions_observed FROM profile_observations"
+        ).fetchone()[0] is None
+
+
+@pytest.mark.parametrize(
+    ("bronze_keys", "bronze_observed", "compatible"),
+    [(None, False, True), (0, True, True), (4, True, False)],
+    ids=["absent", "observed-zero", "nonzero"],
+)
+def test_legacy_zero_key_replay_uses_marker_serialization_without_mutation(
+    tmp_path, bronze_keys, bronze_observed, compatible
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        profile=ZERO_BRONZE_KEY_PROFILE,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE profile_observations SET bronze_keys_observed = NULL"
+        )
+    replay_profile = ZERO_BRONZE_KEY_PROFILE.model_copy(
+        update={
+            "bronze_keys": bronze_keys,
+            "bronze_keys_observed": bronze_observed,
+        }
+    )
+
+    if compatible:
+        assert _coordinate(
+            coordinator, source_event_id, None, profile=replay_profile
+        ).replay_skipped
+    else:
+        with pytest.raises(ProfileProjectionTargetError, match="values or presence"):
+            _coordinate(coordinator, source_event_id, None, profile=replay_profile)
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT bronze_keys_observed FROM profile_observations"
+        ).fetchone()[0] is None
+
+
+@pytest.mark.parametrize(
+    ("balance", "observed", "compatible"),
+    [(None, False, True), (0, True, False), (812, True, False)],
+    ids=["absent", "explicit-zero", "nonzero"],
+)
+def test_legacy_null_balance_replay_requires_old_nullable_serialization(
+    tmp_path, balance, observed, compatible
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        profile=ABSENT_BALANCE_PROFILE,
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE profile_observations SET kakera_balance_observed = NULL"
+        )
+    replay_profile = ABSENT_BALANCE_PROFILE.model_copy(
+        update={"kakera_balance": balance, "kakera_balance_observed": observed}
+    )
+
+    if compatible:
+        assert _coordinate(
+            coordinator, source_event_id, None, profile=replay_profile
+        ).replay_skipped
+    else:
+        with pytest.raises(ProfileProjectionTargetError, match="values or presence"):
+            _coordinate(coordinator, source_event_id, None, profile=replay_profile)
+
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT kakera_balance_observed FROM profile_observations"
+        ).fetchone()[0] is None
 
 
 def test_unlinked_profile_import_deletion_exposes_previous_snapshot(tmp_path) -> None:
@@ -575,11 +741,22 @@ def test_first_processing_requires_matching_persisted_attribution_before_writes(
             mudapins_total=None,
             kakera_balance=812,
             bronze_keys=3,
-            silver_keys=0,
-            gold_keys=0,
+            silver_keys=None,
+            gold_keys=None,
             sphere_stock=None,
             spheres={":spP:": 2},
             displayed_badges=(":silvmudae:", ":DiamondI:"),
+            pokedex_observed=True,
+            reactions_observed=True,
+            mudapins_observed=False,
+            kakera_balance_observed=True,
+            keys_observed=True,
+            bronze_keys_observed=True,
+            silver_keys_observed=False,
+            gold_keys_observed=False,
+            sphere_stock_observed=False,
+            sphere_counts_observed=True,
+            badges_observed=True,
         ),
         ProfileSnapshot(
             profile_name="   ",
@@ -593,11 +770,22 @@ def test_first_processing_requires_matching_persisted_attribution_before_writes(
             mudapins_total=None,
             kakera_balance=812,
             bronze_keys=3,
-            silver_keys=0,
-            gold_keys=0,
+            silver_keys=None,
+            gold_keys=None,
             sphere_stock=None,
             spheres={":spP:": 2},
             displayed_badges=(":silvmudae:", ":DiamondI:"),
+            pokedex_observed=True,
+            reactions_observed=True,
+            mudapins_observed=False,
+            kakera_balance_observed=True,
+            keys_observed=True,
+            bronze_keys_observed=True,
+            silver_keys_observed=False,
+            gold_keys_observed=False,
+            sphere_stock_observed=False,
+            sphere_counts_observed=True,
+            badges_observed=True,
         ),
     ],
     ids=["owner-caller-mismatch", "blank-owner"],

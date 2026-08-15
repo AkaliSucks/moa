@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import ProfileSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.profile_repository import ProfileRepository
 
 
 class ProfileProjectionCoordinatorError(RuntimeError):
@@ -114,6 +115,7 @@ class ProfileProjectionCoordinator:
                     connection,
                     event,
                     projection_slot,
+                    profile,
                 )
 
             if attempt_id is None:
@@ -171,6 +173,8 @@ class ProfileProjectionCoordinator:
                 target[1],
                 int(imported.import_event_id),
                 projection_slot,
+                profile=profile,
+                observed_at=observed_at,
             )
             self._complete_projection_link(
                 connection,
@@ -276,6 +280,7 @@ class ProfileProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         projection_slot: str,
+        profile: ProfileSnapshot,
     ) -> ProfileProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -316,6 +321,7 @@ class ProfileProjectionCoordinator:
             target[1],
             int(import_event_id),
             projection_slot,
+            profile=profile,
         )
         return ProfileProjectionResult(
             imported_count=0,
@@ -444,12 +450,15 @@ class ProfileProjectionCoordinator:
         profile_observation_id: int,
         import_event_id: int,
         projection_slot: str,
+        *,
+        profile: ProfileSnapshot,
+        observed_at: datetime | None = None,
     ) -> None:
         if self._PROJECTION_TABLE not in self._TARGET_TABLES:
             raise ProfileProjectionIntegrityError("profile projection table is not allowlisted")
         row = connection.execute(
             """
-            SELECT po.import_event_id, ac.normalized_name AS account,
+            SELECT po.*, ac.normalized_name AS account,
                    sc.normalized_name AS server
             FROM profile_observations AS po
             JOIN account_contexts AS ac ON ac.id = po.account_context_id
@@ -470,6 +479,22 @@ class ProfileProjectionCoordinator:
         if row["server"] != slot["server"] or row["account"] != slot["account"]:
             raise ProfileProjectionTargetError(
                 f"projection target profile_observations:{profile_observation_id} has mismatched profile scope"
+            )
+        if observed_at is not None and row["observed_at"] != observed_at.isoformat():
+            raise ProfileProjectionTargetError(
+                f"projection target profile_observations:{profile_observation_id} has mismatched observation time"
+            )
+        try:
+            matches_profile = ProfileRepository._row_matches_profile(row, profile)
+        except (sqlite3.IntegrityError, TypeError, ValueError) as error:
+            raise ProfileProjectionTargetError(
+                f"projection target profile_observations:{profile_observation_id} "
+                "has inconsistent profile presence"
+            ) from error
+        if not matches_profile:
+            raise ProfileProjectionTargetError(
+                f"projection target profile_observations:{profile_observation_id} "
+                "has mismatched profile values or presence"
             )
 
     @staticmethod

@@ -1415,21 +1415,42 @@ class MudaeTextParser:
                 )
             }
 
-        reacts_index = next((index for index, line in enumerate(lines) if line.casefold() == "reacts:"), None)
-        reacts = marker_counts(lines[reacts_index + 1], "kakera") if reacts_index is not None and reacts_index + 1 < len(lines) else {}
+        reacts_index = next(
+            (index for index, line in enumerate(lines) if line.casefold() == "reacts:"),
+            None,
+        )
+        reactions_observed = reacts_index is not None
+        reacts = None
+        if reacts_index is not None:
+            if reacts_index + 1 >= len(lines):
+                raise MudaeParseError(
+                    "Expected a Mudae $profile reactions section with reaction counts."
+                )
+            reacts = marker_counts(lines[reacts_index + 1], "kakera")
+            if not reacts:
+                raise MudaeParseError(
+                    "Expected a Mudae $profile reactions section with reaction counts."
+                )
         sphere_index = next(
             (index for index, line in enumerate(lines) if re.match(r"^[\d,]+\s*:sp:\s*$", line, re.IGNORECASE)),
             None,
         )
-        spheres = marker_counts(lines[sphere_index + 1], "sp") if sphere_index is not None and sphere_index + 1 < len(lines) else {}
+        spheres = None
+        if sphere_index is not None and sphere_index + 1 < len(lines):
+            parsed_spheres = marker_counts(lines[sphere_index + 1], "sp")
+            spheres = parsed_spheres or None
         badge_line = next(
             (line for line in reversed(lines) if any(
                 marker in line.casefold()
                 for marker in (":bronzeiv:", ":silveriv:", ":diamondiv:", ":diamondi:")
             )),
-            "",
+            None,
         )
-        displayed_badges = tuple(f":{marker}:" for marker in re.findall(r":([A-Za-z0-9_]+):", badge_line))
+        displayed_badges = (
+            tuple(f":{marker}:" for marker in re.findall(r":([A-Za-z0-9_]+):", badge_line))
+            if badge_line is not None
+            else None
+        )
 
         return ProfileSnapshot(
             profile_name=lines[0],
@@ -1440,7 +1461,7 @@ class MudaeTextParser:
             pokedex_pokemon=(
                 tuple(re.findall(r":([A-Za-z0-9_]+):", pokedex.group("items")))
                 if pokedex
-                else ()
+                else None
             ),
             kakera_reacts=reacts,
             mudapins_collected=(
@@ -1450,12 +1471,23 @@ class MudaeTextParser:
             kakera_balance=(
                 self._number(kakera_balance.group("value")) if kakera_balance else None
             ),
-            bronze_keys=key_counts.get("bronzekey", 0),
-            silver_keys=key_counts.get("silverkey", 0),
-            gold_keys=key_counts.get("goldkey", 0),
+            bronze_keys=key_counts.get("bronzekey"),
+            silver_keys=key_counts.get("silverkey"),
+            gold_keys=key_counts.get("goldkey"),
             sphere_stock=(self._number(sphere_stock.group("value")) if sphere_stock else None),
             spheres=spheres,
             displayed_badges=displayed_badges,
+            pokedex_observed=pokedex is not None,
+            reactions_observed=reactions_observed,
+            mudapins_observed=mudapins is not None,
+            kakera_balance_observed=kakera_balance is not None,
+            keys_observed=keys_line is not None,
+            bronze_keys_observed="bronzekey" in key_counts,
+            silver_keys_observed="silverkey" in key_counts,
+            gold_keys_observed="goldkey" in key_counts,
+            sphere_stock_observed=sphere_stock is not None,
+            sphere_counts_observed=spheres is not None,
+            badges_observed=badge_line is not None,
         )
 
     def parse_mudapins(self, text: str) -> MudapinSnapshot:
