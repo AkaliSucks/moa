@@ -1131,7 +1131,7 @@ def test_parse_kakeraloot_settings_accepts_discord_formatting_and_custom_emoji()
     assert settings.quantity_quality_level_increment == 200
 
 
-def test_parse_profile_reads_progress_totals_and_markers() -> None:
+def test_profile_parser_characterizes_full_grounded_variant() -> None:
     profile = MudaeTextParser().parse_profile(
         "ernieuuu\n"
         "Collection size: 567 (100%:female: 0% :male:)\n"
@@ -1149,18 +1149,30 @@ def test_parse_profile_reads_progress_totals_and_markers() -> None:
     assert profile.profile_name == "ernieuuu"
     assert profile.collection_size == 567
     assert (profile.female_percent, profile.male_percent) == (100, 0)
+    assert profile.pokedex_count == 4
     assert profile.pokedex_pokemon == ("piplup", "sentret", "toedscool", "psyduck")
-    assert profile.kakera_reacts[":kakeraY:"] == 585
+    assert profile.kakera_reacts == {
+        ":kakeraP:": 48,
+        ":kakera:": 36,
+        ":kakeraT:": 62,
+        ":kakeraY:": 585,
+        ":kakeraC:": 9,
+    }
     assert profile.mudapins_collected == 22
     assert profile.mudapins_total == 2347
     assert profile.kakera_balance == 23965
     assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (409, 82, 6)
     assert profile.sphere_stock == 3827
-    assert profile.spheres[":spP:"] == 208
+    assert profile.spheres == {
+        ":spP:": 208,
+        ":spB:": 573,
+        ":spT:": 317,
+        ":sp:": 105,
+    }
     assert profile.displayed_badges == (":silvmudae:", ":MudaeBirthday7:", ":BronzeIV:", ":DiamondIV:")
 
 
-def test_parse_profile_allows_profiles_without_mudapins() -> None:
+def test_profile_parser_characterizes_variant_without_mudapins() -> None:
     profile = MudaeTextParser().parse_profile(
         "cute_beagle_91130\n"
         "Collection size: 35 (100%:female: 0% :male:)\n"
@@ -1175,14 +1187,39 @@ def test_parse_profile_allows_profiles_without_mudapins() -> None:
     )
 
     assert profile.profile_name == "cute_beagle_91130"
+    assert profile.collection_size == 35
+    assert (profile.female_percent, profile.male_percent) == (100, 0)
+    assert profile.pokedex_count == 2
+    assert profile.pokedex_pokemon == ("gulpin", "piloswine")
+    assert profile.kakera_reacts == {
+        ":kakeraP:": 1,
+        ":kakera:": 7,
+        ":kakeraT:": 1,
+    }
     assert profile.mudapins_collected is None
     assert profile.mudapins_total is None
-    assert profile.pokedex_pokemon == ("gulpin", "piloswine")
     assert profile.kakera_balance == 812
+    # These zeroes characterize current marker-omission collapse, not desired semantics.
     assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (3, 0, 0)
+    assert profile.sphere_stock == 110
+    assert profile.spheres == {
+        ":spP:": 2,
+        ":spB:": 12,
+        ":spT:": 7,
+        ":spG:": 4,
+        ":spY:": 1,
+        ":sp:": 1,
+        ":spL:": 4,
+    }
+    assert profile.displayed_badges == (
+        ":silvmudae:",
+        ":MudaeBirthday7:",
+        ":MudaeBirthday8:",
+        ":DiamondI:",
+    )
 
 
-def test_parse_profile_accepts_an_empty_profile() -> None:
+def test_profile_parser_characterizes_minimal_absence_collapse() -> None:
     profile = MudaeTextParser().parse_profile(
         "moa\n"
         "Collection size: 0 (0%:female: 0% :male:)"
@@ -1190,10 +1227,54 @@ def test_parse_profile_accepts_an_empty_profile() -> None:
 
     assert profile.profile_name == "moa"
     assert profile.collection_size == 0
+    assert profile.female_percent == 0
+    assert profile.male_percent == 0
+    assert profile.pokedex_count is None
+    assert profile.pokedex_pokemon == ()
     assert profile.kakera_reacts == {}
+    assert profile.mudapins_collected is None
+    assert profile.mudapins_total is None
     assert profile.kakera_balance is None
     assert (profile.bronze_keys, profile.silver_keys, profile.gold_keys) == (0, 0, 0)
     assert profile.sphere_stock is None
+    assert profile.spheres == {}
+    assert profile.displayed_badges == ()
+
+
+def test_profile_parser_requires_collection_section() -> None:
+    with pytest.raises(MudaeParseError):
+        MudaeTextParser().parse_profile("moa\nReacts:")
+
+
+def test_profile_parser_requires_well_formed_collection_section() -> None:
+    with pytest.raises(MudaeParseError):
+        MudaeTextParser().parse_profile(
+            "moa\n"
+            "Collection size: not-a-number (0%:female: 0% :male:)"
+        )
+
+
+def test_profile_parser_characterizes_identity_line_assumption() -> None:
+    profile = MudaeTextParser().parse_profile(
+        "not-an-identity-line\n"
+        "Collection size: 35 (100%:female: 0% :male:)"
+    )
+
+    # Current parser treats lines[0] as the identity without validating its shape.
+    assert profile.profile_name == "not-an-identity-line"
+    assert profile.collection_size == 35
+
+
+def test_profile_parser_characterizes_known_reaction_shape_silent_containment() -> None:
+    profile = MudaeTextParser().parse_profile(
+        "moa\n"
+        "Collection size: 35 (100%:female: 0% :male:)\n"
+        "Reacts:\n"
+        "48:kakeraP:"
+    )
+
+    # The heading and known marker are present, but the current body regex requires `x`.
+    assert profile.kakera_reacts == {}
 
 
 def test_parse_mudapins_reads_pin_and_logopin_markers() -> None:
