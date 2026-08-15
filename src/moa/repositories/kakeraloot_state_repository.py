@@ -13,6 +13,24 @@ from moa.models.character import KakeralootStateSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_account, upsert_server
 
 
+_KAKERALOOT_STATE_VALUE_FIELDS = (
+    "rolls_stacked",
+    "disable_wa_ha_reduction",
+    "disable_wg_hg_reduction",
+    "protected_wish_level",
+    "protected_wish_denominator",
+    "mudapins",
+    "rt_cooldown_reduction_hours",
+    "permanent_roll_bonus",
+    "star_branches",
+    "starwish_slots_from_branches",
+    "quantity_level",
+    "quality_level",
+    "usage_count",
+    "kakera_balance",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class _KakeralootStateImportConnectionResult:
     """Rows created by one Kakeraloot-state import on a caller-owned connection."""
@@ -80,37 +98,33 @@ class KakeralootStateRepository:
         import_event_id = int(cursor.lastrowid)
         server_id = upsert_server(connection, server, observed_at)
         account_id = upsert_account(connection, server_id, account, observed_at)
+        supplied_values = tuple(
+            getattr(state, field_name) for field_name in _KAKERALOOT_STATE_VALUE_FIELDS
+        )
+        stored_values = tuple(0 if value is None else value for value in supplied_values)
+        observed_values = tuple(0 if value is None else 1 for value in supplied_values)
+        columns = (
+            "account_context_id",
+            "has_kakeraloots",
+            "status_note",
+            *_KAKERALOOT_STATE_VALUE_FIELDS,
+            "observed_at",
+            "import_event_id",
+            *(f"{field_name}_observed" for field_name in _KAKERALOOT_STATE_VALUE_FIELDS),
+        )
+        placeholders = ", ".join("?" for _ in columns)
         kakeraloot_state_observation_id = int(
             connection.execute(
-                """
-                INSERT INTO kakeraloot_state_observations (
-                    account_context_id, has_kakeraloots, status_note, rolls_stacked, disable_wa_ha_reduction,
-                    disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
-                    mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
-                    star_branches, starwish_slots_from_branches, quantity_level, quality_level,
-                    usage_count, kakera_balance, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
+                f"INSERT INTO kakeraloot_state_observations "
+                f"({', '.join(columns)}) VALUES ({placeholders})",
                 (
                     account_id,
                     int(state.has_kakeraloots),
                     state.status_note,
-                    state.rolls_stacked or 0,
-                    state.disable_wa_ha_reduction or 0,
-                    state.disable_wg_hg_reduction or 0,
-                    state.protected_wish_level or 0,
-                    state.protected_wish_denominator or 0,
-                    state.mudapins or 0,
-                    state.rt_cooldown_reduction_hours or 0,
-                    state.permanent_roll_bonus or 0,
-                    state.star_branches or 0,
-                    state.starwish_slots_from_branches or 0,
-                    state.quantity_level or 0,
-                    state.quality_level or 0,
-                    state.usage_count or 0,
-                    state.kakera_balance or 0,
+                    *stored_values,
                     observed_at.isoformat(),
                     import_event_id,
+                    *observed_values,
                 ),
             ).lastrowid
         )
@@ -142,24 +156,30 @@ class KakeralootStateRepository:
             ).fetchone()
         if row is None:
             return None
+        has_kakeraloots = bool(row["has_kakeraloots"])
+        values = {
+            field_name: self._value_from_row(row, field_name)
+            for field_name in _KAKERALOOT_STATE_VALUE_FIELDS
+        }
+        if not has_kakeraloots:
+            values = {field_name: None for field_name in _KAKERALOOT_STATE_VALUE_FIELDS}
         return KakeralootStateObservation(
             server_name=row["server_name"],
             account_name=row["account_name"],
-            has_kakeraloots=bool(row["has_kakeraloots"]),
+            has_kakeraloots=has_kakeraloots,
             status_note=row["status_note"],
-            rolls_stacked=row["rolls_stacked"] if row["has_kakeraloots"] else None,
-            disable_wa_ha_reduction=row["disable_wa_ha_reduction"] if row["has_kakeraloots"] else None,
-            disable_wg_hg_reduction=row["disable_wg_hg_reduction"] if row["has_kakeraloots"] else None,
-            protected_wish_level=row["protected_wish_level"] if row["has_kakeraloots"] else None,
-            protected_wish_denominator=row["protected_wish_denominator"] if row["has_kakeraloots"] else None,
-            mudapins=row["mudapins"] if row["has_kakeraloots"] else None,
-            rt_cooldown_reduction_hours=row["rt_cooldown_reduction_hours"] if row["has_kakeraloots"] else None,
-            permanent_roll_bonus=row["permanent_roll_bonus"] if row["has_kakeraloots"] else None,
-            star_branches=row["star_branches"] if row["has_kakeraloots"] else None,
-            starwish_slots_from_branches=row["starwish_slots_from_branches"] if row["has_kakeraloots"] else None,
-            quantity_level=row["quantity_level"] if row["has_kakeraloots"] else None,
-            quality_level=row["quality_level"] if row["has_kakeraloots"] else None,
-            usage_count=row["usage_count"] if row["has_kakeraloots"] else None,
-            kakera_balance=row["kakera_balance"] if row["has_kakeraloots"] else None,
+            **values,
             observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    @staticmethod
+    def _value_from_row(row: sqlite3.Row, field_name: str) -> int | None:
+        value = int(row[field_name])
+        observed = row[f"{field_name}_observed"]
+        if observed == 1:
+            return value
+        if observed in (0, None) and value == 0:
+            return None
+        raise sqlite3.IntegrityError(
+            f"kakeraloot_state_observations has inconsistent {field_name} presence"
         )

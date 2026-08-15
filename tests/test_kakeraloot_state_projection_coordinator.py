@@ -20,6 +20,22 @@ from moa.services.kakeraloot_state_projection_coordinator import (
 
 OBSERVED_AT = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
 FINISHED_AT = datetime(2026, 7, 30, 12, 1, tzinfo=timezone.utc)
+KAKERALOOT_VALUE_FIELDS = (
+    "rolls_stacked",
+    "disable_wa_ha_reduction",
+    "disable_wg_hg_reduction",
+    "protected_wish_level",
+    "protected_wish_denominator",
+    "mudapins",
+    "rt_cooldown_reduction_hours",
+    "permanent_roll_bonus",
+    "star_branches",
+    "starwish_slots_from_branches",
+    "quantity_level",
+    "quality_level",
+    "usage_count",
+    "kakera_balance",
+)
 KAKERALOOT_STATE = KakeralootStateSnapshot(
     status_note="guarded state",
     rolls_stacked=17,
@@ -303,7 +319,14 @@ def test_first_processing_links_and_preserves_every_stored_field(tmp_path) -> No
                    disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
                    mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
                    star_branches, starwish_slots_from_branches, quantity_level, quality_level,
-                   usage_count, kakera_balance, observed_at, import_event_id
+                   usage_count, kakera_balance, observed_at, import_event_id,
+                   rolls_stacked_observed, disable_wa_ha_reduction_observed,
+                   disable_wg_hg_reduction_observed, protected_wish_level_observed,
+                   protected_wish_denominator_observed, mudapins_observed,
+                   rt_cooldown_reduction_hours_observed, permanent_roll_bonus_observed,
+                   star_branches_observed, starwish_slots_from_branches_observed,
+                   quantity_level_observed, quality_level_observed,
+                   usage_count_observed, kakera_balance_observed
             FROM kakeraloot_state_observations
             WHERE id = ?
             """,
@@ -328,19 +351,27 @@ def test_first_processing_links_and_preserves_every_stored_field(tmp_path) -> No
             7_673,
             OBSERVED_AT.isoformat(),
             result.import_event_id,
+            *(1 for _ in KAKERALOOT_VALUE_FIELDS),
         )
 
 
 @pytest.mark.parametrize(
-    ("state", "expected_has_kakeraloots", "expected_status_note"),
+    ("state", "expected_has_kakeraloots", "expected_status_note", "expected_observed"),
     (
-        (KAKERALOOT_STATE, 1, "guarded state"),
-        (ZERO_KAKERALOOT_STATE, 1, ""),
-        (NULL_KAKERALOOT_STATE, 1, None),
+        (KAKERALOOT_STATE, 1, "guarded state", 1),
+        (ZERO_KAKERALOOT_STATE, 1, "", 1),
+        (NULL_KAKERALOOT_STATE, 1, None, 0),
+        (
+            KakeralootStateSnapshot(rolls_stacked=-1),
+            1,
+            None,
+            None,
+        ),
         (
             NO_KAKERALOOT_STATE,
             0,
             "No Kakeraloots bought; Mudae did not report loot statistics.",
+            0,
         ),
     ),
 )
@@ -349,6 +380,7 @@ def test_supported_kakeraloot_states_preserve_repository_semantics(
     state: KakeralootStateSnapshot,
     expected_has_kakeraloots: int,
     expected_status_note: str | None,
+    expected_observed: int | None,
 ) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
@@ -363,7 +395,14 @@ def test_supported_kakeraloot_states_preserve_repository_semantics(
                    disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
                    mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
                    star_branches, starwish_slots_from_branches, quantity_level, quality_level,
-                   usage_count, kakera_balance
+                   usage_count, kakera_balance,
+                   rolls_stacked_observed, disable_wa_ha_reduction_observed,
+                   disable_wg_hg_reduction_observed, protected_wish_level_observed,
+                   protected_wish_denominator_observed, mudapins_observed,
+                   rt_cooldown_reduction_hours_observed, permanent_roll_bonus_observed,
+                   star_branches_observed, starwish_slots_from_branches_observed,
+                   quantity_level_observed, quality_level_observed,
+                   usage_count_observed, kakera_balance_observed
             FROM kakeraloot_state_observations
             WHERE id = ?
             """,
@@ -372,20 +411,16 @@ def test_supported_kakeraloot_states_preserve_repository_semantics(
         assert tuple(row) == (
             expected_has_kakeraloots,
             expected_status_note,
-            state.rolls_stacked or 0,
-            state.disable_wa_ha_reduction or 0,
-            state.disable_wg_hg_reduction or 0,
-            state.protected_wish_level or 0,
-            state.protected_wish_denominator or 0,
-            state.mudapins or 0,
-            state.rt_cooldown_reduction_hours or 0,
-            state.permanent_roll_bonus or 0,
-            state.star_branches or 0,
-            state.starwish_slots_from_branches or 0,
-            state.quantity_level or 0,
-            state.quality_level or 0,
-            state.usage_count or 0,
-            state.kakera_balance or 0,
+            *(
+                0 if getattr(state, field_name) is None else getattr(state, field_name)
+                for field_name in KAKERALOOT_VALUE_FIELDS
+            ),
+            *(
+                expected_observed
+                if expected_observed is not None
+                else (0 if getattr(state, field_name) is None else 1)
+                for field_name in KAKERALOOT_VALUE_FIELDS
+            ),
         )
 
 
@@ -575,24 +610,124 @@ def test_succeeded_replay_returns_existing_ids_and_reconstructs_from_same_databa
     assert _snapshot(database_path) == before
 
 
-@pytest.mark.parametrize("field", (
-    "has_kakeraloots",
-    "status_note",
-    "rolls_stacked",
-    "disable_wa_ha_reduction",
-    "disable_wg_hg_reduction",
-    "protected_wish_level",
-    "protected_wish_denominator",
-    "mudapins",
-    "rt_cooldown_reduction_hours",
-    "permanent_roll_bonus",
-    "star_branches",
-    "starwish_slots_from_branches",
-    "quantity_level",
-    "quality_level",
-    "usage_count",
-    "kakera_balance",
-))
+@pytest.mark.parametrize("incoming", (None, 0))
+def test_legacy_zero_replay_accepts_ambiguous_inputs_without_mutation(tmp_path, incoming) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id, state=ZERO_KAKERALOOT_STATE)
+    with connect(database_path) as connection:
+        connection.execute("UPDATE kakeraloot_state_observations SET rolls_stacked_observed = NULL")
+    before = _snapshot(database_path)
+
+    replay = _coordinate(
+        coordinator,
+        source_event_id,
+        None,
+        state=ZERO_KAKERALOOT_STATE.model_copy(update={"rolls_stacked": incoming}),
+    )
+
+    assert replay.replay_skipped is True
+    assert _snapshot(database_path) == before
+
+
+def test_legacy_zero_replay_rejects_nonzero_without_mutation(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id, state=ZERO_KAKERALOOT_STATE)
+    with connect(database_path) as connection:
+        connection.execute("UPDATE kakeraloot_state_observations SET rolls_stacked_observed = NULL")
+    before = _snapshot(database_path)
+
+    with pytest.raises(KakeralootStateProjectionTargetError, match="rolls_stacked"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            state=ZERO_KAKERALOOT_STATE.model_copy(update={"rolls_stacked": 7}),
+        )
+    assert _snapshot(database_path) == before
+
+
+@pytest.mark.parametrize(
+    ("stored_state", "incoming"),
+    (
+        (NULL_KAKERALOOT_STATE, 0),
+        (ZERO_KAKERALOOT_STATE, None),
+    ),
+)
+def test_new_row_replay_rejects_presence_mismatch(tmp_path, stored_state, incoming) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id, state=stored_state)
+    before = _snapshot(database_path)
+
+    with pytest.raises(KakeralootStateProjectionTargetError, match="rolls_stacked"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            state=stored_state.model_copy(update={"rolls_stacked": incoming}),
+        )
+    assert _snapshot(database_path) == before
+
+
+def test_has_false_replay_still_validates_masked_field_presence(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    state = KakeralootStateSnapshot(has_kakeraloots=False, rolls_stacked=0)
+    _coordinate(coordinator, source_event_id, attempt_id, state=state)
+    before = _snapshot(database_path)
+
+    replay = _coordinate(coordinator, source_event_id, None, state=state)
+    assert replay.replay_skipped is True
+    assert _snapshot(database_path) == before
+    with pytest.raises(KakeralootStateProjectionTargetError, match="rolls_stacked"):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            state=state.model_copy(update={"rolls_stacked": None}),
+        )
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        connection.execute("UPDATE kakeraloot_state_observations SET rolls_stacked_observed = NULL")
+    legacy_before = _snapshot(database_path)
+    for incoming in (None, 0):
+        replay = _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            state=state.model_copy(update={"rolls_stacked": incoming}),
+        )
+        assert replay.replay_skipped is True
+        assert _snapshot(database_path) == legacy_before
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "has_kakeraloots",
+        "status_note",
+        "rolls_stacked",
+        "disable_wa_ha_reduction",
+        "disable_wg_hg_reduction",
+        "protected_wish_level",
+        "protected_wish_denominator",
+        "mudapins",
+        "rt_cooldown_reduction_hours",
+        "permanent_roll_bonus",
+        "star_branches",
+        "starwish_slots_from_branches",
+        "quantity_level",
+        "quality_level",
+        "usage_count",
+        "kakera_balance",
+    ),
+)
 def test_replay_validates_every_kakeraloot_field(tmp_path, field: str) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)

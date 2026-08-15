@@ -56,7 +56,7 @@ class KakeralootBudgetService:
                 upgrades=(),
             )
         state = self._catalog.kakeraloot_state(server_name, account_name)
-        if state is None:
+        if state is None or state.quantity_level is None or state.quality_level is None:
             return KakeralootBudgetPlan(
                 server_name=server_name.strip(),
                 account_name=account_name.strip(),
@@ -68,8 +68,8 @@ class KakeralootBudgetService:
                 upgrades=(),
             )
 
-        quantity_level = state.quantity_level or 0
-        quality_level = state.quality_level or 0
+        quantity_level = state.quantity_level
+        quality_level = state.quality_level
         return KakeralootBudgetPlan(
             server_name=server_name.strip(),
             account_name=account_name.strip(),

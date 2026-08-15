@@ -545,6 +545,49 @@ def _apply_tower_completed_towers_presence(connection: sqlite3.Connection) -> No
     )
 
 
+_KAKERALOOT_STATE_VALUE_FIELDS = (
+    "rolls_stacked",
+    "disable_wa_ha_reduction",
+    "disable_wg_hg_reduction",
+    "protected_wish_level",
+    "protected_wish_denominator",
+    "mudapins",
+    "rt_cooldown_reduction_hours",
+    "permanent_roll_bonus",
+    "star_branches",
+    "starwish_slots_from_branches",
+    "quantity_level",
+    "quality_level",
+    "usage_count",
+    "kakera_balance",
+)
+
+
+def _apply_kakeraloot_state_value_presence(connection: sqlite3.Connection) -> None:
+    """Preserve exact Kakeraloot value presence without rewriting legacy zeros."""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(kakeraloot_state_observations)").fetchall()
+    }
+    for field_name in _KAKERALOOT_STATE_VALUE_FIELDS:
+        observed_column = f"{field_name}_observed"
+        if observed_column not in columns:
+            connection.execute(
+                f"""
+                ALTER TABLE kakeraloot_state_observations
+                ADD COLUMN {observed_column} INTEGER
+                    CHECK ({observed_column} IN (0, 1))
+                """
+            )
+        connection.execute(
+            f"""
+            UPDATE kakeraloot_state_observations
+            SET {observed_column} = 1
+            WHERE {field_name} != 0
+            """
+        )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -580,5 +623,10 @@ CATALOG_MIGRATIONS = (
         version=7,
         name="tower-completed-towers-presence",
         apply=_apply_tower_completed_towers_presence,
+    ),
+    Migration(
+        version=8,
+        name="kakeraloot-state-value-presence",
+        apply=_apply_kakeraloot_state_value_presence,
     ),
 )

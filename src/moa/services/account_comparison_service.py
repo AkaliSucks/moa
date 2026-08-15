@@ -70,7 +70,9 @@ class AccountComparisonService:
             return (
                 f"Quantity {overview.quantity_level}; Quality {overview.quality_level}; "
                 f"{overview.loot_usage_count:,} uses"
-                if overview.quantity_level is not None and overview.loot_usage_count is not None
+                if overview.quantity_level is not None
+                and overview.quality_level is not None
+                and overview.loot_usage_count is not None
                 else "Not imported"
             )
         if field == "wishlist":

@@ -3611,6 +3611,22 @@ TIMER_STATE = TimerStateSnapshot(
     rolls_per_hour_limit=17,
     rt_reset_minutes=612,
 )
+KAKERALOOT_VALUE_FIELDS = (
+    "rolls_stacked",
+    "disable_wa_ha_reduction",
+    "disable_wg_hg_reduction",
+    "protected_wish_level",
+    "protected_wish_denominator",
+    "mudapins",
+    "rt_cooldown_reduction_hours",
+    "permanent_roll_bonus",
+    "star_branches",
+    "starwish_slots_from_branches",
+    "quantity_level",
+    "quality_level",
+    "usage_count",
+    "kakera_balance",
+)
 KAKERALOOT_STATE = KakeralootStateSnapshot(
     status_note="guarded state",
     rolls_stacked=17,
@@ -6502,14 +6518,33 @@ def test_kakeraloot_state_helper_reuses_contexts_and_rollback_preserves_them(tmp
 
 
 @pytest.mark.parametrize(
-    ("state", "expected_has_kakeraloots", "expected_status_note"),
+    (
+        "state",
+        "expected_has_kakeraloots",
+        "expected_status_note",
+        "expected_observed",
+        "expected_public",
+    ),
     [
-        (ZERO_KAKERALOOT_STATE, 1, ""),
-        (NULL_KAKERALOOT_STATE, 1, None),
-        (NO_KAKERALOOT_STATE, 0, "No Kakeraloots bought; Mudae did not report loot statistics."),
+        (ZERO_KAKERALOOT_STATE, 1, "", 1, 0),
+        (NULL_KAKERALOOT_STATE, 1, None, 0, None),
+        (
+            NO_KAKERALOOT_STATE,
+            0,
+            "No Kakeraloots bought; Mudae did not report loot statistics.",
+            0,
+            None,
+        ),
     ],
 )
-def test_kakeraloot_state_helper_preserves_boundary_values(tmp_path, state, expected_has_kakeraloots, expected_status_note) -> None:
+def test_kakeraloot_state_helper_preserves_boundary_values(
+    tmp_path,
+    state,
+    expected_has_kakeraloots,
+    expected_status_note,
+    expected_observed,
+    expected_public,
+) -> None:
     database_path, catalog, _discord = _repositories(tmp_path)
 
     with connect(database_path) as connection:
@@ -6531,7 +6566,14 @@ def test_kakeraloot_state_helper_preserves_boundary_values(tmp_path, state, expe
                    disable_wg_hg_reduction, protected_wish_level, protected_wish_denominator,
                    mudapins, rt_cooldown_reduction_hours, permanent_roll_bonus,
                    star_branches, starwish_slots_from_branches, quantity_level, quality_level,
-                   usage_count, kakera_balance, observed_at, import_event_id
+                   usage_count, kakera_balance, observed_at, import_event_id,
+                   rolls_stacked_observed, disable_wa_ha_reduction_observed,
+                   disable_wg_hg_reduction_observed, protected_wish_level_observed,
+                   protected_wish_denominator_observed, mudapins_observed,
+                   rt_cooldown_reduction_hours_observed, permanent_roll_bonus_observed,
+                   star_branches_observed, starwish_slots_from_branches_observed,
+                   quantity_level_observed, quality_level_observed,
+                   usage_count_observed, kakera_balance_observed
             FROM kakeraloot_state_observations
             WHERE id = ?
             """,
@@ -6556,17 +6598,14 @@ def test_kakeraloot_state_helper_preserves_boundary_values(tmp_path, state, expe
             0,
             OBSERVED_AT.isoformat(),
             imported.import_event_id,
+            *(expected_observed for _ in KAKERALOOT_VALUE_FIELDS),
         )
         observation = catalog.kakeraloot_state("Server", "Account")
         assert observation is not None
         assert observation.has_kakeraloots is bool(expected_has_kakeraloots)
         assert observation.status_note == expected_status_note
-        if expected_has_kakeraloots:
-            assert observation.rolls_stacked == 0
-            assert observation.kakera_balance == 0
-        else:
-            assert observation.rolls_stacked is None
-            assert observation.kakera_balance is None
+        assert observation.rolls_stacked == expected_public
+        assert observation.kakera_balance == expected_public
 
 
 def test_kakeraloot_state_helper_does_not_write_projection_or_discord_state(tmp_path) -> None:

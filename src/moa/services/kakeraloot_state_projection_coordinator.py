@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import KakeralootStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.kakeraloot_state_repository import _KAKERALOOT_STATE_VALUE_FIELDS
 
 
 class KakeralootStateProjectionCoordinatorError(RuntimeError):
@@ -444,6 +445,20 @@ class KakeralootStateProjectionCoordinator:
                    kso.star_branches, kso.starwish_slots_from_branches,
                    kso.quantity_level, kso.quality_level, kso.usage_count,
                    kso.kakera_balance, kso.observed_at,
+                   kso.rolls_stacked_observed,
+                   kso.disable_wa_ha_reduction_observed,
+                   kso.disable_wg_hg_reduction_observed,
+                   kso.protected_wish_level_observed,
+                   kso.protected_wish_denominator_observed,
+                   kso.mudapins_observed,
+                   kso.rt_cooldown_reduction_hours_observed,
+                   kso.permanent_roll_bonus_observed,
+                   kso.star_branches_observed,
+                   kso.starwish_slots_from_branches_observed,
+                   kso.quantity_level_observed,
+                   kso.quality_level_observed,
+                   kso.usage_count_observed,
+                   kso.kakera_balance_observed,
                    ac.normalized_name AS account, sc.normalized_name AS server
             FROM kakeraloot_state_observations AS kso
             JOIN account_contexts AS ac ON ac.id = kso.account_context_id
@@ -491,23 +506,14 @@ class KakeralootStateProjectionCoordinator:
         expected_values = {
             "has_kakeraloots": int(state.has_kakeraloots),
             "status_note": state.status_note,
-            "rolls_stacked": state.rolls_stacked or 0,
-            "disable_wa_ha_reduction": state.disable_wa_ha_reduction or 0,
-            "disable_wg_hg_reduction": state.disable_wg_hg_reduction or 0,
-            "protected_wish_level": state.protected_wish_level or 0,
-            "protected_wish_denominator": state.protected_wish_denominator or 0,
-            "mudapins": state.mudapins or 0,
-            "rt_cooldown_reduction_hours": state.rt_cooldown_reduction_hours or 0,
-            "permanent_roll_bonus": state.permanent_roll_bonus or 0,
-            "star_branches": state.star_branches or 0,
-            "starwish_slots_from_branches": state.starwish_slots_from_branches or 0,
-            "quantity_level": state.quantity_level or 0,
-            "quality_level": state.quality_level or 0,
-            "usage_count": state.usage_count or 0,
-            "kakera_balance": state.kakera_balance or 0,
         }
         for field_name, expected in expected_values.items():
             if row[field_name] != expected:
+                raise KakeralootStateProjectionTargetError(
+                    f"projection target kakeraloot_state_observations:{observation_id} has mismatched {field_name}"
+                )
+        for field_name in _KAKERALOOT_STATE_VALUE_FIELDS:
+            if not self._value_matches(row, field_name, getattr(state, field_name)):
                 raise KakeralootStateProjectionTargetError(
                     f"projection target kakeraloot_state_observations:{observation_id} has mismatched {field_name}"
                 )
@@ -515,6 +521,18 @@ class KakeralootStateProjectionCoordinator:
             raise KakeralootStateProjectionTargetError(
                 f"projection target kakeraloot_state_observations:{observation_id} has mismatched observation time"
             )
+
+    @staticmethod
+    def _value_matches(row: sqlite3.Row, field_name: str, incoming: int | None) -> bool:
+        value = int(row[field_name])
+        observed = row[f"{field_name}_observed"]
+        if observed == 1:
+            return incoming is not None and value == incoming
+        if observed == 0:
+            return value == 0 and incoming is None
+        if observed is None:
+            return value == 0 and incoming in (None, 0)
+        return False
 
     @staticmethod
     def _kakeraloot_state_slot(server: str, account: str) -> str:

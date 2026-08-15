@@ -80,3 +80,27 @@ def test_account_comparison_keeps_missing_state_distinct_from_zero() -> None:
     assert rows["Claimed-roll rarity"].right_value == "Not imported"
     assert rows["Tower"].right_value == "Not imported"
     assert rows["Kakeraloots"].right_value == "Locked: Sapphire I, Ruby I, Emerald I"
+
+
+def test_account_comparison_requires_all_rendered_kakeraloot_fields() -> None:
+    service = InMemoryOverviewService()
+    left = service._overviews[("Lake", "main")]
+    service._overviews[("Lake", "main")] = left.model_copy(update={"quality_level": None})
+
+    comparison = AccountComparisonService(service).compare("Lake", "main", "Fresh", "alt")
+
+    rows = {row.label: row for row in comparison.rows}
+    assert rows["Kakeraloots"].left_value == "Not imported"
+
+
+def test_account_comparison_keeps_observed_kakeraloot_zero_factual() -> None:
+    service = InMemoryOverviewService()
+    left = service._overviews[("Lake", "main")]
+    service._overviews[("Lake", "main")] = left.model_copy(
+        update={"quantity_level": 0, "quality_level": 0, "loot_usage_count": 0}
+    )
+
+    comparison = AccountComparisonService(service).compare("Lake", "main", "Fresh", "alt")
+
+    rows = {row.label: row for row in comparison.rows}
+    assert rows["Kakeraloots"].left_value == "Quantity 0; Quality 0; 0 uses"

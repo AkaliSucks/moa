@@ -29,6 +29,67 @@ from moa.services.tower_state_projection_coordinator import TowerStateProjection
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
+def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        main,
+        "_read_message_source",
+        lambda path, clipboard: (
+            "sample - Kakeraloots\nQuantity LVL 5\nQuality LVL 0\n$kl usage: 1\n31,271:kakera:"
+        ),
+    )
+
+    result = CliRunner().invoke(main.app, ["parse", "lootstate", "--clipboard"])
+
+    assert result.exit_code == 0
+    assert "Quality 0" in result.stdout
+    assert "Rolls stacked: -" in result.stdout
+    assert "Wishprotect: -" in result.stdout
+    assert "Permanent rolls: -" in result.stdout
+
+
+def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
+    monkeypatch,
+) -> None:
+    state = SimpleNamespace(
+        account_name="Account",
+        has_kakeraloots=True,
+        status_note=None,
+        kakera_balance=None,
+        usage_count=None,
+        quantity_level=0,
+        quality_level=None,
+        rolls_stacked=None,
+        permanent_roll_bonus=None,
+        protected_wish_level=None,
+        protected_wish_denominator=None,
+        disable_wa_ha_reduction=None,
+        disable_wg_hg_reduction=None,
+        rt_cooldown_reduction_hours=None,
+        mudapins=None,
+        star_branches=None,
+        starwish_slots_from_branches=None,
+        observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        main,
+        "CatalogService",
+        lambda: SimpleNamespace(kakeraloot_state=lambda *_: state),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "lootstate", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert result.exit_code == 0
+    assert "Quantity / Quality" in result.stdout
+    assert "0 /" not in result.stdout
+    assert "Rolls stacked" in result.stdout
+    assert "Wishprotect" in result.stdout
+
+
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     overview = SimpleNamespace(
@@ -117,6 +178,60 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert "Mai Sakurajima" in result.stdout
     assert ":goldkey: (7)" in result.stdout
     assert "2026-07-12 23:45 UTC" in result.stdout
+
+    overview.quality_level = None
+    partial_result = CliRunner().invoke(
+        main.app,
+        ["account", "activity", "--server", "Lake", "--account", "ernieuuu"],
+    )
+
+    assert partial_result.exit_code == 0
+    assert "Not fully observed" in partial_result.stdout
+    assert "Quantity 5; Quality 0" not in partial_result.stdout
+
+
+def test_account_overview_does_not_render_partial_kakeraloot_state_as_factual(
+    monkeypatch,
+) -> None:
+    overview = SimpleNamespace(
+        account_name="ernieuuu",
+        kakera_balance=None,
+        kakera_balance_source=None,
+        personal_rare_multiplier=None,
+        server_rare_multiplier=None,
+        max_badge_count=0,
+        badge_count=0,
+        tower_level=None,
+        completed_towers=None,
+        next_tower_cost=None,
+        tower_shortfall=None,
+        kakeraloots_unlocked=True,
+        missing_kakeraloot_prerequisites=(),
+        has_kakeraloots=True,
+        kakeraloot_status_note=None,
+        quantity_level=5,
+        quality_level=None,
+        loot_usage_count=12,
+        wishlist_count=None,
+        wishlist_capacity=None,
+        starwish_count=None,
+        starwish_capacity=None,
+        disable_slots_used=None,
+        disable_slots_capacity=None,
+        keyed_harem_count=0,
+    )
+    monkeypatch.setattr(
+        main, "AccountOverviewService", lambda: SimpleNamespace(overview=lambda *_: overview)
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["account", "overview", "--server", "Lake", "--account", "ernieuuu"],
+    )
+
+    assert result.exit_code == 0
+    assert "Not fully observed" in result.stdout
+    assert "Quantity 5" not in result.stdout
 
 
 def test_catalog_top_displays_unavailable_reasons() -> None:

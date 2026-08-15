@@ -616,7 +616,11 @@ def account_activity(
     )
     table.add_row(
         "Kakeraloots",
-        "Not imported" if overview.quantity_level is None else f"Quantity {overview.quantity_level}; Quality {overview.quality_level}; {overview.loot_usage_count:,} uses",
+        "Not fully observed"
+        if overview.quantity_level is None
+        or overview.quality_level is None
+        or overview.loot_usage_count is None
+        else f"Quantity {overview.quantity_level}; Quality {overview.quality_level}; {overview.loot_usage_count:,} uses",
     )
     table.add_row(
         "Disable list",
@@ -1047,13 +1051,17 @@ def account_overview(
         loot_state = "Locked: requires " + " and ".join(overview.missing_kakeraloot_prerequisites)
     elif overview.has_kakeraloots is False:
         loot_state = overview.kakeraloot_status_note or "No Kakeraloots bought"
-    elif overview.quantity_level is not None:
+    elif (
+        overview.quantity_level is not None
+        and overview.quality_level is not None
+        and overview.loot_usage_count is not None
+    ):
         loot_state = (
             f"Quantity {overview.quantity_level} | Quality {overview.quality_level} | "
             f"{overview.loot_usage_count:,} uses"
         )
     else:
-        loot_state = "Not imported"
+        loot_state = "Not fully observed"
     table.add_row("Kakeraloots", loot_state)
     wishlist_state = (
         f"{overview.wishlist_count}/{overview.wishlist_capacity} wishes | "
@@ -1715,13 +1723,21 @@ def parse_lootstate(
     if not state.has_kakeraloots:
         console.print(f"[yellow]{state.status_note}[/yellow]")
         return
+    wishprotect = (
+        "-"
+        if state.protected_wish_level is None or state.protected_wish_denominator is None
+        else f"LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,})"
+    )
+    permanent_rolls = (
+        "-" if state.permanent_roll_bonus is None else f"+{state.permanent_roll_bonus}"
+    )
     console.print(
-        f"[bold cyan]Kakeraloots[/bold cyan] · Quantity {state.quantity_level} · "
-        f"Quality {state.quality_level}\n"
-        f"Usage: {state.usage_count:,} · Balance: {state.kakera_balance:,} Kakera · "
-        f"Rolls stacked: {state.rolls_stacked}\n"
-        f"Wishprotect: LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,}) · "
-        f"Permanent rolls: +{state.permanent_roll_bonus}"
+        f"[bold cyan]Kakeraloots[/bold cyan] · Quantity {_format_optional_number(state.quantity_level)} · "
+        f"Quality {_format_optional_number(state.quality_level)}\n"
+        f"Usage: {_format_optional_number(state.usage_count)} · "
+        f"Balance: {_format_optional_number(state.kakera_balance)} Kakera · "
+        f"Rolls stacked: {_format_optional_number(state.rolls_stacked)}\n"
+        f"Wishprotect: {wishprotect} · Permanent rolls: {permanent_rolls}"
     )
 
 
@@ -2880,16 +2896,44 @@ def catalog_lootstate(
     table = Table(title=f"{state.account_name} - Kakeraloot state")
     table.add_column("Metric", style="green")
     table.add_column("Value", justify="right", style="cyan")
-    table.add_row("Kakera balance", f"{state.kakera_balance:,}")
-    table.add_row("$kl usage", f"{state.usage_count:,}")
-    table.add_row("Quantity / Quality", f"{state.quantity_level} / {state.quality_level}")
-    table.add_row("Rolls stacked", str(state.rolls_stacked))
-    table.add_row("Permanent rolls", f"+{state.permanent_roll_bonus}")
-    table.add_row("Wishprotect", f"LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,})")
-    table.add_row("$disable reduction", f"-{state.disable_wa_ha_reduction} $wa/$ha · -{state.disable_wg_hg_reduction} $wg/$hg")
-    table.add_row("$rt cooldown", f"-{state.rt_cooldown_reduction_hours}h")
-    table.add_row("Mudapins", str(state.mudapins))
-    table.add_row("Star branches", f"{state.star_branches} (+{state.starwish_slots_from_branches} $sw)")
+    table.add_row("Kakera balance", _format_optional_number(state.kakera_balance))
+    table.add_row("$kl usage", _format_optional_number(state.usage_count))
+    table.add_row(
+        "Quantity / Quality",
+        "-"
+        if state.quantity_level is None or state.quality_level is None
+        else f"{state.quantity_level} / {state.quality_level}",
+    )
+    table.add_row("Rolls stacked", _format_optional_number(state.rolls_stacked))
+    table.add_row(
+        "Permanent rolls",
+        "-" if state.permanent_roll_bonus is None else f"+{state.permanent_roll_bonus}",
+    )
+    table.add_row(
+        "Wishprotect",
+        "-"
+        if state.protected_wish_level is None or state.protected_wish_denominator is None
+        else f"LVL {state.protected_wish_level} (1/{state.protected_wish_denominator:,})",
+    )
+    table.add_row(
+        "$disable reduction",
+        "-"
+        if state.disable_wa_ha_reduction is None or state.disable_wg_hg_reduction is None
+        else f"-{state.disable_wa_ha_reduction} $wa/$ha · -{state.disable_wg_hg_reduction} $wg/$hg",
+    )
+    table.add_row(
+        "$rt cooldown",
+        "-"
+        if state.rt_cooldown_reduction_hours is None
+        else f"-{state.rt_cooldown_reduction_hours}h",
+    )
+    table.add_row("Mudapins", _format_optional_number(state.mudapins))
+    table.add_row(
+        "Star branches",
+        "-"
+        if state.star_branches is None or state.starwish_slots_from_branches is None
+        else f"{state.star_branches} (+{state.starwish_slots_from_branches} $sw)",
+    )
     console.print(table)
     console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
 

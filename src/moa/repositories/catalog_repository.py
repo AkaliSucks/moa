@@ -3261,7 +3261,35 @@ class CatalogRepository:
                     usage_count INTEGER NOT NULL,
                     kakera_balance INTEGER NOT NULL,
                     observed_at TEXT NOT NULL,
-                    import_event_id INTEGER NOT NULL REFERENCES import_events(id)
+                    import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    rolls_stacked_observed INTEGER
+                        CHECK (rolls_stacked_observed IN (0, 1)),
+                    disable_wa_ha_reduction_observed INTEGER
+                        CHECK (disable_wa_ha_reduction_observed IN (0, 1)),
+                    disable_wg_hg_reduction_observed INTEGER
+                        CHECK (disable_wg_hg_reduction_observed IN (0, 1)),
+                    protected_wish_level_observed INTEGER
+                        CHECK (protected_wish_level_observed IN (0, 1)),
+                    protected_wish_denominator_observed INTEGER
+                        CHECK (protected_wish_denominator_observed IN (0, 1)),
+                    mudapins_observed INTEGER
+                        CHECK (mudapins_observed IN (0, 1)),
+                    rt_cooldown_reduction_hours_observed INTEGER
+                        CHECK (rt_cooldown_reduction_hours_observed IN (0, 1)),
+                    permanent_roll_bonus_observed INTEGER
+                        CHECK (permanent_roll_bonus_observed IN (0, 1)),
+                    star_branches_observed INTEGER
+                        CHECK (star_branches_observed IN (0, 1)),
+                    starwish_slots_from_branches_observed INTEGER
+                        CHECK (starwish_slots_from_branches_observed IN (0, 1)),
+                    quantity_level_observed INTEGER
+                        CHECK (quantity_level_observed IN (0, 1)),
+                    quality_level_observed INTEGER
+                        CHECK (quality_level_observed IN (0, 1)),
+                    usage_count_observed INTEGER
+                        CHECK (usage_count_observed IN (0, 1)),
+                    kakera_balance_observed INTEGER
+                        CHECK (kakera_balance_observed IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS kakeraloot_settings_observations (

@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from moa.models.catalog import (
     KakeraStateObservation,
     KakeralootSettingsObservation,
@@ -73,3 +75,26 @@ def test_budget_plan_reports_missing_unlock_prerequisites_without_guessing_costs
     assert plan.status == "Kakeraloots are locked."
     assert plan.missing_prerequisites == ("Ruby I", "Emerald I")
     assert not plan.upgrades
+
+
+@pytest.mark.parametrize("unknown_field", ("quantity_level", "quality_level"))
+def test_budget_plan_does_not_treat_unknown_level_as_zero(unknown_field) -> None:
+    catalog = InMemoryKakeralootPlanningCatalog()
+    catalog._state = catalog._state.model_copy(update={unknown_field: None})
+
+    plan = KakeralootBudgetService(catalog).plan("Lake", "ernieuuu")
+
+    assert plan.affordable_loot_count == 18
+    assert plan.status == "Import $lk to determine the current Quantity and Quality levels."
+    assert not plan.upgrades
+
+
+def test_budget_plan_keeps_observed_zero_levels_factual() -> None:
+    catalog = InMemoryKakeralootPlanningCatalog()
+    catalog._state = catalog._state.model_copy(update={"quantity_level": 0, "quality_level": 0})
+
+    plan = KakeralootBudgetService(catalog).plan("Lake", "ernieuuu")
+
+    quantity, quality = plan.upgrades
+    assert quantity.current_level == quality.current_level == 0
+    assert quantity.cost == quality.cost == 2_000

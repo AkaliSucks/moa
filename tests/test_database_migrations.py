@@ -11,8 +11,26 @@ from moa.database.migrations import (
     run_migrations,
 )
 from moa.database.sqlite import connect
-from moa.models.character import TowerStateSnapshot
+from moa.models.character import KakeralootStateSnapshot, TowerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
+
+
+KAKERALOOT_VALUE_FIELDS = (
+    "rolls_stacked",
+    "disable_wa_ha_reduction",
+    "disable_wg_hg_reduction",
+    "protected_wish_level",
+    "protected_wish_denominator",
+    "mudapins",
+    "rt_cooldown_reduction_hours",
+    "permanent_roll_bonus",
+    "star_branches",
+    "starwish_slots_from_branches",
+    "quantity_level",
+    "quality_level",
+    "usage_count",
+    "kakera_balance",
+)
 
 
 TOWER_STATE = TowerStateSnapshot(
@@ -56,6 +74,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 8")
 
 
 def _make_version_5_database(database_path):
@@ -65,6 +84,7 @@ def _make_version_5_database(database_path):
         connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 8")
 
 
 def _make_version_6_database(database_path, completed_towers_by_account):
@@ -82,6 +102,25 @@ def _make_version_6_database(database_path, completed_towers_by_account):
             "ALTER TABLE tower_state_observations DROP COLUMN completed_towers_observed"
         )
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 8")
+
+
+def _make_version_7_kakeraloot_database(database_path, states_by_account):
+    catalog = CatalogRepository(database_path)
+    for account, state in states_by_account.items():
+        catalog.import_kakeraloot_state(
+            state,
+            "Server",
+            account,
+            f"legacy {account}",
+            "test",
+        )
+    with _open_database(database_path) as connection:
+        for field_name in KAKERALOOT_VALUE_FIELDS:
+            connection.execute(
+                f"ALTER TABLE kakeraloot_state_observations DROP COLUMN {field_name}_observed"
+            )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 8")
 
 
 def _insert_aggregate(
@@ -344,6 +383,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
+        (8, "kakeraloot-state-value-presence"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -542,6 +582,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
+        (8, "kakeraloot-state-value-presence"),
     ]
 
 
@@ -641,7 +682,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == [1, 2, 3, 4, 5, 6]
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 9))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -793,8 +834,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            7,
-            "tower-completed-towers-presence",
+            8,
+            "kakeraloot-state-value-presence",
         )
 
 
@@ -993,6 +1034,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
+        (8, "kakeraloot-state-value-presence"),
     ]
 
 
@@ -1077,6 +1119,8 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         connection.execute("DELETE FROM schema_migrations WHERE version = 4")
         connection.execute("DELETE FROM schema_migrations WHERE version = 5")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 7")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1743,6 +1787,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
+        (8, "kakeraloot-state-value-presence"),
     ]
 
 
@@ -1770,6 +1815,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (5, "durable-discord-source-event-account-attributions"),
         (6, "durable-discord-antidisable-workflow-bindings"),
         (7, "tower-completed-towers-presence"),
+        (8, "kakeraloot-state-value-presence"),
     ]
 
 
@@ -2188,6 +2234,164 @@ def test_fresh_and_migrated_tower_presence_columns_are_equivalent_and_constraine
             )
 
 
+def test_kakeraloot_presence_migration_preserves_all_legacy_value_classes(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    zero_values = {field_name: 0 for field_name in KAKERALOOT_VALUE_FIELDS}
+    positive_values = {
+        field_name: index for index, field_name in enumerate(KAKERALOOT_VALUE_FIELDS, 1)
+    }
+    negative_values = {
+        field_name: -index for index, field_name in enumerate(KAKERALOOT_VALUE_FIELDS, 1)
+    }
+    states = {
+        "legacy-none": KakeralootStateSnapshot(),
+        "legacy-zero": KakeralootStateSnapshot(**zero_values),
+        "legacy-positive": KakeralootStateSnapshot(**positive_values),
+        "legacy-negative": KakeralootStateSnapshot(**negative_values),
+        "false-zero": KakeralootStateSnapshot(has_kakeraloots=False, **zero_values),
+        "false-nonzero": KakeralootStateSnapshot(has_kakeraloots=False, **positive_values),
+    }
+    _make_version_7_kakeraloot_database(database_path, states)
+
+    with _open_database(database_path) as connection:
+        assert not {f"{field_name}_observed" for field_name in KAKERALOOT_VALUE_FIELDS} & {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(kakeraloot_state_observations)"
+            ).fetchall()
+        }
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        selected_columns = (
+            *KAKERALOOT_VALUE_FIELDS,
+            *(f"{field_name}_observed" for field_name in KAKERALOOT_VALUE_FIELDS),
+        )
+        rows = connection.execute(
+            f"""
+            SELECT account_contexts.name, {", ".join(selected_columns)}
+            FROM kakeraloot_state_observations
+            JOIN account_contexts
+              ON account_contexts.id = kakeraloot_state_observations.account_context_id
+            ORDER BY kakeraloot_state_observations.id
+            """
+        ).fetchall()
+
+    by_account = {row[0]: row[1:] for row in rows}
+    field_count = len(KAKERALOOT_VALUE_FIELDS)
+    for account in ("legacy-none", "legacy-zero", "false-zero"):
+        assert by_account[account][:field_count] == tuple(0 for _ in range(field_count))
+        assert by_account[account][field_count:] == tuple(None for _ in range(field_count))
+    for account, expected_values in (
+        ("legacy-positive", positive_values),
+        ("false-nonzero", positive_values),
+        ("legacy-negative", negative_values),
+    ):
+        assert by_account[account][:field_count] == tuple(
+            expected_values[field_name] for field_name in KAKERALOOT_VALUE_FIELDS
+        )
+        assert by_account[account][field_count:] == tuple(1 for _ in range(field_count))
+
+    catalog = CatalogRepository(database_path)
+    assert catalog.kakeraloot_state("Server", "legacy-zero").rolls_stacked is None
+    assert catalog.kakeraloot_state("Server", "legacy-positive").rolls_stacked == 1
+    assert catalog.kakeraloot_state("Server", "legacy-negative").rolls_stacked == -1
+    assert catalog.kakeraloot_state("Server", "false-nonzero").rolls_stacked is None
+    CatalogRepository(database_path)
+    assert _migration_rows(database_path).count((8, "kakeraloot-state-value-presence")) == 1
+
+
+def test_failed_kakeraloot_presence_migration_rolls_back_and_retries_cleanly(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_7_kakeraloot_database(
+        database_path,
+        {
+            "legacy-zero": KakeralootStateSnapshot(rolls_stacked=0),
+            "legacy-nonzero": KakeralootStateSnapshot(rolls_stacked=-1),
+        },
+    )
+
+    def fail_after_kakeraloot_presence(connection):
+        CATALOG_MIGRATIONS[7].apply(connection)
+        raise RuntimeError("stop after Kakeraloot presence")
+
+    failing_migrations = CATALOG_MIGRATIONS[:7] + (
+        Migration(8, "failing-kakeraloot-presence", fail_after_kakeraloot_presence),
+    )
+    with _open_database(database_path) as connection:
+        with pytest.raises(RuntimeError, match="stop after Kakeraloot presence"):
+            run_migrations(connection, failing_migrations)
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(kakeraloot_state_observations)"
+            ).fetchall()
+        }
+        assert not {f"{field_name}_observed" for field_name in KAKERALOOT_VALUE_FIELDS} & columns
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(version,) for version in range(1, 8)]
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT rolls_stacked, rolls_stacked_observed "
+            "FROM kakeraloot_state_observations ORDER BY id"
+        ).fetchall() == [(0, None), (-1, 1)]
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 8"
+            ).fetchone()[0]
+            == 1
+        )
+
+
+def test_fresh_and_migrated_kakeraloot_presence_columns_are_equivalent_and_constrained(
+    tmp_path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _make_version_7_kakeraloot_database(
+        migrated_path,
+        {"Account": KakeralootStateSnapshot(rolls_stacked=3)},
+    )
+    with _open_database(migrated_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+    fresh_path = tmp_path / "fresh.db"
+    fresh_catalog = CatalogRepository(fresh_path)
+    fresh_catalog.import_kakeraloot_state(
+        KakeralootStateSnapshot(), "Server", "Account", "fresh", "test"
+    )
+
+    schema_by_path = {}
+    for database_path in (migrated_path, fresh_path):
+        with _open_database(database_path) as connection:
+            schema_by_path[database_path] = {
+                row[1]: tuple(row[1:5])
+                for row in connection.execute(
+                    "PRAGMA table_info(kakeraloot_state_observations)"
+                ).fetchall()
+                if row[1].endswith("_observed")
+            }
+            for field_name in KAKERALOOT_VALUE_FIELDS:
+                with pytest.raises(sqlite3.IntegrityError):
+                    connection.execute(
+                        f"UPDATE kakeraloot_state_observations SET {field_name}_observed = 2"
+                    )
+
+    expected_schema = {
+        f"{field_name}_observed": (
+            f"{field_name}_observed",
+            "INTEGER",
+            0,
+            None,
+        )
+        for field_name in KAKERALOOT_VALUE_FIELDS
+    }
+    assert schema_by_path[migrated_path] == schema_by_path[fresh_path] == expected_schema
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -2196,11 +2400,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (8, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (9, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(8,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(9,)]
