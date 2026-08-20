@@ -74,7 +74,7 @@ class CatalogTopSearchEntry(MOAModel):
     key_type: str | None = None
     key_count: int | None = None
     kakera_value: int | None = None
-    roulette_types: tuple[str, ...] = ()
+    roulette_types: tuple[str, ...] | None
 
 
 class TopImportResult(MOAModel):
@@ -168,7 +168,7 @@ class OwnedCharacterObservation(MOAModel):
     character: CatalogCharacter | None
     claim_rank: int
     kakera_value: int | None
-    roulette_types: tuple[str, ...] = ()
+    roulette_types: tuple[str, ...] | None
     observed_at: datetime
 
 

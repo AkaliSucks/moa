@@ -11,7 +11,13 @@ from moa.database.migrations import (
     run_migrations,
 )
 from moa.database.sqlite import connect
-from moa.models.character import KakeralootStateSnapshot, ProfileSnapshot, TowerStateSnapshot
+from moa.models.character import (
+    KakeralootStateSnapshot,
+    ProfileSnapshot,
+    RankedHaremEntry,
+    RankedHaremPage,
+    TowerStateSnapshot,
+)
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -110,6 +116,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
 
 
 def _make_version_5_database(database_path):
@@ -121,6 +128,7 @@ def _make_version_5_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
 
 
 def _make_version_6_database(database_path, completed_towers_by_account):
@@ -140,6 +148,7 @@ def _make_version_6_database(database_path, completed_towers_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
 
 
 def _make_version_7_kakeraloot_database(database_path, states_by_account):
@@ -159,6 +168,7 @@ def _make_version_7_kakeraloot_database(database_path, states_by_account):
             )
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
 
 
 def _make_version_8_profile_database(database_path, profiles_by_account):
@@ -171,6 +181,35 @@ def _make_version_8_profile_database(database_path, profiles_by_account):
                 f"ALTER TABLE profile_observations DROP COLUMN {field_name}"
             )
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+
+
+def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
+    catalog = CatalogRepository(database_path)
+    for account, roulette_types in roulette_by_account.items():
+        catalog.import_ranked_harem_page(
+            RankedHaremPage(
+                page_number=None,
+                page_count=None,
+                entries=(
+                    RankedHaremEntry(
+                        name=account,
+                        claim_rank=1,
+                        roulette_types=roulette_types,
+                    ),
+                ),
+            ),
+            "Server",
+            account,
+            f"legacy {account}",
+            "test",
+        )
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "ALTER TABLE owned_character_observations "
+            "DROP COLUMN roulette_types_observed"
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
 
 
 def _insert_aggregate(
@@ -435,6 +474,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
+        (10, "ranked-harem-roulette-presence"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -635,6 +675,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
+        (10, "ranked-harem-roulette-presence"),
     ]
 
 
@@ -734,7 +775,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 10))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 11))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -885,7 +926,10 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
         assert connection.execute(
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
-        assert _migration_rows(database_path)[-1] == (9, "profile-response-presence")
+        assert _migration_rows(database_path)[-1] == (
+            10,
+            "ranked-harem-roulette-presence",
+        )
 
 
 def test_failed_antidisable_workflow_migration_rolls_back_schema_and_metadata(
@@ -1085,6 +1129,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
+        (10, "ranked-harem-roulette-presence"),
     ]
 
 
@@ -1172,6 +1217,7 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         connection.execute("DELETE FROM schema_migrations WHERE version = 7")
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1840,6 +1886,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
+        (10, "ranked-harem-roulette-presence"),
     ]
 
 
@@ -1869,6 +1916,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (7, "tower-completed-towers-presence"),
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
+        (10, "ranked-harem-roulette-presence"),
     ]
 
 
@@ -2649,6 +2697,181 @@ def test_fresh_and_migrated_profile_presence_schema_are_equivalent_and_idempoten
         )
 
 
+def test_ranked_harem_roulette_presence_migration_preserves_legacy_ambiguity(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_9_ranked_harem_database(
+        database_path,
+        {
+            "legacy-absent": None,
+            "legacy-empty": (),
+            "legacy-observed": ("wa", "ha"),
+        },
+    )
+
+    with _open_database(database_path) as connection:
+        assert "roulette_types_observed" not in {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(owned_character_observations)"
+            )
+        }
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            """
+            SELECT account_contexts.name, roulette_types_json,
+                   roulette_types_observed
+            FROM owned_character_observations
+            JOIN account_contexts
+              ON account_contexts.id =
+                 owned_character_observations.account_context_id
+            ORDER BY owned_character_observations.id
+            """
+        ).fetchall() == [
+            ("legacy-absent", "[]", None),
+            ("legacy-empty", "[]", None),
+            ("legacy-observed", '["wa", "ha"]', 1),
+        ]
+        presence_column = next(
+            row
+            for row in connection.execute(
+                "PRAGMA table_info(owned_character_observations)"
+            )
+            if row[1] == "roulette_types_observed"
+        )
+        assert tuple(presence_column[1:5]) == (
+            "roulette_types_observed",
+            "INTEGER",
+            0,
+            None,
+        )
+
+    catalog = CatalogRepository(database_path)
+    assert catalog.owned_characters("Server", "legacy-absent")[0].roulette_types is None
+    assert catalog.owned_characters("Server", "legacy-empty")[0].roulette_types is None
+    assert catalog.owned_characters("Server", "legacy-observed")[0].roulette_types == (
+        "wa",
+        "ha",
+    )
+    CatalogRepository(database_path)
+    assert _migration_rows(database_path).count(
+        (10, "ranked-harem-roulette-presence")
+    ) == 1
+
+
+def test_failed_ranked_harem_roulette_presence_migration_rolls_back_and_retries(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_9_ranked_harem_database(
+        database_path,
+        {"legacy-empty": (), "legacy-observed": ("wa",)},
+    )
+
+    def fail_after_ranked_harem_presence(connection):
+        CATALOG_MIGRATIONS[9].apply(connection)
+        raise RuntimeError("stop after ranked-harem presence")
+
+    failing_migrations = CATALOG_MIGRATIONS[:9] + (
+        Migration(
+            10,
+            "failing-ranked-harem-presence",
+            fail_after_ranked_harem_presence,
+        ),
+    )
+    with _open_database(database_path) as connection:
+        with pytest.raises(RuntimeError, match="stop after ranked-harem presence"):
+            run_migrations(connection, failing_migrations)
+        assert "roulette_types_observed" not in {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(owned_character_observations)"
+            )
+        }
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(version,) for version in range(1, 10)]
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT roulette_types_json, roulette_types_observed "
+            "FROM owned_character_observations ORDER BY id"
+        ).fetchall() == [("[]", None), ('["wa"]', 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 10"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_and_migrated_ranked_harem_presence_schema_are_equivalent(
+    tmp_path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _make_version_9_ranked_harem_database(
+        migrated_path,
+        {"legacy-observed": ("wa",)},
+    )
+    CatalogRepository(migrated_path)
+
+    fresh_path = tmp_path / "fresh.db"
+    fresh_catalog = CatalogRepository(fresh_path)
+    fresh_catalog.import_ranked_harem_page(
+        RankedHaremPage(
+            page_number=None,
+            page_count=None,
+            entries=(
+                RankedHaremEntry(
+                    name="fresh-absent",
+                    claim_rank=1,
+                    roulette_types=None,
+                ),
+                RankedHaremEntry(
+                    name="fresh-observed",
+                    claim_rank=2,
+                    roulette_types=("ha",),
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "fresh ranked harem",
+        "test",
+    )
+
+    columns_by_path = {}
+    for database_path in (migrated_path, fresh_path):
+        with _open_database(database_path) as connection:
+            columns_by_path[database_path] = next(
+                tuple(row[1:5])
+                for row in connection.execute(
+                    "PRAGMA table_info(owned_character_observations)"
+                )
+                if row[1] == "roulette_types_observed"
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "UPDATE owned_character_observations "
+                    "SET roulette_types_observed = 2"
+                )
+
+    assert columns_by_path[migrated_path] == columns_by_path[fresh_path] == (
+        "roulette_types_observed",
+        "INTEGER",
+        0,
+        None,
+    )
+    with _open_database(fresh_path) as connection:
+        before = connection.execute(
+            "SELECT roulette_types_json, roulette_types_observed "
+            "FROM owned_character_observations ORDER BY id"
+        ).fetchall()
+        CATALOG_MIGRATIONS[9].apply(connection)
+        assert connection.execute(
+            "SELECT roulette_types_json, roulette_types_observed "
+            "FROM owned_character_observations ORDER BY id"
+        ).fetchall() == before == [("[]", 0), ('["ha"]', 1)]
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -2657,11 +2880,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (10, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (11, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(10,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(11,)]

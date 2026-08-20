@@ -598,6 +598,7 @@ def test_parse_ranked_harem_page_from_mmrk_output() -> None:
         ("Rem", 3, 1426),
         ("Saber", 4, 1478),
     ]
+    assert all(entry.roulette_types is None for entry in page.entries)
 
 
 def test_parse_ranked_harem_page_from_mmr_and_mmrk_compact_output() -> None:
@@ -628,6 +629,8 @@ def test_parse_ranked_harem_page_from_mmr_and_mmrk_compact_output() -> None:
         ("Zero Two", 1052),
         ("Saber", 996),
     ]
+    assert all(entry.roulette_types is None for entry in mmr.entries)
+    assert all(entry.roulette_types is None for entry in mmrk.entries)
 
 
 def test_parse_ranked_harem_page_ignores_discord_markdown_emphasis() -> None:

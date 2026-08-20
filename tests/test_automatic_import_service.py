@@ -3674,6 +3674,7 @@ def test_automatic_import_routes_ranked_harem_pages(tmp_path) -> None:
     assert [(entry.character_name, entry.claim_rank, entry.kakera_value) for entry in entries] == [
         ("Zero Two", 2, 1440)
     ]
+    assert entries[0].roulette_types is None
 
 
 def test_automatic_import_non_durable_tower_keeps_catalog_path_and_result() -> None:

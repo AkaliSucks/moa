@@ -289,6 +289,26 @@ def test_top_search_filters_to_directly_observed_owned_characters() -> None:
     assert owned[0].keyed is False
 
 
+def test_top_search_preserves_unknown_and_observed_empty_roulette_presence() -> None:
+    catalog = InMemoryTopCatalog()
+
+    entries = TopSearchService(catalog).search(
+        server_name="Lake", account_name="ernieuuu", limit=None
+    )
+    by_name = {entry.character.name: entry for entry in entries}
+    assert by_name["Rem"].roulette_types == ("wa",)
+    assert by_name["Zero Two"].roulette_types is None
+    assert by_name["Albedo"].roulette_types is None
+
+    catalog._owned = (
+        catalog._owned[0].model_copy(update={"roulette_types": ()}),
+    )
+    observed_empty = TopSearchService(catalog).search(
+        server_name="Lake", account_name="ernieuuu", owned_only=True
+    )
+    assert observed_empty[0].roulette_types == ()
+
+
 def test_top_search_fails_closed_for_ambiguous_name_only_ownership() -> None:
     catalog = InMemoryTopCatalog()
     observed_at = catalog._top[0].observed_at
@@ -323,6 +343,7 @@ def test_top_search_fails_closed_for_ambiguous_name_only_ownership() -> None:
             character=None,
             claim_rank=10,
             kakera_value=100,
+            roulette_types=None,
             observed_at=observed_at,
         ),
     )
@@ -366,6 +387,7 @@ def test_top_search_fails_closed_for_ambiguous_name_only_ownership() -> None:
             character=first.character,
             claim_rank=10,
             kakera_value=1000,
+            roulette_types=None,
             observed_at=observed_at,
         ),
     )

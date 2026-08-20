@@ -34,6 +34,8 @@ def format_mudae_gender(gender: str | None) -> str:
 
 def format_mudae_roulette_types(roulette_types: tuple[str, ...] | list[str] | None) -> str:
     """Render `$wa`/`$ha`/`$wg`/`$hg`-style roulette type markers."""
+    if roulette_types is None:
+        return "Unknown"
     if not roulette_types:
         return "-"
     return ", ".join(

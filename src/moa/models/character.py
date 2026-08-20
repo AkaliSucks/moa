@@ -114,7 +114,7 @@ class RankedHaremEntry(MOAModel):
     name: str
     claim_rank: int
     kakera_value: int | None = None
-    roulette_types: tuple[str, ...] = ()
+    roulette_types: tuple[str, ...] | None
     key_type: str | None = None
     key_count: int | None = None
 

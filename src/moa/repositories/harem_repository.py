@@ -156,8 +156,9 @@ class HaremRepository:
                     INSERT INTO owned_character_observations (
                         account_context_id, character_id, character_name,
                         normalized_character_name, claim_rank, kakera_value,
-                        roulette_types_json, observed_at, import_event_id, harem_scan_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        roulette_types_json, roulette_types_observed, observed_at,
+                        import_event_id, harem_scan_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id,
@@ -166,7 +167,10 @@ class HaremRepository:
                         normalized_name,
                         entry.claim_rank,
                         entry.kakera_value,
-                        json.dumps(list(entry.roulette_types)),
+                        json.dumps(
+                            [] if entry.roulette_types is None else list(entry.roulette_types)
+                        ),
+                        int(entry.roulette_types is not None),
                         observed_at.isoformat(),
                         import_event_id,
                         scan_id,
@@ -246,6 +250,7 @@ class HaremRepository:
                 f"""
                 SELECT observations.character_name, observations.claim_rank,
                        observations.kakera_value, observations.roulette_types_json,
+                       observations.roulette_types_observed,
                        observations.observed_at,
                        characters.id AS character_id, characters.name,
                        characters.series, characters.gender, characters.roulette
@@ -330,7 +335,7 @@ class HaremRepository:
                 character=self._catalog_character(row),
                 claim_rank=row["claim_rank"],
                 kakera_value=row["kakera_value"],
-                roulette_types=tuple(json.loads(row["roulette_types_json"] or "[]")),
+                roulette_types=self._roulette_types(row),
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows
@@ -667,6 +672,34 @@ class HaremRepository:
 
     def _connection(self) -> sqlite3.Connection:
         return connect(self._database_path)
+
+    @staticmethod
+    def _roulette_types(row: sqlite3.Row) -> tuple[str, ...] | None:
+        try:
+            stored = json.loads(row["roulette_types_json"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise sqlite3.IntegrityError(
+                "owned-character roulette types contain invalid JSON"
+            ) from error
+        if not isinstance(stored, list) or any(
+            not isinstance(roulette_type, str) for roulette_type in stored
+        ):
+            raise sqlite3.IntegrityError(
+                "owned-character roulette types have an invalid stored shape"
+            )
+
+        observed = row["roulette_types_observed"]
+        if observed == 1:
+            return tuple(stored)
+        if stored:
+            raise sqlite3.IntegrityError(
+                "owned-character roulette types conflict with stored presence"
+            )
+        if observed in (None, 0):
+            return None
+        raise sqlite3.IntegrityError(
+            "owned-character roulette presence has an invalid stored value"
+        )
 
     @staticmethod
     def _catalog_character(row: sqlite3.Row) -> CatalogCharacter | None:

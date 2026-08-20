@@ -248,6 +248,7 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
             keyed=None,
             unavailable=True,
             unavailable_reason="$togglewestern",
+            roulette_types=None,
         ),
         CatalogTopSearchEntry(
             character=CatalogCharacter(
@@ -260,6 +261,7 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
             keyed=None,
             unavailable=True,
             unavailable_reason=None,
+            roulette_types=None,
         ),
     )
 
@@ -272,6 +274,63 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
     assert main._format_rollability(False, None, "ernieuuu", True) == "Claimed"
     assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
     assert main._format_rollability(False, None) == "Not observed unavailable"
+
+
+def test_catalog_top_renders_unknown_roulette_distinct_from_observed_empty(
+    monkeypatch,
+) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    entries = (
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=1, name="Unknown Roulette", series="Series", gender=None, roulette=None
+            ),
+            claim_rank=1,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=True,
+            keyed=False,
+            unavailable=False,
+            unavailable_reason=None,
+            roulette_types=None,
+        ),
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=2, name="Observed Empty", series="Series", gender=None, roulette=None
+            ),
+            claim_rank=2,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=True,
+            keyed=False,
+            unavailable=False,
+            unavailable_reason=None,
+            roulette_types=(),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "ConfigService",
+        lambda: SimpleNamespace(
+            resolve_context=lambda server, account: (server, account),
+            owned_account_names=lambda _server: (),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "TopSearchService",
+        lambda: SimpleNamespace(search=lambda **_kwargs: entries),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(main.app, ["catalog", "top", "--limit", "2"])
+
+    assert result.exit_code == 0
+    assert "Unknown Roulette" in result.stdout
+    assert "Unknown" in result.stdout
+    assert "Observed Empty" in result.stdout
+    assert main.format_mudae_roulette_types(None) == "Unknown"
+    assert main.format_mudae_roulette_types(()) == "-"
 
 
 def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:

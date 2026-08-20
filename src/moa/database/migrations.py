@@ -702,6 +702,48 @@ def _apply_profile_response_presence(connection: sqlite3.Connection) -> None:
                 )
 
 
+def _apply_ranked_harem_roulette_presence(connection: sqlite3.Connection) -> None:
+    """Preserve ranked-harem roulette presence without resolving legacy empties."""
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(owned_character_observations)"
+        ).fetchall()
+    }
+    if "roulette_types_observed" not in columns:
+        connection.execute(
+            """
+            ALTER TABLE owned_character_observations
+            ADD COLUMN roulette_types_observed INTEGER
+                CHECK (roulette_types_observed IN (0, 1))
+            """
+        )
+
+    rows = connection.execute(
+        "SELECT id, roulette_types_json FROM owned_character_observations "
+        "WHERE roulette_types_observed IS NULL"
+    ).fetchall()
+    for observation_id, raw_roulette_types in rows:
+        try:
+            roulette_types = json.loads(raw_roulette_types)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise MigrationError(
+                "Cannot migrate invalid owned_character_observations roulette JSON."
+            ) from error
+        if not isinstance(roulette_types, list) or any(
+            not isinstance(roulette_type, str) for roulette_type in roulette_types
+        ):
+            raise MigrationError(
+                "Cannot migrate invalid owned_character_observations roulette shape."
+            )
+        if roulette_types:
+            connection.execute(
+                "UPDATE owned_character_observations "
+                "SET roulette_types_observed = 1 WHERE id = ?",
+                (observation_id,),
+            )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -747,5 +789,10 @@ CATALOG_MIGRATIONS = (
         version=9,
         name="profile-response-presence",
         apply=_apply_profile_response_presence,
+    ),
+    Migration(
+        version=10,
+        name="ranked-harem-roulette-presence",
+        apply=_apply_ranked_harem_roulette_presence,
     ),
 )

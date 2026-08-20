@@ -785,10 +785,14 @@ class MudaeTextParser:
                         if match.group("kakera_value")
                         else None
                     ),
-                    roulette_types=tuple(
-                        token.strip().removeprefix("$").lower()
-                        for token in (match.group("roulette_types") or "").split(",")
-                        if token.strip()
+                    roulette_types=(
+                        tuple(
+                            token.strip().removeprefix("$").lower()
+                            for token in match.group("roulette_types").split(",")
+                            if token.strip()
+                        )
+                        if match.group("roulette_types") is not None
+                        else None
                     ),
                     key_type=(match.group("key_type") or "").lower() or None,
                     key_count=(

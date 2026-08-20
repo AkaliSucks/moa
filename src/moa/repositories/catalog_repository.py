@@ -3100,6 +3100,8 @@ class CatalogRepository:
                     claim_rank INTEGER NOT NULL,
                     kakera_value INTEGER,
                     roulette_types_json TEXT NOT NULL DEFAULT '[]',
+                    roulette_types_observed INTEGER
+                        CHECK (roulette_types_observed IN (0, 1)),
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id),
                     harem_scan_id INTEGER REFERENCES harem_scans(id)

@@ -1219,7 +1219,9 @@ def test_import_mmrk_page_persists_direct_owned_evidence(tmp_path) -> None:
     ]
     assert entries[0].character is not None
     assert entries[0].character.series == "DARLING in the FRANXX"
+    assert entries[0].roulette_types is None
     assert entries[1].character is None
+    assert entries[1].roulette_types is None
 
 
 def test_import_mmrt_page_persists_roulette_types(tmp_path) -> None:

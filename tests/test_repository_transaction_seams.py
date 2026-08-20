@@ -1247,6 +1247,7 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
                     name="Missing Character",
                     claim_rank=57,
                     kakera_value=0,
+                    roulette_types=None,
                     key_type="bronze",
                     key_count=None,
                 ),
@@ -1300,8 +1301,9 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
         owned = connection.execute(
             """
             SELECT character_id, character_name, normalized_character_name,
-                   claim_rank, kakera_value, roulette_types_json, observed_at,
-                   import_event_id, harem_scan_id
+                   claim_rank, kakera_value, roulette_types_json,
+                   roulette_types_observed, observed_at, import_event_id,
+                   harem_scan_id
             FROM owned_character_observations ORDER BY id
             """
         ).fetchall()
@@ -1340,6 +1342,7 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
             2,
             1_453,
             json.dumps(["wa"]),
+            1,
             result.observed_at.isoformat(),
             result.import_event_id,
             scan.id,
@@ -1351,6 +1354,7 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
             11,
             None,
             json.dumps(["ha", "hg"]),
+            1,
             result.observed_at.isoformat(),
             result.import_event_id,
             scan.id,
@@ -1362,6 +1366,7 @@ def test_public_ranked_harem_page_import_persists_complete_scanned_page(
             57,
             0,
             json.dumps([]),
+            0,
             result.observed_at.isoformat(),
             result.import_event_id,
             scan.id,
@@ -1395,10 +1400,13 @@ def test_public_ranked_harem_page_non_scan_preserves_unscanned_evidence(tmp_path
                 RankedHaremEntry(
                     name="Unscanned Keyed Character",
                     claim_rank=9,
+                    roulette_types=None,
                     key_type="silver",
                     key_count=4,
                 ),
-                RankedHaremEntry(name="Unscanned Character", claim_rank=10),
+                RankedHaremEntry(
+                    name="Unscanned Character", claim_rank=10, roulette_types=None
+                ),
             ),
         ),
         "Server",
@@ -1539,12 +1547,14 @@ def test_public_ranked_harem_page_key_failure_restores_page_and_recovers(tmp_pat
             RankedHaremEntry(
                 name="First Character",
                 claim_rank=1,
+                roulette_types=None,
                 key_type="silver",
                 key_count=5,
             ),
             RankedHaremEntry(
                 name="Later Character",
                 claim_rank=2,
+                roulette_types=None,
                 key_type="gold",
                 key_count=7,
             ),
@@ -1711,6 +1721,7 @@ def test_public_ranked_harem_page_rejection_rolls_back_attempt(
             RankedHaremEntry(
                 name="Rejected Character",
                 claim_rank=1,
+                roulette_types=None,
                 key_type="gold",
                 key_count=7,
             ),
@@ -1859,7 +1870,11 @@ def test_ranked_harem_page_waits_for_completion_then_rejects(
         RankedHaremPage(
             page_number=1,
             page_count=1,
-            entries=(RankedHaremEntry(name="Initial Page", claim_rank=1),),
+            entries=(
+                RankedHaremEntry(
+                    name="Initial Page", claim_rank=1, roulette_types=None
+                ),
+            ),
         ),
         "Server",
         "Account",
@@ -1924,6 +1939,7 @@ def test_ranked_harem_page_waits_for_completion_then_rejects(
                         RankedHaremEntry(
                             name="Competing Page",
                             claim_rank=2,
+                            roulette_types=None,
                             key_type="silver",
                             key_count=5,
                         ),

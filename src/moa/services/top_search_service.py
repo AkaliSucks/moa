@@ -274,7 +274,9 @@ class TopSearchService:
                     key_type=key_observation.key_type if key_observation else None,
                     key_count=key_observation.key_count if key_observation else None,
                     kakera_value=kakera_value,
-                    roulette_types=(owned_observation.roulette_types if owned_observation else ()),
+                    roulette_types=(
+                        owned_observation.roulette_types if owned_observation else None
+                    ),
                 )
             )
 

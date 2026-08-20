@@ -50,6 +50,111 @@ def test_constructor_requires_explicit_path_and_does_not_bootstrap_schema(tmp_pa
     assert not database_path.exists()
 
 
+def test_ranked_harem_roulette_presence_round_trips_absent_observed_and_empty(
+    tmp_path,
+) -> None:
+    database_path, _catalog, repository = _initialized_repositories(tmp_path)
+
+    repository.import_ranked_harem_page(
+        RankedHaremPage(
+            page_number=None,
+            page_count=None,
+            entries=(
+                RankedHaremEntry(
+                    name="Absent", claim_rank=1, roulette_types=None
+                ),
+                RankedHaremEntry(
+                    name="Observed", claim_rank=2, roulette_types=("wa", "ha")
+                ),
+                RankedHaremEntry(
+                    name="Observed Empty", claim_rank=3, roulette_types=()
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "ranked harem presence",
+        "test",
+    )
+
+    with connect(database_path) as connection:
+        rows = connection.execute(
+            "SELECT character_name, roulette_types_json, roulette_types_observed "
+            "FROM owned_character_observations ORDER BY id"
+        ).fetchall()
+        assert [tuple(row) for row in rows] == [
+            ("Absent", "[]", 0),
+            ("Observed", '["wa", "ha"]', 1),
+            ("Observed Empty", "[]", 1),
+        ]
+
+    observations = {
+        observation.character_name: observation
+        for observation in repository.owned_characters("Server", "Account")
+    }
+    assert observations["Absent"].roulette_types is None
+    assert observations["Observed"].roulette_types == ("wa", "ha")
+    assert observations["Observed Empty"].roulette_types == ()
+
+
+def test_ranked_harem_legacy_empty_presence_reads_none_fail_closed(tmp_path) -> None:
+    database_path, _catalog, repository = _initialized_repositories(tmp_path)
+    repository.import_ranked_harem_page(
+        RankedHaremPage(
+            page_number=None,
+            page_count=None,
+            entries=(
+                RankedHaremEntry(
+                    name="Legacy Ambiguous", claim_rank=1, roulette_types=None
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "legacy ambiguous",
+        "test",
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE owned_character_observations "
+            "SET roulette_types_observed = NULL"
+        )
+
+    observation = repository.owned_characters("Server", "Account")[0]
+    assert observation.roulette_types is None
+
+
+@pytest.mark.parametrize("observed", [0, None])
+def test_ranked_harem_nonempty_roulette_requires_observed_presence(
+    tmp_path, observed
+) -> None:
+    database_path, _catalog, repository = _initialized_repositories(tmp_path)
+    repository.import_ranked_harem_page(
+        RankedHaremPage(
+            page_number=None,
+            page_count=None,
+            entries=(
+                RankedHaremEntry(
+                    name="Contradiction", claim_rank=1, roulette_types=("wa",)
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "contradictory presence",
+        "test",
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE owned_character_observations "
+            "SET roulette_types_observed = ?",
+            (observed,),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="conflict"):
+        repository.owned_characters("Server", "Account")
+
+
 def test_direct_repository_preserves_page_rows_matching_and_scan_lifecycle(tmp_path) -> None:
     database_path, catalog, repository = _initialized_repositories(tmp_path)
     _seed_characters(catalog)
@@ -101,9 +206,15 @@ def test_direct_repository_preserves_page_rows_matching_and_scan_lifecycle(tmp_p
             page_number=1,
             page_count=1,
             entries=(
-                RankedHaremEntry(name="Beta", claim_rank=2, kakera_value=200),
-                RankedHaremEntry(name="Alpha", claim_rank=2, kakera_value=100),
-                RankedHaremEntry(name="Missing", claim_rank=5, kakera_value=50),
+                RankedHaremEntry(
+                    name="Beta", claim_rank=2, kakera_value=200, roulette_types=None
+                ),
+                RankedHaremEntry(
+                    name="Alpha", claim_rank=2, kakera_value=100, roulette_types=None
+                ),
+                RankedHaremEntry(
+                    name="Missing", claim_rank=5, kakera_value=50, roulette_types=None
+                ),
             ),
         ),
         "Server",
@@ -180,8 +291,12 @@ def test_queries_preserve_order_divorce_exclusion_and_recent_gain_order(tmp_path
             page_number=None,
             page_count=None,
             entries=(
-                RankedHaremEntry(name="Beta", claim_rank=2, kakera_value=50),
-                RankedHaremEntry(name="Alpha", claim_rank=2, kakera_value=50),
+                RankedHaremEntry(
+                    name="Beta", claim_rank=2, kakera_value=50, roulette_types=None
+                ),
+                RankedHaremEntry(
+                    name="Alpha", claim_rank=2, kakera_value=50, roulette_types=None
+                ),
             ),
         ),
         "Server",
@@ -274,7 +389,11 @@ def test_ambiguous_name_history_does_not_cross_canonical_harem_identity(tmp_path
         RankedHaremPage(
             page_number=None,
             page_count=None,
-            entries=(RankedHaremEntry(name="Duplicate", claim_rank=30),),
+            entries=(
+                RankedHaremEntry(
+                    name="Duplicate", claim_rank=30, roulette_types=None
+                ),
+            ),
         ),
         "Server",
         "Account",
