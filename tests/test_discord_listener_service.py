@@ -67,6 +67,98 @@ from moa.services.tower_state_projection_coordinator import TowerStateProjection
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
+# Current behavior characterization.  Keep this semantic table independent of
+# the listener's imperative alias sets so it can be redirected to public
+# registry lookup once the future migration removes those private helpers.
+LISTENER_COMMAND_EXPECTATION_CASES = (
+    ("$mm", "harem"),
+    ("$mmw", "harem"),
+    ("$mmrkty+", "ranked_harem"),
+    ("$MMRopaque", "ranked_harem"),
+    ("$adl", "antidisable"),
+    ("$ADLopaque", "antidisable"),
+    ("$top", "top"),
+    ("$topo", "top"),
+    ("$topx", "topx"),
+    ("$wl", "wishlist"),
+    ("$wishlist", "wishlist"),
+    ("$persr", "personalrare"),
+    ("$personalrare", "personalrare"),
+    ("$infokl", "infokl"),
+    ("$kakeralootinfo", "infokl"),
+    ("$profile", "profile"),
+    ("$pr", "profile"),
+    ("$mp", "mudapins"),
+    ("$mudapins", "mudapins"),
+    ("$mudapin", "mudapins"),
+    ("$k", "kakera"),
+    ("$kakera", "kakera"),
+    ("$settings", "settings"),
+    ("$set", "settings"),
+    ("$help", "help"),
+    ("$tuarrange", "help"),
+    ("$ta", "help"),
+    ("$infopin", "help"),
+    ("$tuto", "tutorial"),
+    ("$tutorial", "tutorial"),
+    ("$tu", "timers"),
+    ("$timersup", "timers"),
+    ("$mu", "timers"),
+    ("$ru", "timers"),
+    ("$du", "timers"),
+    ("$ku", "timers"),
+    ("$dk", "timers"),
+    ("$dku", "timers"),
+    ("$bku", "timers"),
+    ("$rtu", "timers"),
+    ("$ohu", "timers"),
+    ("$rolls", "timers"),
+    ("$daily", "timers"),
+    ("$bonus", "bonus"),
+    ("$bonuses", "bonus"),
+    ("$oq", "sphere_result"),
+    ("$ouroquest", "sphere_result"),
+    ("$kt", "towerstate"),
+    ("$tower", "towerstate"),
+    ("$lk", "lootstate"),
+    ("$kakeraloots", "lootstate"),
+    ("$kl", "lootstate"),
+    ("$im", "im"),
+    ("$info", "im"),
+    ("$divorce", "divorce"),
+    ("$div", "divorce"),
+    ("$givek", "gift_kakera"),
+    ("$givekakera", "gift_kakera"),
+    ("$givesp", "gift_spheres"),
+    ("$givespheres", "gift_spheres"),
+    ("$give", "gift_character"),
+    ("$trade", "trade"),
+    ("$dl", "disablelist"),
+    ("$DLopaque", "disablelist"),
+    ("$m", "roll"),
+    ("$mx", "roll"),
+    ("$ma", "roll"),
+    ("$mg", "roll"),
+    ("$marry", "roll"),
+    ("$marrya", "roll"),
+    ("$marryg", "roll"),
+    ("$w", "roll"),
+    ("$wx", "roll"),
+    ("$wa", "roll"),
+    ("$wg", "roll"),
+    ("$waifu", "roll"),
+    ("$waifua", "roll"),
+    ("$waifug", "roll"),
+    ("$h", "roll"),
+    ("$hx", "roll"),
+    ("$ha", "roll"),
+    ("$hg", "roll"),
+    ("$husbando", "roll"),
+    ("$husbandoa", "roll"),
+    ("$husbandog", "roll"),
+)
+
+
 def test_extract_message_text_flattens_discord_embed_content() -> None:
     message = SimpleNamespace(
         content="",
@@ -102,6 +194,38 @@ def _diagnostic_capture(tmp_path) -> tuple[DiscordEventCaptureService, object]:
         )
     )
     return capture, output_path
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    (
+        ("$adl", True),
+        ("$ADLopaque", True),
+        ("/adl", False),
+        ("adl", False),
+    ),
+)
+def test_diagnostic_capture_current_adl_dollar_only_boundary(
+    tmp_path, content: str, expected: bool
+) -> None:
+    capture, _output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+
+    result = capture.capture_gateway_payload(
+        {
+            "t": "MESSAGE_CREATE",
+            "d": {
+                "id": "500",
+                "guild_id": "100",
+                "channel_id": "200",
+                "author": {"id": "400"},
+                "content": content,
+            },
+        }
+    )
+
+    capture.close()
+    assert result is expected
 
 
 def test_diagnostic_capture_is_opt_in_and_filters_message_creates(tmp_path) -> None:
@@ -1705,6 +1829,108 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert DiscordListenerService._expected_kind_for_command("$trade") == "trade"
 
 
+def _current_listener_expected_kind(command: str) -> str | None:
+    """Characterization seam; redirect this one helper during registry migration."""
+    return DiscordListenerService._expected_kind_for_command(command)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_kind"), LISTENER_COMMAND_EXPECTATION_CASES
+)
+def test_listener_current_command_family_matrix(
+    command: str, expected_kind: str
+) -> None:
+    assert _current_listener_expected_kind(command) == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_kind"),
+    (
+        ("$mmopaque", "harem"),
+        ("$mmrkopaque", "ranked_harem"),
+        ("/MMopaque", "harem"),
+        ("/MMRopaque", "ranked_harem"),
+    ),
+)
+def test_listener_current_tolerant_mm_suffix_and_prefix_behavior(
+    command: str, expected_kind: str
+) -> None:
+    assert _current_listener_expected_kind(command) == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_kind"),
+    (
+        ("$adlopaque", "antidisable"),
+        ("/ADLopaque", "antidisable"),
+        ("$dlopaque", "disablelist"),
+        ("/DLopaque", "disablelist"),
+    ),
+)
+def test_listener_current_tolerant_adl_and_dl_suffix_behavior(
+    command: str, expected_kind: str
+) -> None:
+    assert _current_listener_expected_kind(command) == expected_kind
+
+
+@pytest.mark.parametrize("command", ("$topk", "$topw", "$imk", "$imr"))
+def test_listener_does_not_widen_top_or_im_to_command_service_flag_forms(
+    command: str,
+) -> None:
+    assert _current_listener_expected_kind(command) is None
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_kind"),
+    (
+        ("$wa", "roll"),
+        ("/wa", "roll"),
+        ("$$wa", "roll"),
+        ("$/wa", "roll"),
+        ("/$/WA", "roll"),
+    ),
+)
+def test_listener_current_reachable_generic_prefix_edges(
+    tmp_path, content: str, expected_kind: str
+) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Test Server",
+        "user_a",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+    )
+    message = SimpleNamespace(
+        id=987,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=789),
+        author=SimpleNamespace(bot=False, id=456),
+        content=content,
+    )
+
+    asyncio.run(listener.handle_message(message))
+
+    assert listener._contexts[789].expected_kind == expected_kind
+
+
+@pytest.mark.parametrize("command", ("$marryx", "$waifux", "$husbandoe", "$m+a"))
+def test_listener_rejects_unlisted_roll_forms(command: str) -> None:
+    assert _current_listener_expected_kind(command) is None
+
+
+def test_listener_response_equivalent_commands_remain_distinct_characterization_rows() -> None:
+    assert _current_listener_expected_kind("$help") == "help"
+    assert _current_listener_expected_kind("$infopin") == "help"
+    assert _current_listener_expected_kind("$lk") == "lootstate"
+    assert _current_listener_expected_kind("$kl") == "lootstate"
+    assert _current_listener_expected_kind("$tu") == "timers"
+    assert _current_listener_expected_kind("$daily") == "timers"
+
+
 def test_listener_ignores_unsupported_commands_without_creating_context(tmp_path) -> None:
     config = ConfigService(tmp_path / "config.json")
     config.add_account(
@@ -2617,6 +2843,31 @@ def test_listener_tracks_user_authored_slash_command_message(tmp_path) -> None:
     context = listener._contexts[789]
     assert context.identity.account == "cute_beagle_91130"
     assert context.expected_kind == "roll"
+
+
+def test_listener_unknown_interaction_name_creates_no_context(tmp_path) -> None:
+    config = ConfigService(tmp_path / "config.json")
+    config.add_account(
+        "Lake Arrowhead 2025",
+        "cute_beagle_91130",
+        discord_server_id="123",
+        discord_user_id="456",
+    )
+    listener = DiscordListenerService(
+        config_service=config,
+        catalog_service=CatalogService(CatalogRepository(tmp_path / "catalog.db")),
+    )
+    interaction = SimpleNamespace(
+        guild_id=123,
+        channel_id=789,
+        user=SimpleNamespace(id=456),
+        command=SimpleNamespace(name="not_a_mudae_command"),
+        data={},
+    )
+
+    asyncio.run(listener.handle_interaction(interaction))
+
+    assert 789 not in listener._contexts
 
 
 def test_listener_reads_nested_slash_command_name_from_interaction_data() -> None:
