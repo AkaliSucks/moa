@@ -135,6 +135,8 @@ def test_command_service_current_flag_capability_and_numeric_boundaries(
         ("$im?", "Unknown Mudae flag"),
         ("$unknown", "Unsupported command"),
         ("$profile", "Unsupported command"),
+        ("$info", "Unsupported command"),
+        ("$oc", "Unsupported command"),
     ),
 )
 def test_command_service_rejects_unsupported_bases_or_flags(

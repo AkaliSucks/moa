@@ -2,14 +2,17 @@
 
 import re
 
+from moa.commands.registry import (
+    COMMAND_REGISTRY,
+    CommandCapability,
+    InvocationSource,
+)
 from moa.models.command import MudaeCommandQuery, ParsedMudaeFlag
 from moa.repositories.command_repository import CommandRepository, CommandRepositoryProtocol
 
 
 class CommandService:
     """Provide a source-accurate reference for Mudae command flags."""
-
-    _COMMANDS = ("top", "mm", "im")
 
     def __init__(self, repository: CommandRepositoryProtocol | None = None) -> None:
         self._repository = repository or CommandRepository()
@@ -37,12 +40,15 @@ class CommandService:
         )
 
     def _split_command(self, token: str) -> tuple[str, str]:
+        match = COMMAND_REGISTRY.lookup(
+            token,
+            source=InvocationSource.TEXT,
+            capability=CommandCapability.COMMAND_SERVICE,
+        )
+        if match is not None:
+            return match.matched_form, match.modifier_text
         if not token or token[0] not in "$/":
             raise ValueError("Mudae command must start with `$` or `/`.")
-        normalized = token[1:].casefold()
-        for command in sorted(self._COMMANDS, key=len, reverse=True):
-            if normalized.startswith(command):
-                return command, normalized[len(command) :]
         raise ValueError(f"Unsupported command `{token}`. Supported bases: $mm, $im, and $top.")
 
     def _parse_flags(self, flag_text: str) -> tuple[ParsedMudaeFlag, ...]:
