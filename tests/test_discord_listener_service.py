@@ -13,6 +13,7 @@ from unittest.mock import Mock
 import discord
 import pytest
 
+from moa.commands import CommandCapability, InvocationSource
 from moa.database.sqlite import connect
 from moa.models.discord_message_mapping import build_message_receive_envelope
 from moa.models.ourochest_workflow import OurochestWorkflowStatus
@@ -196,36 +197,72 @@ def _diagnostic_capture(tmp_path) -> tuple[DiscordEventCaptureService, object]:
     return capture, output_path
 
 
+CAPTURE_COMMAND_ELIGIBILITY_CASES = (
+    ("$adl", True),
+    ("$ADL", True),
+    ("$adlopaque", True),
+    ("   $ADLwhatever", True),
+    ("/adl", False),
+    ("/ADL", False),
+    ("/adlopaque", False),
+    ("adl", False),
+    ("$foo", False),
+    ("$ad", False),
+)
+
+
 @pytest.mark.parametrize(
-    ("content", "expected"),
+    "predicate_name",
     (
-        ("$adl", True),
-        ("$ADLopaque", True),
-        ("/adl", False),
-        ("adl", False),
+        "_matches_message_create",
+        "_matches_message_update",
+        "_is_selected_adl_request",
     ),
 )
-def test_diagnostic_capture_current_adl_dollar_only_boundary(
-    tmp_path, content: str, expected: bool
+@pytest.mark.parametrize("user_id", ("400", "401"))
+@pytest.mark.parametrize(("content", "expected"), CAPTURE_COMMAND_ELIGIBILITY_CASES)
+def test_diagnostic_capture_adl_command_eligibility_is_consistent(
+    tmp_path, predicate_name: str, user_id: str, content: str, expected: bool
 ) -> None:
     capture, _output_path = _diagnostic_capture(tmp_path)
-    capture._open_output()
+    data = {"author": {"id": user_id}, "content": content}
 
-    result = capture.capture_gateway_payload(
-        {
-            "t": "MESSAGE_CREATE",
-            "d": {
-                "id": "500",
-                "guild_id": "100",
-                "channel_id": "200",
-                "author": {"id": "400"},
-                "content": content,
-            },
-        }
+    assert getattr(capture, predicate_name)(data) is expected
+
+
+@pytest.mark.parametrize(
+    "predicate_name",
+    (
+        "_matches_message_create",
+        "_matches_message_update",
+        "_is_selected_adl_request",
+    ),
+)
+@pytest.mark.parametrize(
+    ("canonical_name", "expected"),
+    (("antidisable", True), ("unrelated_capture", False)),
+)
+def test_diagnostic_capture_adl_command_eligibility_uses_capture_registry(
+    tmp_path, monkeypatch, predicate_name: str, canonical_name: str, expected: bool
+) -> None:
+    calls = []
+
+    class CaptureRegistry:
+        @staticmethod
+        def lookup(command, *, source, capability):
+            calls.append((command, source, capability))
+            return SimpleNamespace(canonical_name=canonical_name)
+
+    monkeypatch.setattr(
+        "moa.services.discord_listener_service.COMMAND_REGISTRY", CaptureRegistry()
     )
+    capture, _output_path = _diagnostic_capture(tmp_path)
+    data = {"author": {"id": "400"}, "content": "   $registry-authority"}
 
-    capture.close()
-    assert result is expected
+    assert getattr(capture, predicate_name)(data) is expected
+    assert calls == [
+        ("$registry-authority", InvocationSource.TEXT, CommandCapability.CAPTURE)
+    ]
 
 
 def test_diagnostic_capture_is_opt_in_and_filters_message_creates(tmp_path) -> None:

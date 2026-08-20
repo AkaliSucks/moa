@@ -283,11 +283,8 @@ class DiscordEventCaptureService:
         author_id = self._id_from_mapping(data.get("author"), "id")
         if author_id == self._config.mudae_user_id:
             return True
-        content = data.get("content")
-        return (
-            author_id in self._config.user_ids
-            and isinstance(content, str)
-            and content.lstrip().casefold().startswith("$adl")
+        return author_id in self._config.user_ids and self._is_capture_adl_invocation(
+            data.get("content")
         )
 
     def _matches_message_update(self, data: Mapping[str, Any]) -> bool:
@@ -298,11 +295,8 @@ class DiscordEventCaptureService:
             return True
         if author_id == self._config.mudae_user_id:
             return True
-        content = data.get("content")
-        return (
-            author_id in self._config.user_ids
-            and isinstance(content, str)
-            and content.lstrip().casefold().startswith("$adl")
+        return author_id in self._config.user_ids and self._is_capture_adl_invocation(
+            data.get("content")
         )
 
     def _matches_interaction(self, data: Mapping[str, Any]) -> bool:
@@ -331,12 +325,21 @@ class DiscordEventCaptureService:
         )
 
     def _is_selected_adl_request(self, data: Mapping[str, Any]) -> bool:
-        content = data.get("content")
         return (
             self._id_from_mapping(data.get("author"), "id") in self._config.user_ids
-            and isinstance(content, str)
-            and content.lstrip().casefold().startswith("$adl")
+            and self._is_capture_adl_invocation(data.get("content"))
         )
+
+    @staticmethod
+    def _is_capture_adl_invocation(content: object) -> bool:
+        if not isinstance(content, str):
+            return False
+        match = COMMAND_REGISTRY.lookup(
+            content.lstrip(),
+            source=InvocationSource.TEXT,
+            capability=CommandCapability.CAPTURE,
+        )
+        return match is not None and match.canonical_name == "antidisable"
 
     def _record_for(
         self, event_type: str, data: Mapping[str, Any], *, text_allowed: bool
