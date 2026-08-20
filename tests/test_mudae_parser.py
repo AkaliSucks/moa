@@ -734,8 +734,8 @@ def test_parse_disablelist_reads_pool_limits_toggles_and_bundles() -> None:
     assert disablelist.disabled_wa == 41247
     assert disablelist.wa_pool_limit == 40861
     assert disablelist.ha_pool_limit == 42213
-    assert disablelist.western_disabled
-    assert disablelist.irl_disabled
+    assert disablelist.western_disabled is True
+    assert disablelist.irl_disabled is True
     assert [(entry.name, entry.disabled_count) for entry in disablelist.entries] == [
         ("Kadokawa Corporation", 13207),
         ("Mobile Games", 16769),
@@ -752,6 +752,8 @@ def test_parse_disablelist_accepts_totals_split_across_embed_lines() -> None:
     assert disablelist.total_disabled == 107529
     assert disablelist.disabled_wa == 41247
     assert disablelist.disabled_hg == 14789
+    assert disablelist.western_disabled is None
+    assert disablelist.irl_disabled is None
 
 
 def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:

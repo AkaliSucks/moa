@@ -3180,6 +3180,10 @@ class CatalogRepository:
                     ha_pool_limit INTEGER,
                     western_disabled INTEGER NOT NULL,
                     irl_disabled INTEGER NOT NULL,
+                    western_disabled_observed INTEGER
+                        CHECK (western_disabled_observed IN (0, 1)),
+                    irl_disabled_observed INTEGER
+                        CHECK (irl_disabled_observed IN (0, 1)),
                     entries_json TEXT NOT NULL,
                     observed_at TEXT NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id)

@@ -201,8 +201,8 @@ class DisableListSnapshot(MOAModel):
     disabled_hg: int
     wa_pool_limit: int | None
     ha_pool_limit: int | None
-    western_disabled: bool
-    irl_disabled: bool
+    western_disabled: bool | None
+    irl_disabled: bool | None
     entries: tuple[DisableListEntry, ...]
 
 

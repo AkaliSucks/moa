@@ -90,6 +90,43 @@ def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
     assert "Wishprotect" in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    ((True, "True"), (False, "False"), (None, "Unknown")),
+)
+def test_catalog_disablelist_renders_toggle_presence_without_inventing_false(
+    monkeypatch, value, rendered
+) -> None:
+    disablelist = SimpleNamespace(
+        account_name="Account",
+        slots_used=0,
+        slots_capacity=16,
+        total_disabled=0,
+        disabled_wa=0,
+        disabled_ha=0,
+        disabled_wg=0,
+        disabled_hg=0,
+        western_disabled=value,
+        irl_disabled=value,
+        entries=(),
+    )
+    monkeypatch.setattr(
+        main,
+        "CatalogService",
+        lambda: SimpleNamespace(disablelist=lambda *_: disablelist),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "disablelist", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert result.exit_code == 0
+    assert f"Western disabled: {rendered}" in result.stdout
+    assert f"IRL disabled: {rendered}" in result.stdout
+    assert main._format_observed_toggle(value) == rendered
+
+
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     overview = SimpleNamespace(

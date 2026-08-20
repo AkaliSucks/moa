@@ -1258,6 +1258,10 @@ def _format_optional_number(value: int | None) -> str:
     return "-" if value is None else f"{value:,}"
 
 
+def _format_observed_toggle(value: bool | None) -> str:
+    return str(value) if value is not None else "Unknown"
+
+
 def _format_rollability(
     unavailable: bool | None,
     reason: str | None,
@@ -2762,7 +2766,8 @@ def catalog_disablelist(
         f"Disabled: {disablelist.total_disabled:,}\n"
         f"$wa: {disablelist.disabled_wa:,} · $ha: {disablelist.disabled_ha:,} · "
         f"$wg: {disablelist.disabled_wg:,} · $hg: {disablelist.disabled_hg:,}\n"
-        f"Western disabled: {disablelist.western_disabled} · IRL disabled: {disablelist.irl_disabled}"
+        f"Western disabled: {_format_observed_toggle(disablelist.western_disabled)} · "
+        f"IRL disabled: {_format_observed_toggle(disablelist.irl_disabled)}"
     )
     table = Table()
     table.add_column("Disabled bundle", style="green")

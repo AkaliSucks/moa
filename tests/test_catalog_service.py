@@ -1502,8 +1502,8 @@ def test_import_disablelist_persists_account_scoped_roll_pool_state(tmp_path) ->
     assert result.account_name == "ernieuuu"
     assert disablelist is not None
     assert disablelist.disabled_wa == 400
-    assert disablelist.western_disabled
-    assert not disablelist.irl_disabled
+    assert disablelist.western_disabled is True
+    assert disablelist.irl_disabled is None
     assert [(entry.name, entry.disabled_count) for entry in disablelist.entries] == [
         ("Kadokawa Corporation", 400)
     ]

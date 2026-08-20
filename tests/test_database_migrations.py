@@ -12,6 +12,7 @@ from moa.database.migrations import (
 )
 from moa.database.sqlite import connect
 from moa.models.character import (
+    DisableListSnapshot,
     KakeralootStateSnapshot,
     ProfileSnapshot,
     RankedHaremEntry,
@@ -117,6 +118,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _make_version_5_database(database_path):
@@ -129,6 +131,7 @@ def _make_version_5_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _make_version_6_database(database_path, completed_towers_by_account):
@@ -149,6 +152,7 @@ def _make_version_6_database(database_path, completed_towers_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _make_version_7_kakeraloot_database(database_path, states_by_account):
@@ -169,6 +173,7 @@ def _make_version_7_kakeraloot_database(database_path, states_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _make_version_8_profile_database(database_path, profiles_by_account):
@@ -182,6 +187,7 @@ def _make_version_8_profile_database(database_path, profiles_by_account):
             )
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
@@ -210,6 +216,44 @@ def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
             "DROP COLUMN roulette_types_observed"
         )
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+
+
+def _make_version_10_disablelist_database(database_path, toggles_by_account):
+    catalog = CatalogRepository(database_path)
+    for account, (western_disabled, irl_disabled) in toggles_by_account.items():
+        catalog.import_disablelist(
+            DisableListSnapshot(
+                slots_used=0,
+                slots_capacity=16,
+                total_disabled=0,
+                disabled_wa=0,
+                disabled_ha=0,
+                disabled_wg=0,
+                disabled_hg=0,
+                wa_pool_limit=None,
+                ha_pool_limit=None,
+                western_disabled=western_disabled,
+                irl_disabled=irl_disabled,
+                entries=(),
+            ),
+            "Server",
+            account,
+            f"legacy {account} with opposite raw anchors: "
+            "Western animanga series are completely disabled; "
+            "IRL series are completely disabled",
+            "test",
+        )
+    with _open_database(database_path) as connection:
+        connection.execute(
+            "ALTER TABLE disablelist_observations "
+            "DROP COLUMN western_disabled_observed"
+        )
+        connection.execute(
+            "ALTER TABLE disablelist_observations "
+            "DROP COLUMN irl_disabled_observed"
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
 
 
 def _insert_aggregate(
@@ -475,6 +519,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
+        (11, "disablelist-toggle-presence"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -676,6 +721,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
+        (11, "disablelist-toggle-presence"),
     ]
 
 
@@ -775,7 +821,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 11))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 12))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -1130,6 +1176,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
+        (11, "disablelist-toggle-presence"),
     ]
 
 
@@ -1218,6 +1265,7 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         connection.execute("DELETE FROM schema_migrations WHERE version = 8")
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1887,6 +1935,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
+        (11, "disablelist-toggle-presence"),
     ]
 
 
@@ -1917,6 +1966,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (8, "kakeraloot-state-value-presence"),
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
+        (11, "disablelist-toggle-presence"),
     ]
 
 
@@ -2872,6 +2922,244 @@ def test_fresh_and_migrated_ranked_harem_presence_schema_are_equivalent(
         ).fetchall() == before == [("[]", 0), ('["ha"]', 1)]
 
 
+def test_disablelist_toggle_presence_migration_preserves_legacy_ambiguity(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_10_disablelist_database(
+        database_path,
+        {
+            "western-true": (True, False),
+            "western-false": (False, True),
+            "irl-true": (False, True),
+            "irl-false": (True, False),
+            "mixed": (True, False),
+        },
+    )
+
+    with _open_database(database_path) as connection:
+        before_values = connection.execute(
+            "SELECT western_disabled, irl_disabled "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall()
+        assert {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(disablelist_observations)"
+            )
+        }.isdisjoint(
+            {"western_disabled_observed", "irl_disabled_observed"}
+        )
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        rows = connection.execute(
+            """
+            SELECT account_contexts.name, western_disabled,
+                   western_disabled_observed, irl_disabled,
+                   irl_disabled_observed
+            FROM disablelist_observations
+            JOIN account_contexts
+              ON account_contexts.id =
+                 disablelist_observations.account_context_id
+            ORDER BY disablelist_observations.id
+            """
+        ).fetchall()
+        assert rows == [
+            ("western-true", 1, 1, 0, None),
+            ("western-false", 0, None, 1, 1),
+            ("irl-true", 0, None, 1, 1),
+            ("irl-false", 1, 1, 0, None),
+            ("mixed", 1, 1, 0, None),
+        ]
+        assert [(row[1], row[3]) for row in rows] == before_values
+        assert connection.execute(
+            "SELECT COUNT(*) FROM disablelist_observations "
+            "WHERE western_disabled_observed = 0 "
+            "OR irl_disabled_observed = 0"
+        ).fetchone()[0] == 0
+
+    catalog = CatalogRepository(database_path)
+    assert catalog.disablelist("Server", "western-true").western_disabled is True
+    assert catalog.disablelist("Server", "western-false").western_disabled is None
+    assert catalog.disablelist("Server", "irl-true").irl_disabled is True
+    assert catalog.disablelist("Server", "irl-false").irl_disabled is None
+
+
+def test_failed_disablelist_toggle_presence_migration_rolls_back_and_retries(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_10_disablelist_database(
+        database_path,
+        {"historical-false": (False, False), "historical-true": (True, True)},
+    )
+
+    def fail_after_disablelist_presence(connection):
+        CATALOG_MIGRATIONS[10].apply(connection)
+        raise RuntimeError("stop after disablelist presence")
+
+    failing_migrations = CATALOG_MIGRATIONS[:10] + (
+        Migration(
+            11,
+            "failing-disablelist-presence",
+            fail_after_disablelist_presence,
+        ),
+    )
+    with _open_database(database_path) as connection:
+        before_values = connection.execute(
+            "SELECT western_disabled, irl_disabled "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall()
+        with pytest.raises(RuntimeError, match="stop after disablelist presence"):
+            run_migrations(connection, failing_migrations)
+        assert {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(disablelist_observations)"
+            )
+        }.isdisjoint(
+            {"western_disabled_observed", "irl_disabled_observed"}
+        )
+        assert connection.execute(
+            "SELECT version FROM schema_migrations ORDER BY version"
+        ).fetchall() == [(version,) for version in range(1, 11)]
+        assert connection.execute(
+            "SELECT western_disabled, irl_disabled "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall() == before_values
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT western_disabled, western_disabled_observed, "
+            "irl_disabled, irl_disabled_observed "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall() == [(0, None, 0, None), (1, 1, 1, 1)]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 11"
+        ).fetchone()[0] == 1
+
+
+def test_fresh_and_migrated_disablelist_presence_schema_are_equivalent_and_idempotent(
+    tmp_path,
+) -> None:
+    migrated_path = tmp_path / "migrated.db"
+    _make_version_10_disablelist_database(
+        migrated_path,
+        {"legacy-false": (False, False), "legacy-true": (True, True)},
+    )
+    CatalogRepository(migrated_path)
+
+    fresh_path = tmp_path / "fresh.db"
+    fresh_catalog = CatalogRepository(fresh_path)
+    for account, toggles in {
+        "fresh-none": (None, None),
+        "fresh-false": (False, False),
+        "fresh-true": (True, True),
+    }.items():
+        fresh_catalog.import_disablelist(
+            DisableListSnapshot(
+                slots_used=0,
+                slots_capacity=16,
+                total_disabled=0,
+                disabled_wa=0,
+                disabled_ha=0,
+                disabled_wg=0,
+                disabled_hg=0,
+                wa_pool_limit=None,
+                ha_pool_limit=None,
+                western_disabled=toggles[0],
+                irl_disabled=toggles[1],
+                entries=(),
+            ),
+            "Server",
+            account,
+            "fresh disablelist",
+            "test",
+        )
+
+    columns_by_path = {}
+    for database_path in (migrated_path, fresh_path):
+        with _open_database(database_path) as connection:
+            columns_by_path[database_path] = {
+                row[1]: tuple(row[1:5])
+                for row in connection.execute(
+                    "PRAGMA table_info(disablelist_observations)"
+                )
+                if row[1] in {
+                    "western_disabled_observed",
+                    "irl_disabled_observed",
+                }
+            }
+            for field_name in (
+                "western_disabled_observed",
+                "irl_disabled_observed",
+            ):
+                with pytest.raises(sqlite3.IntegrityError):
+                    connection.execute(
+                        f"UPDATE disablelist_observations SET {field_name} = 2"
+                    )
+
+    expected_columns = {
+        "western_disabled_observed": (
+            "western_disabled_observed",
+            "INTEGER",
+            0,
+            None,
+        ),
+        "irl_disabled_observed": (
+            "irl_disabled_observed",
+            "INTEGER",
+            0,
+            None,
+        ),
+    }
+    assert columns_by_path[migrated_path] == columns_by_path[fresh_path] == expected_columns
+
+    with _open_database(fresh_path) as connection:
+        before = connection.execute(
+            "SELECT western_disabled, western_disabled_observed, "
+            "irl_disabled, irl_disabled_observed "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall()
+        CATALOG_MIGRATIONS[10].apply(connection)
+        assert connection.execute(
+            "SELECT western_disabled, western_disabled_observed, "
+            "irl_disabled, irl_disabled_observed "
+            "FROM disablelist_observations ORDER BY id"
+        ).fetchall() == before == [(0, 0, 0, 0), (0, 1, 0, 1), (1, 1, 1, 1)]
+
+    before_reinitialize = {}
+    for database_path in (migrated_path, fresh_path):
+        with _open_database(database_path) as connection:
+            before_reinitialize[database_path] = connection.execute(
+                "SELECT western_disabled, western_disabled_observed, "
+                "irl_disabled, irl_disabled_observed "
+                "FROM disablelist_observations ORDER BY id"
+            ).fetchall()
+
+    CatalogRepository(migrated_path)
+    CatalogRepository(fresh_path)
+    for database_path in (migrated_path, fresh_path):
+        assert _migration_rows(database_path).count(
+            (11, "disablelist-toggle-presence")
+        ) == 1
+        with _open_database(database_path) as connection:
+            assert connection.execute(
+                "SELECT western_disabled, western_disabled_observed, "
+                "irl_disabled, irl_disabled_observed "
+                "FROM disablelist_observations ORDER BY id"
+            ).fetchall() == before_reinitialize[database_path]
+            column_names = [
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(disablelist_observations)"
+                )
+            ]
+            assert column_names.count("western_disabled_observed") == 1
+            assert column_names.count("irl_disabled_observed") == 1
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -2880,11 +3168,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (11, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (12, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(11,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(12,)]

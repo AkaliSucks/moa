@@ -7934,7 +7934,8 @@ def test_public_disablelist_wrapper_preserves_result_and_stored_values(tmp_path)
             """
             SELECT account_context_id, slots_used, slots_capacity, total_disabled, disabled_wa,
                    disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit,
-                   western_disabled, irl_disabled, entries_json, observed_at, import_event_id
+                   western_disabled, irl_disabled, western_disabled_observed,
+                   irl_disabled_observed, entries_json, observed_at, import_event_id
             FROM disablelist_observations WHERE import_event_id = ?
             """,
             (result.import_event_id,),
@@ -7943,7 +7944,7 @@ def test_public_disablelist_wrapper_preserves_result_and_stored_values(tmp_path)
         server = connection.execute("SELECT id, name, normalized_name FROM server_contexts").fetchone()
         assert tuple(event) == ("disablelist", "discord", result.observed_at.isoformat(), raw_message)
         assert observation["account_context_id"] == account["id"]
-        assert tuple(observation)[1:12] == (
+        assert tuple(observation)[1:14] == (
             DISABLELIST.slots_used,
             DISABLELIST.slots_capacity,
             DISABLELIST.total_disabled,
@@ -7955,6 +7956,8 @@ def test_public_disablelist_wrapper_preserves_result_and_stored_values(tmp_path)
             DISABLELIST.ha_pool_limit,
             DISABLELIST.western_disabled,
             DISABLELIST.irl_disabled,
+            1,
+            1,
         )
         assert observation["entries_json"] == json.dumps(
             [entry.model_dump() for entry in DISABLELIST.entries]
@@ -8208,7 +8211,8 @@ def test_disablelist_helper_commit_preserves_all_values_and_returned_ids(tmp_pat
             """
             SELECT id, slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha,
                    disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled,
-                   irl_disabled, entries_json, observed_at, import_event_id
+                   irl_disabled, western_disabled_observed, irl_disabled_observed,
+                   entries_json, observed_at, import_event_id
             FROM disablelist_observations WHERE id = ?
             """,
             (imported.disablelist_observation_id,),
@@ -8221,7 +8225,7 @@ def test_disablelist_helper_commit_preserves_all_values_and_returned_ids(tmp_pat
             OBSERVED_AT.isoformat(),
         )
         assert observation["id"] == imported.disablelist_observation_id
-        assert tuple(observation)[1:12] == (
+        assert tuple(observation)[1:14] == (
             DISABLELIST.slots_used,
             DISABLELIST.slots_capacity,
             DISABLELIST.total_disabled,
@@ -8233,6 +8237,8 @@ def test_disablelist_helper_commit_preserves_all_values_and_returned_ids(tmp_pat
             DISABLELIST.ha_pool_limit,
             DISABLELIST.western_disabled,
             DISABLELIST.irl_disabled,
+            1,
+            1,
         )
         assert observation["entries_json"] == json.dumps(
             [entry.model_dump() for entry in DISABLELIST.entries]
@@ -8307,13 +8313,14 @@ def test_disablelist_helper_reuses_contexts_and_preserves_boundary_values(tmp_pa
         row = connection.execute(
             """
             SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg,
-                   disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, entries_json
+                   disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled,
+                   western_disabled_observed, irl_disabled_observed, entries_json
             FROM disablelist_observations WHERE id = ?
             """,
             (imported.disablelist_observation_id,),
         ).fetchone()
         assert tuple(current) == tuple(existing)
-        assert tuple(row) == (0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, "[]")
+        assert tuple(row) == (0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 1, 1, "[]")
         connection.rollback()
 
     with connect(database_path) as connection:

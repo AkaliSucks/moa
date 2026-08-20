@@ -196,7 +196,7 @@ class DisableListProjectionCoordinator:
 
     def _validate_disablelist_target(self, connection: sqlite3.Connection, observation_id: int, import_event_id: int, projection_slot: str, state: DisableListSnapshot) -> None:
         row = connection.execute(
-            """SELECT d.import_event_id, d.slots_used, d.slots_capacity, d.total_disabled, d.disabled_wa, d.disabled_ha, d.disabled_wg, d.disabled_hg, d.wa_pool_limit, d.ha_pool_limit, d.western_disabled, d.irl_disabled, d.entries_json, ac.normalized_name AS account, sc.normalized_name AS server
+            """SELECT d.import_event_id, d.slots_used, d.slots_capacity, d.total_disabled, d.disabled_wa, d.disabled_ha, d.disabled_wg, d.disabled_hg, d.wa_pool_limit, d.ha_pool_limit, d.western_disabled, d.irl_disabled, d.western_disabled_observed, d.irl_disabled_observed, d.entries_json, ac.normalized_name AS account, sc.normalized_name AS server
                FROM disablelist_observations AS d JOIN account_contexts AS ac ON ac.id = d.account_context_id JOIN server_contexts AS sc ON sc.id = ac.server_context_id WHERE d.id = ?""",
             (observation_id,),
         ).fetchone()
@@ -211,12 +211,33 @@ class DisableListProjectionCoordinator:
             raise DisableListProjectionTargetError("disablelist projection slot is not valid JSON") from error
         if not isinstance(slot, dict) or set(slot) != {"account", "server"} or row["server"] != slot["server"] or row["account"] != slot["account"]:
             raise DisableListProjectionTargetError("disablelist observation has mismatched scope")
-        fields = ("slots_used", "slots_capacity", "total_disabled", "disabled_wa", "disabled_ha", "disabled_wg", "disabled_hg", "wa_pool_limit", "ha_pool_limit", "western_disabled", "irl_disabled")
+        fields = ("slots_used", "slots_capacity", "total_disabled", "disabled_wa", "disabled_ha", "disabled_wg", "disabled_hg", "wa_pool_limit", "ha_pool_limit")
         for field in fields:
             if row[field] != getattr(state, field):
                 raise DisableListProjectionTargetError(f"disablelist observation has mismatched {field}")
+        for field in ("western_disabled", "irl_disabled"):
+            if not self._toggle_matches(row, field, getattr(state, field)):
+                raise DisableListProjectionTargetError(
+                    f"disablelist observation has mismatched {field}"
+                )
         if row["entries_json"] != json.dumps([entry.model_dump() for entry in state.entries]):
             raise DisableListProjectionTargetError("disablelist observation has mismatched entries")
+
+    @staticmethod
+    def _toggle_matches(
+        row: sqlite3.Row, field_name: str, incoming: bool | None
+    ) -> bool:
+        value = row[field_name]
+        observed = row[f"{field_name}_observed"]
+        if value not in (0, 1):
+            return False
+        if observed == 1:
+            return incoming is not None and value == int(incoming)
+        if observed == 0:
+            return value == 0 and incoming is None
+        if observed is None:
+            return value == 0 and incoming in (None, False)
+        return False
 
     @staticmethod
     def _disablelist_slot(server: str, account: str) -> str:

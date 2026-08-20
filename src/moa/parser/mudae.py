@@ -984,8 +984,23 @@ class MudaeTextParser:
             disabled_hg=self._number(totals.group("hg")),
             wa_pool_limit=limits.get("wa"),
             ha_pool_limit=limits.get("ha"),
-            western_disabled=any("western animanga series are completely disabled" in line.casefold() for line in lines),
-            irl_disabled=any("irl series are completely disabled" in line.casefold() for line in lines),
+            western_disabled=(
+                True
+                if any(
+                    "western animanga series are completely disabled"
+                    in line.casefold()
+                    for line in lines
+                )
+                else None
+            ),
+            irl_disabled=(
+                True
+                if any(
+                    "irl series are completely disabled" in line.casefold()
+                    for line in lines
+                )
+                else None
+            ),
             entries=tuple(entries),
         )
 

@@ -236,8 +236,8 @@ EMPTY_DISABLELIST = DisableListSnapshot(
     disabled_hg=0,
     wa_pool_limit=None,
     ha_pool_limit=None,
-    western_disabled=False,
-    irl_disabled=False,
+    western_disabled=None,
+    irl_disabled=None,
     entries=(),
 )
 ZERO_DISABLELIST = DisableListSnapshot(

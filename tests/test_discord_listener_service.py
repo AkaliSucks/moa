@@ -9366,7 +9366,8 @@ def test_listener_first_durable_disablelist_uses_coordinator_owned_success(tmp_p
         observation = connection.execute(
             "SELECT id, slots_used, slots_capacity, total_disabled, disabled_wa, "
             "disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, "
-            "western_disabled, irl_disabled, entries_json, import_event_id "
+            "western_disabled, irl_disabled, western_disabled_observed, "
+            "irl_disabled_observed, entries_json, import_event_id "
             "FROM disablelist_observations"
         ).fetchone()
         link = connection.execute(
@@ -9383,6 +9384,8 @@ def test_listener_first_durable_disablelist_uses_coordinator_owned_success(tmp_p
         100,
         0,
         2,
+        1,
+        1,
         1,
         1,
         json.dumps(
@@ -9732,16 +9735,16 @@ def test_listener_malformed_disablelist_does_not_import(tmp_path) -> None:
             "Pool limit reached: 0 $wa\n"
             "Pool limit reached: 0 $ha\n"
             "Zero Bundle (0)",
-            (0, 16, 0, 0, 0, 0, 0, 0, 0, False, False, (("Zero Bundle", 0),)),
+            (0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, (("Zero Bundle", 0),)),
         ),
         (
             "ernieuuu's Disablelist (0/0)\n"
             "0 disabled (0 $wa, 0 $ha, 0 $wg, 0 $hg)",
-            (0, 0, 0, 0, 0, 0, 0, None, None, False, False, ()),
+            (0, 0, 0, 0, 0, 0, 0, None, None, 0, 0, 0, 0, ()),
         ),
     ),
 )
-def test_listener_durable_disablelist_preserves_zero_null_false_and_empty_boundaries(
+def test_listener_durable_disablelist_preserves_zero_null_unknown_and_empty_boundaries(
     tmp_path, content, expected
 ) -> None:
     listener, _repository, database_path = _durable_listener(tmp_path)
@@ -9751,11 +9754,12 @@ def test_listener_durable_disablelist_preserves_zero_null_false_and_empty_bounda
         row = connection.execute(
             "SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, "
             "disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, "
-            "irl_disabled, entries_json FROM disablelist_observations"
+            "irl_disabled, western_disabled_observed, irl_disabled_observed, entries_json "
+            "FROM disablelist_observations"
         ).fetchone()
-    assert tuple(row[:11]) == expected[:11]
-    assert json.loads(row[11]) == [
-        {"name": name, "disabled_count": count} for name, count in expected[11]
+    assert tuple(row[:13]) == expected[:13]
+    assert json.loads(row[13]) == [
+        {"name": name, "disabled_count": count} for name, count in expected[13]
     ]
 
 

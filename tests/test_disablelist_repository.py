@@ -155,6 +155,65 @@ def test_boundary_values_and_empty_entries_round_trip_exactly(tmp_path) -> None:
     assert observation.irl_disabled is False
 
 
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+@pytest.mark.parametrize(
+    ("incoming", "stored_value", "stored_observed"),
+    ((None, 0, 0), (False, 0, 1), (True, 1, 1)),
+)
+def test_toggle_presence_distinguishes_none_false_and_true(
+    tmp_path, field_name, incoming, stored_value, stored_observed
+) -> None:
+    database_path, repository = _repository(tmp_path)
+    state = BOUNDARY.model_copy(update={field_name: incoming})
+
+    repository.import_disablelist(state, "Server", "Account", "toggle payload", "test")
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            f"SELECT {field_name}, {field_name}_observed "
+            "FROM disablelist_observations"
+        ).fetchone()
+    assert tuple(row) == (stored_value, stored_observed)
+    observation = repository.disablelist("Server", "Account")
+    assert observation is not None
+    assert getattr(observation, field_name) is incoming
+
+
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+def test_historical_false_toggle_reads_none_fail_closed(tmp_path, field_name) -> None:
+    database_path, repository = _repository(tmp_path)
+    repository.import_disablelist(
+        BOUNDARY, "Server", "Account", "historical payload", "test"
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE disablelist_observations SET {field_name}_observed = NULL"
+        )
+
+    observation = repository.disablelist("Server", "Account")
+
+    assert observation is not None
+    assert getattr(observation, field_name) is None
+
+
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+@pytest.mark.parametrize("observed", (0, None))
+def test_true_toggle_requires_observed_presence(
+    tmp_path, field_name, observed
+) -> None:
+    database_path, repository = _repository(tmp_path)
+    state = BOUNDARY.model_copy(update={field_name: True})
+    repository.import_disablelist(state, "Server", "Account", "invalid payload", "test")
+    with connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE disablelist_observations SET {field_name}_observed = ?",
+            (observed,),
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match=f"inconsistent {field_name} presence"):
+        repository.disablelist("Server", "Account")
+
+
 def test_failed_import_rolls_back_and_same_database_recovers(tmp_path) -> None:
     database_path, repository = _repository(tmp_path)
     with connect(database_path) as connection:

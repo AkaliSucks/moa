@@ -87,8 +87,9 @@ class DisableListRepository:
                 INSERT INTO disablelist_observations (
                     account_context_id, slots_used, slots_capacity, total_disabled, disabled_wa,
                     disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit,
-                    western_disabled, irl_disabled, entries_json, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    western_disabled, irl_disabled, western_disabled_observed,
+                    irl_disabled_observed, entries_json, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
@@ -101,8 +102,10 @@ class DisableListRepository:
                     state.disabled_hg,
                     state.wa_pool_limit,
                     state.ha_pool_limit,
-                    state.western_disabled,
-                    state.irl_disabled,
+                    int(state.western_disabled) if state.western_disabled is not None else 0,
+                    int(state.irl_disabled) if state.irl_disabled is not None else 0,
+                    int(state.western_disabled is not None),
+                    int(state.irl_disabled is not None),
                     json.dumps([entry.model_dump() for entry in state.entries]),
                     observed_at.isoformat(),
                     import_event_id,
@@ -147,8 +150,28 @@ class DisableListRepository:
             disabled_hg=row["disabled_hg"],
             wa_pool_limit=row["wa_pool_limit"],
             ha_pool_limit=row["ha_pool_limit"],
-            western_disabled=bool(row["western_disabled"]),
-            irl_disabled=bool(row["irl_disabled"]),
+            western_disabled=self._toggle_from_row(row, "western_disabled"),
+            irl_disabled=self._toggle_from_row(row, "irl_disabled"),
             entries=tuple(json.loads(row["entries_json"])),
             observed_at=datetime.fromisoformat(row["observed_at"]),
+        )
+
+    @staticmethod
+    def _toggle_from_row(row: sqlite3.Row, field_name: str) -> bool | None:
+        value = row[field_name]
+        observed = row[f"{field_name}_observed"]
+        if value not in (0, 1):
+            raise sqlite3.IntegrityError(
+                f"disablelist_observations has invalid {field_name} value"
+            )
+        if observed == 1:
+            return bool(value)
+        if value == 0 and observed in (0, None):
+            return None
+        if observed not in (0, 1, None):
+            raise sqlite3.IntegrityError(
+                f"disablelist_observations has invalid {field_name} presence"
+            )
+        raise sqlite3.IntegrityError(
+            f"disablelist_observations has inconsistent {field_name} presence"
         )

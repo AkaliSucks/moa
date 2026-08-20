@@ -744,6 +744,30 @@ def _apply_ranked_harem_roulette_presence(connection: sqlite3.Connection) -> Non
             )
 
 
+def _apply_disablelist_toggle_presence(connection: sqlite3.Connection) -> None:
+    """Preserve independent disablelist toggle presence and legacy ambiguity."""
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(disablelist_observations)"
+        ).fetchall()
+    }
+    for field_name in ("western_disabled", "irl_disabled"):
+        observed_column = f"{field_name}_observed"
+        if observed_column not in columns:
+            connection.execute(
+                f"""
+                ALTER TABLE disablelist_observations
+                ADD COLUMN {observed_column} INTEGER
+                    CHECK ({observed_column} IN (0, 1))
+                """
+            )
+        connection.execute(
+            f"UPDATE disablelist_observations SET {observed_column} = 1 "
+            f"WHERE {field_name} = 1 AND {observed_column} IS NULL"
+        )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -794,5 +818,10 @@ CATALOG_MIGRATIONS = (
         version=10,
         name="ranked-harem-roulette-presence",
         apply=_apply_ranked_harem_roulette_presence,
+    ),
+    Migration(
+        version=11,
+        name="disablelist-toggle-presence",
+        apply=_apply_disablelist_toggle_presence,
     ),
 )

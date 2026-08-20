@@ -87,10 +87,10 @@ def test_first_processing_is_atomic_and_preserves_disablelist_snapshot(tmp_path)
     with connect(path) as connection:
         assert _counts(connection) == {key: 1 for key in _counts(connection)}
         event = connection.execute("SELECT kind, source, raw_message, observed_at FROM import_events WHERE id = ?", (result.import_event_id,)).fetchone()
-        row = connection.execute("SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, entries_json, import_event_id FROM disablelist_observations WHERE id = ?", (result.disablelist_observation_id,)).fetchone()
+        row = connection.execute("SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, western_disabled_observed, irl_disabled_observed, entries_json, import_event_id FROM disablelist_observations WHERE id = ?", (result.disablelist_observation_id,)).fetchone()
         link = connection.execute("SELECT projection_kind, projection_slot, projection_table, projection_row_id, state FROM discord_projection_links").fetchone()
         assert tuple(event) == ("disablelist", "discord", "disablelist payload", OBSERVED_AT.isoformat())
-        assert tuple(row[:11]) == (13, 16, 107_529, 41_247, 42_438, 20_996, 14_789, 40_861, 42_213, 1, 0)
+        assert tuple(row[:13]) == (13, 16, 107_529, 41_247, 42_438, 20_996, 14_789, 40_861, 42_213, 1, 0, 1, 1)
         assert row["entries_json"] == json.dumps([entry.model_dump() for entry in STATE.entries])
         assert row["import_event_id"] == result.import_event_id
         assert tuple(link) == ("catalog.disablelist", '{"account":"account","server":"server"}', "disablelist_observations", result.disablelist_observation_id, "completed")
@@ -105,8 +105,8 @@ def test_boundary_state_and_normalized_slot_preserve_zero_null_false_and_empty_e
     _attribute(discord, source_event_id)
     result = _coordinate(coordinator, source_event_id, attempt_id, BOUNDARY)
     with connect(path) as connection:
-        row = connection.execute("SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, entries_json FROM disablelist_observations WHERE id = ?", (result.disablelist_observation_id,)).fetchone()
-        assert tuple(row) == (0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, "[]")
+        row = connection.execute("SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, western_disabled_observed, irl_disabled_observed, entries_json FROM disablelist_observations WHERE id = ?", (result.disablelist_observation_id,)).fetchone()
+        assert tuple(row) == (0, 0, 0, 0, 0, 0, 0, 0, None, 0, 0, 1, 1, "[]")
 
 
 def test_failure_rolls_back_and_retry_creates_one_projection(tmp_path, monkeypatch):
@@ -178,6 +178,93 @@ def test_replay_reconstructs_without_inserts(tmp_path):
                 (source_event_id,),
             ).fetchone()
         ) == before_link
+
+
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+@pytest.mark.parametrize(
+    ("incoming", "stored_value", "stored_observed"),
+    ((None, 0, 0), (False, 0, 1), (True, 1, 1)),
+)
+def test_new_toggle_targets_validate_value_and_presence_exactly(
+    tmp_path, field_name, incoming, stored_value, stored_observed
+):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _attribute(discord, source_event_id)
+    state = BOUNDARY.model_copy(update={field_name: incoming})
+
+    result = _coordinate(coordinator, source_event_id, attempt_id, state)
+    replay = _coordinate(coordinator, source_event_id, None, state)
+
+    assert replay.replay_skipped is True
+    with connect(path) as connection:
+        row = connection.execute(
+            f"SELECT {field_name}, {field_name}_observed "
+            "FROM disablelist_observations WHERE id = ?",
+            (result.disablelist_observation_id,),
+        ).fetchone()
+    assert tuple(row) == (stored_value, stored_observed)
+
+
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+@pytest.mark.parametrize(
+    ("stored", "incoming"),
+    ((None, False), (False, None), (True, False), (True, None)),
+)
+def test_new_toggle_target_presence_mismatch_fails_replay(
+    tmp_path, field_name, stored, incoming
+):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _attribute(discord, source_event_id)
+    stored_state = BOUNDARY.model_copy(update={field_name: stored})
+    _coordinate(coordinator, source_event_id, attempt_id, stored_state)
+
+    with pytest.raises(DisableListProjectionTargetError):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            stored_state.model_copy(update={field_name: incoming}),
+        )
+
+    with connect(path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM disablelist_observations"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("field_name", ("western_disabled", "irl_disabled"))
+@pytest.mark.parametrize("incoming", (None, False, True))
+def test_legacy_false_toggle_replay_is_ambiguity_safe_and_non_mutating(
+    tmp_path, field_name, incoming
+):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _attribute(discord, source_event_id)
+    result = _coordinate(coordinator, source_event_id, attempt_id, BOUNDARY)
+    with connect(path) as connection:
+        connection.execute(
+            f"UPDATE disablelist_observations SET {field_name}_observed = NULL "
+            "WHERE id = ?",
+            (result.disablelist_observation_id,),
+        )
+
+    incoming_state = BOUNDARY.model_copy(update={field_name: incoming})
+    if incoming is True:
+        with pytest.raises(DisableListProjectionTargetError):
+            _coordinate(coordinator, source_event_id, None, incoming_state)
+    else:
+        replay = _coordinate(coordinator, source_event_id, None, incoming_state)
+        assert replay.replay_skipped is True
+
+    with connect(path) as connection:
+        row = connection.execute(
+            f"SELECT {field_name}, {field_name}_observed "
+            "FROM disablelist_observations WHERE id = ?",
+            (result.disablelist_observation_id,),
+        ).fetchone()
+    assert tuple(row) == (0, None)
 
 
 @pytest.mark.parametrize("mutation", ("scalar", "limit", "boolean", "entries", "target_table", "target_row", "legacy_kind"))
