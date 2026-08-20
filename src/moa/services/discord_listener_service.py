@@ -18,6 +18,12 @@ from typing import Any, Literal, Mapping
 
 import discord
 
+from moa.commands import (
+    COMMAND_REGISTRY,
+    CommandCapability,
+    CommandMatch,
+    InvocationSource,
+)
 from moa.core.config import ConfigAccount, ConfigService
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
@@ -675,29 +681,6 @@ class DiscordListenerService:
         "ranked_harem": "owned",
         "antidisable": "antidisable",
     }
-    _ROLL_COMMANDS = {
-        "m",
-        "mx",
-        "marry",
-        "ma",
-        "marrya",
-        "mg",
-        "marryg",
-        "w",
-        "wx",
-        "waifu",
-        "wa",
-        "waifua",
-        "wg",
-        "waifug",
-        "h",
-        "hx",
-        "husbando",
-        "ha",
-        "husbandoa",
-        "hg",
-        "husbandog",
-    }
     _DURABLE_IMPORT_KINDS = {
         "antidisable",
         "bonus",
@@ -934,7 +917,14 @@ class DiscordListenerService:
             if self._track_transaction_input(message, identity, content):
                 return
             return
-        if self._ourochest_command_kind(command) is not None:
+        command_source = (
+            InvocationSource.TEXT
+            if content.startswith(("$", "/"))
+            else InvocationSource.INTERACTION_NAME
+        )
+        command_match = self._listener_command_match(command, command_source)
+        workflow_match = self._direct_workflow_command_match(command, command_source)
+        if workflow_match is not None and workflow_match.spec.workflow_key == "ourochest":
             guild_id = getattr(message.guild, "id", None)
             channel_id = getattr(message.channel, "id", None)
             user_id = getattr(message.author, "id", None)
@@ -954,7 +944,7 @@ class DiscordListenerService:
                 return
             self._ourochest_workflow.create_pending(guild_id, channel_id, user_id)
             return
-        expected_kind = self._expected_kind_for_command(command)
+        expected_kind = command_match.expected_response if command_match is not None else None
         if expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord command %s from account %s on server %s",
@@ -971,17 +961,24 @@ class DiscordListenerService:
             expected_kind=expected_kind,
             personal_rare_value=(
                 self._personal_rare_command_value(content)
-                if expected_kind == "personalrare"
+                if command_match is not None
+                and command_match.canonical_name == "personalrare"
                 else None
             ),
             personal_rare_argument_supplied=(
                 self._personal_rare_argument_supplied(content)
-                if expected_kind == "personalrare" and content
+                if command_match is not None
+                and command_match.canonical_name == "personalrare"
+                and content
                 else False
             ),
             evidence_source="command_author",
         )
-        if expected_kind == "antidisable" and self._discord_message_repository is not None:
+        if (
+            command_match is not None
+            and command_match.spec.workflow_key == "antidisable_scan"
+            and self._discord_message_repository is not None
+        ):
             durable_context = self._start_antidisable_workflow(message, context, content)
             if durable_context is None:
                 return
@@ -1016,7 +1013,12 @@ class DiscordListenerService:
         if identity is None:
             return
         command = self._interaction_command_name(interaction)
-        expected_kind = self._expected_kind_for_command(command or "")
+        command_match = (
+            self._listener_command_match(command, InvocationSource.INTERACTION_NAME)
+            if command
+            else None
+        )
+        expected_kind = command_match.expected_response if command_match is not None else None
         if expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord interaction /%s from account %s on server %s",
@@ -2967,7 +2969,15 @@ class DiscordListenerService:
                 identity.account,
             )
             return context
-        expected_kind = self._expected_kind_for_command(command_name) if command_name else None
+        command_match = (
+            self._listener_command_match(
+                command_name,
+                InvocationSource.INTERACTION_NAME,
+            )
+            if command_name
+            else None
+        )
+        expected_kind = command_match.expected_response if command_match is not None else None
         if command_name and expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord interaction /%s from account %s on server %s",
@@ -3303,88 +3313,28 @@ class DiscordListenerService:
         raise MudaeParseError(f"Unsupported listener scan kind: {kind}")
 
     @staticmethod
-    def _expected_kind_for_command(command: str) -> str | None:
-        normalized = command.casefold().lstrip("$/")
-        if normalized.startswith("mmr"):
-            return "ranked_harem"
-        if normalized.startswith("mm"):
-            return "harem"
-        if normalized.startswith("adl"):
-            return "antidisable"
-        if normalized == "topx":
-            return "topx"
-        if normalized in {"top", "topo"}:
-            return "top"
-        if normalized in {"wl", "wishlist"}:
-            return "wishlist"
-        if normalized in {"persr", "personalrare"}:
-            return "personalrare"
-        if normalized in {"infokl", "kakeralootinfo"}:
-            return "infokl"
-        if normalized in {"profile", "pr"}:
-            return "profile"
-        if normalized in {"mp", "mudapins", "mudapin"}:
-            return "mudapins"
-        if normalized in {"k", "kakera"}:
-            return "kakera"
-        if normalized in {"settings", "set"}:
-            return "settings"
-        if normalized in {"help", "tuarrange", "ta", "infopin"}:
-            return "help"
-        if normalized in {"tuto", "tutorial"}:
-            return "tutorial"
-        if normalized in {
-            "tu",
-            "timersup",
-            "mu",
-            "ru",
-            "du",
-            "ku",
-            "dk",
-            "dku",
-            "bku",
-            "rtu",
-            "ohu",
-            "rolls",
-            "daily",
-        }:
-            return "timers"
-        if normalized in {"bonus", "bonuses"}:
-            return "bonus"
-        if normalized in {"oq", "ouroquest"}:
-            return "sphere_result"
-        if normalized in {"kt", "tower"}:
-            return "towerstate"
-        if normalized in {"lk", "kakeraloots"}:
-            return "lootstate"
-        if normalized == "kl":
-            return "lootstate"
-        if normalized in {"im", "info"}:
-            return "im"
-        if normalized in {"divorce", "div"}:
-            return "divorce"
-        if normalized in {"givek", "givekakera"}:
-            return "gift_kakera"
-        if normalized in {"givesp", "givespheres"}:
-            return "gift_spheres"
-        if normalized == "give":
-            return "gift_character"
-        if normalized == "trade":
-            return "trade"
-        if normalized.startswith("dl"):
-            return "disablelist"
-        if normalized in DiscordListenerService._ROLL_COMMANDS:
-            return "roll"
-        return None
+    def _listener_command_match(
+        command: str,
+        source: InvocationSource = InvocationSource.TEXT,
+    ) -> CommandMatch | None:
+        """Recognize one listener command through the declarative registry."""
+        return COMMAND_REGISTRY.lookup(
+            command,
+            source=source,
+            capability=CommandCapability.LISTENER,
+        )
 
     @staticmethod
-    def _ourochest_command_kind(command: str) -> str | None:
-        """Recognize only the exact prefix forms for the dedicated Ourochest route."""
-        if not command.startswith("$"):
-            return None
-        if command[1:].casefold() in {"oc", "ourochest"}:
-            return "ourochest"
-        return None
+    def _direct_workflow_command_match(
+        command: str,
+        source: InvocationSource = InvocationSource.TEXT,
+    ) -> CommandMatch | None:
+        """Recognize dedicated listener workflows through the registry."""
+        return COMMAND_REGISTRY.lookup(
+            command,
+            source=source,
+            capability=CommandCapability.DIRECT_WORKFLOW,
+        )
 
     def _track_divorce_confirmation(
         self,

@@ -1789,49 +1789,54 @@ def test_listener_resource_failure_prevents_client_construction(monkeypatch, tmp
 
 
 def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
-    assert DiscordListenerService._expected_kind_for_command("$mmrkty+") == "ranked_harem"
-    assert DiscordListenerService._expected_kind_for_command("$mmyk") == "harem"
-    assert DiscordListenerService._expected_kind_for_command("$adl") == "antidisable"
-    assert DiscordListenerService._expected_kind_for_command("$wa") == "roll"
-    assert DiscordListenerService._expected_kind_for_command("$m") == "roll"
-    assert DiscordListenerService._expected_kind_for_command("$k") == "kakera"
-    assert DiscordListenerService._expected_kind_for_command("$divorce") == "divorce"
-    assert DiscordListenerService._expected_kind_for_command("$dl") == "disablelist"
-    assert DiscordListenerService._expected_kind_for_command("$settings") == "settings"
-    assert DiscordListenerService._expected_kind_for_command("$bonus") == "bonus"
-    assert DiscordListenerService._expected_kind_for_command("$rolls") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$daily") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$help") == "help"
-    assert DiscordListenerService._expected_kind_for_command("$infopin") == "help"
-    assert DiscordListenerService._expected_kind_for_command("$profile") == "profile"
-    assert DiscordListenerService._expected_kind_for_command("$pr") == "profile"
-    assert DiscordListenerService._expected_kind_for_command("$mp") == "mudapins"
-    assert DiscordListenerService._expected_kind_for_command("$mu") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$ru") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$du") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$ku") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$dku") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$bku") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$rtu") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$dk") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$ohu") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$timersup") == "timers"
-    assert DiscordListenerService._expected_kind_for_command("$tuarrange") == "help"
-    assert DiscordListenerService._expected_kind_for_command("$tuto") == "tutorial"
-    assert DiscordListenerService._expected_kind_for_command("$tutorial") == "tutorial"
-    assert DiscordListenerService._expected_kind_for_command("$oq") == "sphere_result"
-    assert DiscordListenerService._expected_kind_for_command("$kt") == "towerstate"
-    assert DiscordListenerService._expected_kind_for_command("$lk") == "lootstate"
-    assert DiscordListenerService._expected_kind_for_command("$im") == "im"
-    assert DiscordListenerService._expected_kind_for_command("$givek") == "gift_kakera"
-    assert DiscordListenerService._expected_kind_for_command("$givesp") == "gift_spheres"
-    assert DiscordListenerService._expected_kind_for_command("$give") == "gift_character"
-    assert DiscordListenerService._expected_kind_for_command("$trade") == "trade"
+    assert _listener_expected_kind("$mmrkty+") == "ranked_harem"
+    assert _listener_expected_kind("$mmyk") == "harem"
+    assert _listener_expected_kind("$adl") == "antidisable"
+    assert _listener_expected_kind("$wa") == "roll"
+    assert _listener_expected_kind("$m") == "roll"
+    assert _listener_expected_kind("$k") == "kakera"
+    assert _listener_expected_kind("$divorce") == "divorce"
+    assert _listener_expected_kind("$dl") == "disablelist"
+    assert _listener_expected_kind("$settings") == "settings"
+    assert _listener_expected_kind("$bonus") == "bonus"
+    assert _listener_expected_kind("$rolls") == "timers"
+    assert _listener_expected_kind("$daily") == "timers"
+    assert _listener_expected_kind("$help") == "help"
+    assert _listener_expected_kind("$infopin") == "help"
+    assert _listener_expected_kind("$profile") == "profile"
+    assert _listener_expected_kind("$pr") == "profile"
+    assert _listener_expected_kind("$mp") == "mudapins"
+    assert _listener_expected_kind("$mu") == "timers"
+    assert _listener_expected_kind("$ru") == "timers"
+    assert _listener_expected_kind("$du") == "timers"
+    assert _listener_expected_kind("$ku") == "timers"
+    assert _listener_expected_kind("$dku") == "timers"
+    assert _listener_expected_kind("$bku") == "timers"
+    assert _listener_expected_kind("$rtu") == "timers"
+    assert _listener_expected_kind("$dk") == "timers"
+    assert _listener_expected_kind("$ohu") == "timers"
+    assert _listener_expected_kind("$timersup") == "timers"
+    assert _listener_expected_kind("$tuarrange") == "help"
+    assert _listener_expected_kind("$tuto") == "tutorial"
+    assert _listener_expected_kind("$tutorial") == "tutorial"
+    assert _listener_expected_kind("$oq") == "sphere_result"
+    assert _listener_expected_kind("$kt") == "towerstate"
+    assert _listener_expected_kind("$lk") == "lootstate"
+    assert _listener_expected_kind("$im") == "im"
+    assert _listener_expected_kind("$givek") == "gift_kakera"
+    assert _listener_expected_kind("$givesp") == "gift_spheres"
+    assert _listener_expected_kind("$give") == "gift_character"
+    assert _listener_expected_kind("$trade") == "trade"
 
 
 def _current_listener_expected_kind(command: str) -> str | None:
-    """Characterization seam; redirect this one helper during registry migration."""
-    return DiscordListenerService._expected_kind_for_command(command)
+    """Independent characterization seam for listener recognition."""
+    return _listener_expected_kind(command)
+
+
+def _listener_expected_kind(command: str) -> str | None:
+    match = DiscordListenerService._listener_command_match(command)
+    return match.expected_response if match is not None else None
 
 
 @pytest.mark.parametrize(
@@ -2972,7 +2977,7 @@ def test_listener_does_not_import_textual_current_value_for_value_setting_errors
     ],
 )
 def test_listener_maps_additional_supported_commands(command: str, expected_kind: str) -> None:
-    assert DiscordListenerService._expected_kind_for_command(command) == expected_kind
+    assert _listener_expected_kind(command) == expected_kind
 
 
 def test_listener_tracks_and_cancels_divorce_confirmation(tmp_path) -> None:
@@ -9580,7 +9585,7 @@ def test_listener_non_durable_wishlist_keeps_direct_catalog_path(tmp_path) -> No
 
 @pytest.mark.parametrize("command", ("$dl", "$dlp", "$dlw"))
 def test_listener_dl_aliases_keep_canonical_disablelist_kind(command) -> None:
-    assert DiscordListenerService._expected_kind_for_command(command) == "disablelist"
+    assert _listener_expected_kind(command) == "disablelist"
 
 
 def test_listener_first_durable_disablelist_uses_coordinator_owned_success(tmp_path) -> None:
