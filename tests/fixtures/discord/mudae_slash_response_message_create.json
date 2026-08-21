@@ -1,0 +1,52 @@
+{
+  "fixture_schema_version": 1,
+  "provenance": {
+    "contains_message_text": false,
+    "contains_raw_discord_ids": false,
+    "contains_sensitive_text": false,
+    "evidence_classification": "REAL_OBSERVABLE_MESSAGE_TRANSPORT",
+    "gateway_event_type": "MESSAGE_CREATE",
+    "interaction_metadata_type": 2,
+    "limitations": [
+      "raw_source_external_and_uncommitted",
+      "third_party_mudae_interaction_create_is_unavailable_to_moa",
+      "observed_metadata_does_not_supply_invocation_name",
+      "no_invocation_name_assertion",
+      "not_command_recognition_evidence",
+      "synthetic_interaction_listener_behavior_remains_separate"
+    ],
+    "sanitization": "tests/message_interaction_capture_fixture_gate.py",
+    "source_kind": "external_real_developer_diagnostic_capture"
+  },
+  "records": [
+    {
+      "author": "mudae",
+      "channel": "channel_1",
+      "created_at": "2000-01-01T00:00:01Z",
+      "gateway_event_type": "MESSAGE_CREATE",
+      "guild": "guild_1",
+      "interaction_metadata": {
+        "id": "interaction_1",
+        "type": 2,
+        "user": "user_1"
+      },
+      "message": {
+        "application": "mudae",
+        "author": "mudae",
+        "components": [],
+        "created_at": "2000-01-01T00:00:01Z",
+        "embeds": [],
+        "id": "message_1",
+        "interaction_metadata": {
+          "id": "interaction_1",
+          "type": 2,
+          "user": "user_1"
+        },
+        "type": 20
+      },
+      "message_id": "message_1",
+      "sequence": 1
+    }
+  ],
+  "source_schema_version": "moa.discord-event-capture.v1"
+}

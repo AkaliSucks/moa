@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -145,12 +146,14 @@ def test_corpus_has_transport_event_and_variant_coverage() -> None:
         "reaction_confirmation",
         "confirmation",
         "pagination",
+        "slash_response_transport",
         "simultaneous_users",
     } <= variants
     assert all(
         scenario["evidence_status"] in {
             "GROUNDED_EXISTING_CAPTURE",
             "GROUNDED_DETERMINISTIC_TRANSPORT_VARIANT",
+            "REAL_CAPTURED_OBSERVABLE_TRANSPORT",
         }
         for scenario in corpus["scenarios"]
     )
@@ -184,6 +187,7 @@ def test_linked_structural_fixtures_are_existing_sanitized_capture_outputs() -> 
 
     assert {entry["fixture"] for entry in linked} == {
         "adl_structural_capture.v1.json",
+        "mudae_slash_response_message_create.json",
         "oh_structural_capture.v1.json",
         "oc_structural_capture.v1.json",
     }
@@ -195,6 +199,36 @@ def test_linked_structural_fixtures_are_existing_sanitized_capture_outputs() -> 
         assert fixture["provenance"]["contains_raw_discord_ids"] is False
         assert fixture["provenance"].get("contains_message_embed_or_component_text", False) is False
         assert fixture["records"]
+
+
+def test_real_mudae_slash_response_fixture_preserves_observable_transport_only() -> None:
+    corpus = _corpus()
+    scenario = _scenario(corpus, "mudae_slash_response_message_create")
+    fixture = json.loads(
+        (STRUCTURAL_FIXTURE_DIR / scenario["fixture"]).read_text(encoding="utf-8")
+    )
+    serialized = json.dumps(fixture, sort_keys=True)
+    record = fixture["records"][0]
+
+    assert scenario["evidence_classification"] == "REAL_OBSERVABLE_MESSAGE_TRANSPORT"
+    assert fixture["provenance"]["source_kind"] == "external_real_developer_diagnostic_capture"
+    assert fixture["provenance"]["evidence_classification"] == "REAL_OBSERVABLE_MESSAGE_TRANSPORT"
+    assert record["gateway_event_type"] == "MESSAGE_CREATE"
+    assert record["message"]["type"] == 20
+    assert record["message"]["interaction_metadata"]["type"] == 2
+    assert "command_name" not in serialized
+    assert "RAW_INTERACTION_CREATE" not in serialized
+    assert "INTERACTION_CREATE" not in serialized
+    assert "third_party_mudae_interaction_create_is_unavailable_to_moa" in serialized
+    assert re.search(r"(?<!\d)\d{17,20}(?!\d)", serialized) is None
+    assert re.search(r"https?://|discord\.gg|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", serialized) is None
+    assert "2026-" not in serialized
+
+
+def test_existing_slash_scenario_remains_synthetic_listener_characterization() -> None:
+    scenario = _scenario(_corpus(), "slash_interaction_create")
+    assert scenario["evidence_classification"] == "SYNTHETIC_LISTENER_CHARACTERIZATION"
+    assert scenario["event_family"] == "INTERACTION_CREATE"
 
 
 def test_prefix_fixture_replays_through_listener_context(tmp_path) -> None:
