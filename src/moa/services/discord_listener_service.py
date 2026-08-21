@@ -300,7 +300,14 @@ class DiscordEventCaptureService:
         )
 
     def _matches_interaction(self, data: Mapping[str, Any]) -> bool:
-        return self._interaction_user_id(data) in self._config.user_ids
+        if self._interaction_user_id(data) not in self._config.user_ids:
+            return False
+        interaction_type = data.get("type")
+        if interaction_type == 2:
+            return self._interaction_evidence_command_name(data) is not None
+        # Preserve the existing component-diagnostic seam without allowing it
+        # into the type-2 slash-command evidence path.
+        return interaction_type == 3
 
     def _text_allowed(self, event_type: str, data: Mapping[str, Any]) -> bool:
         if not self._config.include_message_text:
@@ -365,24 +372,50 @@ class DiscordEventCaptureService:
                 "gateway_event_type": event_type,
                 "guild_id": self._id(data.get("guild_id")),
                 "channel_id": self._id(data.get("channel_id")),
-                "interaction": {
-                    "id": self._id(data.get("id")),
-                    "type": data.get("type"),
-                    "application_id": self._id(data.get("application_id")),
-                    "acting_user_id": self._interaction_user_id(data),
-                    "component_type": interaction_data.get("component_type"),
-                    "custom_id_sha256": self._safe_digest(interaction_data.get("custom_id")),
-                    "custom_id_length": len(interaction_data["custom_id"])
-                    if isinstance(interaction_data.get("custom_id"), str)
-                    else None,
-                    "values_sha256": self._safe_digests(interaction_data.get("values")),
-                    "source_message_id": self._id_from_mapping(source_message, "id"),
-                    "source_message": self._message_record(source_message, include_text=text_allowed)
-                    if source_message is not None
-                    else None,
-                },
+                "interaction": self._without_none(
+                    {
+                        "id": self._id(data.get("id")),
+                        "type": data.get("type"),
+                        "application_id": self._id(data.get("application_id")),
+                        "acting_user_id": self._interaction_user_id(data),
+                        "command_name": self._interaction_evidence_command_name(data),
+                        "component_type": interaction_data.get("component_type"),
+                        "custom_id_sha256": self._safe_digest(interaction_data.get("custom_id")),
+                        "custom_id_length": len(interaction_data["custom_id"])
+                        if isinstance(interaction_data.get("custom_id"), str)
+                        else None,
+                        "values_sha256": self._safe_digests(interaction_data.get("values")),
+                        "source_message_id": self._id_from_mapping(source_message, "id"),
+                        "source_message": self._message_record(
+                            source_message, include_text=text_allowed
+                        )
+                        if source_message is not None
+                        else None,
+                    }
+                ),
             }
         return None
+
+    @staticmethod
+    def _interaction_evidence_command_name(data: Mapping[str, Any]) -> str | None:
+        """Return one bounded, listener-supported type-2 application command name."""
+        if data.get("type") != 2:
+            return None
+        interaction_data = data.get("data")
+        if not isinstance(interaction_data, Mapping):
+            return None
+        command_name = interaction_data.get("name")
+        if (
+            not isinstance(command_name, str)
+            or re.fullmatch(r"[a-z0-9_-]{1,32}", command_name) is None
+        ):
+            return None
+        match = COMMAND_REGISTRY.lookup(
+            command_name,
+            source=InvocationSource.INTERACTION_NAME,
+            capability=CommandCapability.LISTENER,
+        )
+        return command_name if match is not None else None
 
     def _message_record(self, data: Mapping[str, Any], *, include_text: bool = False) -> dict[str, Any]:
         record: dict[str, Any] = {

@@ -438,6 +438,124 @@ def test_diagnostic_capture_records_uncached_updates_and_redacts_interactions(tm
         assert secret not in serialized
 
 
+def test_diagnostic_capture_projects_only_bounded_type2_command_evidence(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+
+    assert capture.capture_gateway_payload(
+        {
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "600",
+                "type": 2,
+                "application_id": "300",
+                "guild_id": "100",
+                "channel_id": "200",
+                "member": {
+                    "roles": ["synthetic-role-secret"],
+                    "user": {
+                        "id": "400",
+                        "username": "synthetic-private-user",
+                        "global_name": "synthetic-private-name",
+                    },
+                },
+                "token": "synthetic-interaction-token",
+                "locale": "synthetic-private-locale",
+                "entitlements": [{"id": "synthetic-entitlement"}],
+                "data": {
+                    "name": "wa",
+                    "options": [{"name": "synthetic-option", "value": "synthetic-value"}],
+                    "resolved": {"users": {"synthetic-user": {"username": "private"}}},
+                    "attachments": {"synthetic-attachment": {"filename": "private.txt"}},
+                    "synthetic_unknown": "synthetic-nested-secret",
+                },
+            },
+        }
+    )
+    capture.close()
+
+    record = json.loads(output_path.read_text(encoding="utf-8"))
+    assert record["gateway_event_type"] == "INTERACTION_CREATE"
+    assert record["interaction"] == {
+        "acting_user_id": "400",
+        "application_id": "300",
+        "command_name": "wa",
+        "id": "600",
+        "type": 2,
+    }
+    serialized = output_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "synthetic-role-secret",
+        "synthetic-private-user",
+        "synthetic-private-name",
+        "synthetic-interaction-token",
+        "synthetic-private-locale",
+        "synthetic-entitlement",
+        "synthetic-option",
+        "synthetic-value",
+        "synthetic-attachment",
+        "private.txt",
+        "synthetic-nested-secret",
+    ):
+        assert forbidden not in serialized
+
+
+@pytest.mark.parametrize(
+    "interaction_data",
+    (
+        {"type": 2, "data": {}},
+        {"type": 2, "data": {"name": ""}},
+        {"type": 2, "data": {"name": "/wa"}},
+        {"type": 2, "data": {"name": "wa option"}},
+        {"type": 2, "data": {"name": "synthetic_unsupported_command"}},
+        {"type": 2, "data": {"name": "a" * 33}},
+        {"type": 4, "data": {"name": "wa"}},
+    ),
+)
+def test_diagnostic_capture_rejects_malformed_slash_evidence(
+    tmp_path, interaction_data: dict
+) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+    data = {
+        "id": "600",
+        "application_id": "300",
+        "guild_id": "100",
+        "channel_id": "200",
+        "member": {"user": {"id": "400"}},
+        **interaction_data,
+    }
+
+    assert not capture.capture_gateway_payload({"t": "INTERACTION_CREATE", "d": data})
+    capture.close()
+    assert output_path.read_text(encoding="utf-8") == ""
+
+
+def test_diagnostic_capture_component_interaction_is_not_slash_evidence(tmp_path) -> None:
+    capture, output_path = _diagnostic_capture(tmp_path)
+    capture._open_output()
+
+    assert capture.capture_gateway_payload(
+        {
+            "t": "INTERACTION_CREATE",
+            "d": {
+                "id": "600",
+                "type": 3,
+                "application_id": "300",
+                "guild_id": "100",
+                "channel_id": "200",
+                "member": {"user": {"id": "400"}},
+                "data": {"component_type": 2, "custom_id": "synthetic-component"},
+            },
+        }
+    )
+    capture.close()
+
+    interaction = json.loads(output_path.read_text(encoding="utf-8"))["interaction"]
+    assert interaction["type"] == 3
+    assert "command_name" not in interaction
+
+
 def test_diagnostic_capture_includes_only_sanitized_opt_in_message_text(tmp_path) -> None:
     output_path = tmp_path / "adl-capture.jsonl"
     capture = DiscordEventCaptureService(
@@ -1161,7 +1279,18 @@ def test_diagnostic_client_raw_callback_forwards_supported_events(tmp_path) -> N
             {"t": "MESSAGE_UPDATE", "d": {"id": "1", "guild_id": "100", "channel_id": "200"}}
         )
         await client.on_socket_raw_receive(
-            {"t": "INTERACTION_CREATE", "d": {"id": "2", "guild_id": "100", "channel_id": "200", "member": {"user": {"id": "400"}}}}
+            {
+                "t": "INTERACTION_CREATE",
+                "d": {
+                    "id": "2",
+                    "type": 2,
+                    "application_id": "300",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "member": {"user": {"id": "400"}},
+                    "data": {"name": "wa"},
+                },
+            }
         )
         await client.on_socket_raw_receive({"t": "READY", "d": {}})
 
