@@ -60,6 +60,19 @@ def connect(database_path: Path | None = None) -> sqlite3.Connection:
     return connection
 
 
+def connect_read_only(database_path: Path | None = None) -> sqlite3.Connection:
+    """Open an existing MOA SQLite database without creating or configuring it."""
+    path = _resolve_database_path(database_path).expanduser().resolve(strict=False)
+    if str(path) == ":memory:" or str(path).startswith("file:"):
+        raise ValueError("read-only connections require a file-backed SQLite database path")
+
+    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    return connection
+
+
 def _canonical_database_path(database_path: Path | None) -> Path:
     path = _resolve_database_path(database_path)
     path_text = str(path)

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import logging
 import shutil
+import sqlite3
 from pathlib import Path
 
 import typer
@@ -13,6 +14,7 @@ from moa.database.legacy_database_relocation import (
     relocate_database,
 )
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
+from moa.repositories.data_health_repository import DataHealthSchemaError
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
@@ -36,6 +38,7 @@ from moa.services.discord_listener_service import (
     DiscordListenerService,
 )
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
+from moa.services.data_health_service import DataHealthService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
@@ -84,6 +87,7 @@ action_app = typer.Typer(help="Use fresh imported timers to show available actio
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
+data_health_app = typer.Typer(help="Report read-only local catalog health findings")
 harem_app = typer.Typer(help="Build complete keyed-harem snapshots safely")
 adl_app = typer.Typer(help="Build complete antidisable series snapshots safely")
 recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
@@ -114,6 +118,7 @@ app.add_typer(config_app, name="config")
 app.add_typer(discord_app, name="discord")
 config_app.add_typer(config_profile_app, name="profile")
 config_app.add_typer(config_account_app, name="account")
+catalog_app.add_typer(data_health_app, name="data-health")
 
 
 @app.command()
@@ -2357,6 +2362,37 @@ def adl_complete(scan_id: int) -> None:
         f"[green]Antidisable scan {scan.id} is complete and active[/green] for "
         f"{scan.server_name} / {scan.account_name}."
     )
+
+
+@data_health_app.command("orphans")
+def catalog_data_health_orphans() -> None:
+    """Report physical and audited logical orphan findings without repairs."""
+    try:
+        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_orphans()
+    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    if not findings:
+        console.print("No data-health findings.")
+        return
+
+    table = Table(title="Data-health orphan findings")
+    table.add_column("Check ID", style="cyan")
+    table.add_column("Category")
+    table.add_column("Entity", style="green")
+    table.add_column("Local identifier")
+    table.add_column("Reason")
+    for finding in findings:
+        table.add_row(
+            finding.check_id,
+            finding.category,
+            finding.entity,
+            str(finding.local_identifier),
+            finding.reason,
+        )
+    console.print(table)
+    console.print(f"Total findings: {len(findings)}")
 
 
 @catalog_app.command("top")
