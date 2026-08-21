@@ -2395,6 +2395,37 @@ def catalog_data_health_orphans() -> None:
     console.print(f"Total findings: {len(findings)}")
 
 
+@data_health_app.command("impossible-identities")
+def catalog_data_health_impossible_identities() -> None:
+    """Report impossible identity findings without repairs."""
+    try:
+        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_impossible_identities()
+    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    if not findings:
+        console.print("No data-health findings.")
+        return
+
+    table = Table(title="Data-health impossible identity findings")
+    table.add_column("Check ID", style="cyan")
+    table.add_column("Category")
+    table.add_column("Entity", style="green")
+    table.add_column("Local identifier")
+    table.add_column("Reason")
+    for finding in findings:
+        table.add_row(
+            finding.check_id,
+            finding.category,
+            finding.entity,
+            str(finding.local_identifier),
+            finding.reason,
+        )
+    console.print(table)
+    console.print(f"Total findings: {len(findings)}")
+
+
 @catalog_app.command("top")
 def catalog_top(
     limit: int = typer.Option(15, "--limit", "-n", min=1, help="Number of characters to display."),

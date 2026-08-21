@@ -38,3 +38,18 @@ class DataHealthService:
                     connection.rollback()
             finally:
                 connection.close()
+
+    def find_impossible_identities(self) -> tuple[DataHealthFinding, ...]:
+        connection = connect_read_only(self._database_path or DEFAULT_DATABASE_PATH)
+        try:
+            connection.execute("BEGIN")
+            repository = DataHealthRepository(connection)
+            repository.validate_schema()
+            findings = repository.scan_impossible_identities()
+            return tuple(sorted(findings, key=_finding_sort_key))
+        finally:
+            try:
+                if connection.in_transaction:
+                    connection.rollback()
+            finally:
+                connection.close()
