@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_REQUIRED_COLUMNS, CATALOG_TABLES
+from moa.database.migrations import (
+    CATALOG_MIGRATIONS,
+    MigrationError,
+    validate_current_catalog_schema,
+)
 from moa.models.data_health import DataHealthFinding
 
 
@@ -20,38 +24,10 @@ class DataHealthRepository:
 
     def validate_schema(self) -> None:
         """Validate current catalog metadata without running migrations."""
-        tables = {
-            row["name"]
-            for row in self._connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-            )
-        }
-        missing_tables = sorted(CATALOG_TABLES - tables)
-        if missing_tables or "schema_migrations" not in tables:
-            details = []
-            if missing_tables:
-                details.append("missing tables: " + ", ".join(missing_tables))
-            if "schema_migrations" not in tables:
-                details.append("missing table: schema_migrations")
-            raise DataHealthSchemaError(
-                "Unrecognized MOA catalog schema (" + "; ".join(details) + ")."
-            )
-
-        missing_columns = []
-        for table, required in CATALOG_REQUIRED_COLUMNS.items():
-            columns = {
-                row["name"]
-                for row in self._connection.execute(f"PRAGMA table_info({table})")
-            }
-            missing = sorted(required - columns)
-            if missing:
-                missing_columns.append(f"{table}: {', '.join(missing)}")
-        if missing_columns:
-            raise DataHealthSchemaError(
-                "Unrecognized MOA catalog schema (missing columns: "
-                + "; ".join(missing_columns)
-                + ")."
-            )
+        try:
+            validate_current_catalog_schema(self._connection)
+        except MigrationError as error:
+            raise DataHealthSchemaError(str(error)) from error
 
         applied = tuple(
             (row["version"], row["name"])

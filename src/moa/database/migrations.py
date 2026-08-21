@@ -59,6 +59,24 @@ CATALOG_TABLES = frozenset(
 )
 
 
+CATALOG_DURABLE_TABLES = frozenset(
+    {
+        "discord_message_aggregates",
+        "discord_message_revisions",
+        "discord_source_events",
+        "discord_processing_attempts",
+        "discord_projection_links",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+        "discord_antidisable_workflows",
+        "discord_antidisable_response_bindings",
+    }
+)
+
+
+CURRENT_CATALOG_TABLES = CATALOG_TABLES | CATALOG_DURABLE_TABLES
+
+
 CATALOG_REQUIRED_COLUMNS = {
     "characters": frozenset(
         {
@@ -139,15 +157,17 @@ CATALOG_REQUIRED_COLUMNS = {
 }
 
 
-def validate_catalog_schema(connection: sqlite3.Connection) -> None:
-    """Confirm that a non-empty database is the known current catalog schema."""
+def _validate_catalog_schema_tables(
+    connection: sqlite3.Connection,
+    expected_tables: frozenset[str],
+) -> None:
     rows = connection.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
     ).fetchall()
     actual_tables = {row[0] for row in rows if row[0] != "schema_migrations"}
-    if actual_tables != CATALOG_TABLES:
-        missing = sorted(CATALOG_TABLES - actual_tables)
-        unexpected = sorted(actual_tables - CATALOG_TABLES)
+    if actual_tables != expected_tables:
+        missing = sorted(expected_tables - actual_tables)
+        unexpected = sorted(actual_tables - expected_tables)
         details = []
         if missing:
             details.append(f"missing tables: {', '.join(missing)}")
@@ -171,6 +191,16 @@ def validate_catalog_schema(connection: sqlite3.Connection) -> None:
             + "; ".join(missing_columns)
             + ")."
         )
+
+
+def validate_catalog_schema(connection: sqlite3.Connection) -> None:
+    """Confirm that a non-empty database has the baseline catalog schema."""
+    _validate_catalog_schema_tables(connection, CATALOG_TABLES)
+
+
+def validate_current_catalog_schema(connection: sqlite3.Connection) -> None:
+    """Confirm that a database has the complete current catalog schema."""
+    _validate_catalog_schema_tables(connection, CURRENT_CATALOG_TABLES)
 
 
 def _validate_migrations(migrations: Iterable[Migration]) -> tuple[Migration, ...]:

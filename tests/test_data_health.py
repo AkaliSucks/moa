@@ -4,6 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from moa.cli import main
+from moa.database.migrations import MigrationError, validate_current_catalog_schema
 from moa.database.sqlite import connect_read_only
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.data_health_repository import DataHealthSchemaError
@@ -152,6 +153,34 @@ def test_stale_migration_metadata_fails_schema_preflight_without_migration(tmp_p
         assert connection.execute(
             "SELECT name FROM schema_migrations WHERE version = 11"
         ).fetchone()[0] == "stale"
+
+
+def test_unexpected_application_table_fails_dh01_schema_preflight_with_validator_parity(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE TABLE unexpected_dh01_table (id INTEGER PRIMARY KEY)"
+        )
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(MigrationError, match="unexpected tables: unexpected_dh01_table"):
+            validate_current_catalog_schema(connection)
+
+    with pytest.raises(
+        DataHealthSchemaError,
+        match="unexpected tables: unexpected_dh01_table",
+    ):
+        DataHealthService(database_path).find_orphans()
+
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "orphans"])
+
+    assert result.exit_code == 1
+    assert "unexpected_dh01_table" in result.stdout
+    assert "DH-ORPH-" not in result.stdout
 
 
 def test_read_only_opening_does_not_create_database_or_parent_or_enable_wal(tmp_path):
