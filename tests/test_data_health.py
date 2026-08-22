@@ -203,6 +203,40 @@ def _insert_source_event(path, event_id, event_key, revision_id, *, status="rece
         )
 
 
+def _insert_projection_link(
+    path,
+    source_event_id,
+    projection_kind,
+    projection_slot,
+    *,
+    state="completed",
+    projection_table="missing_table",
+    projection_row_id=999,
+):
+    with sqlite3.connect(path) as connection:
+        if state == "completed":
+            connection.execute(
+                "INSERT INTO discord_projection_links "
+                "(source_event_id, projection_kind, projection_slot, projection_table, "
+                "projection_row_id, state, claimed_at, completed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 'completed', 'now', 'now', 'now', 'now')",
+                (
+                    source_event_id,
+                    projection_kind,
+                    projection_slot,
+                    projection_table,
+                    projection_row_id,
+                ),
+            )
+        else:
+            connection.execute(
+                "INSERT INTO discord_projection_links "
+                "(source_event_id, projection_kind, projection_slot, state, claimed_at, "
+                "created_at, updated_at) VALUES (?, ?, ?, 'claimed', 'now', 'now', 'now')",
+                (source_event_id, projection_kind, projection_slot),
+            )
+
+
 def _insert_harem_scan(path, scan_id, account_context_id=1, *, scan_kind="keys"):
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -836,6 +870,153 @@ def test_duplicate_projection_link_identity_is_the_only_projection_check(tmp_pat
     ]
 
 
+def test_projection_gap_healthy_normal_source_lifecycle_has_no_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-healthy.db"
+    _initialize(database_path)
+    repository = DiscordMessageRepository(database_path)
+    aggregate_key = MessageAggregateKey(
+        SourcePlatform.DISCORD, "guild", "channel", "healthy-message"
+    )
+    received = repository.receive_message(
+        aggregate_key=aggregate_key,
+        revision_key=MessageRevisionKey.versioned(aggregate_key, "healthy-payload", "revision-1"),
+        event_key="healthy-event",
+        event_kind="message_create",
+        raw_text="health test",
+        payload_json='{"content":"health test"}',
+        payload_capture_version="test",
+        source_observed_at=OBSERVED_AT,
+        received_at=OBSERVED_AT,
+    )
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser",
+        router_version="router",
+        started_at=OBSERVED_AT,
+    )
+    repository.mark_processing_success(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        finished_at=OBSERVED_AT,
+    )
+    _insert_projection_link(database_path, received.source_event_id, "kind", "slot")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+@pytest.mark.parametrize(
+    "status", ["received", "processing", "failed", "unresolved_attribution"]
+)
+def test_projection_gap_reports_each_non_succeeded_current_source_status(tmp_path, status):
+    database_path = tmp_path / f"projection-gap-{status}.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status=status)
+    _insert_projection_link(database_path, 1, "kind", "slot")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.check_id, finding.local_identifier) for finding in findings] == [
+        ("DH-PG-001", 1)
+    ]
+    assert status in findings[0].reason
+
+
+def test_projection_gap_groups_completed_links_per_source_event(tmp_path):
+    database_path = tmp_path / "projection-gap-grouping.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="failed")
+    _insert_projection_link(database_path, 1, "kind-a", "slot-a")
+    _insert_projection_link(database_path, 1, "kind-b", "slot-b")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].local_identifier == 1
+    assert "2 completed projection link(s)" in findings[0].reason
+
+
+def test_projection_gap_preserves_retry_history_for_current_success(tmp_path):
+    database_path = tmp_path / "projection-gap-retry.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO discord_processing_attempts "
+            "(source_event_id, attempt_number, status, retryable, parser_version, "
+            "router_version, started_at, finished_at, created_at) "
+            "VALUES (1, ?, ?, ?, 'parser', 'router', 'now', 'now', 'now')",
+            [(1, "failed", 1), (2, "succeeded", 0)],
+        )
+    _insert_projection_link(database_path, 1, "kind", "slot")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+@pytest.mark.parametrize("source_status", ["received", "processing", "failed", "succeeded"])
+def test_projection_gap_excludes_claimed_links(tmp_path, source_status):
+    database_path = tmp_path / f"projection-gap-claimed-{source_status}.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status=source_status)
+    _insert_projection_link(database_path, 1, "kind", "slot", state="claimed")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_excludes_succeeded_source_with_zero_links(tmp_path):
+    database_path = tmp_path / "projection-gap-zero-links.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_excludes_missing_target_for_succeeded_source(tmp_path):
+    database_path = tmp_path / "projection-gap-missing-target.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind", "slot", projection_table="missing_table")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_does_not_duplicate_dh03_projection_link_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-duplicate-links.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_projection_links")
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind", "slot")
+    _insert_projection_link(database_path, 1, "kind", "slot")
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+    assert [finding.check_id for finding in DataHealthService(database_path).find_duplicates()] == [
+        "DH-DUP-009"
+    ]
+
+
+def test_projection_gap_category_does_not_report_dh01_or_dh02_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-category-isolation.db"
+    _initialize(database_path)
+    _seed_base_rows(database_path)
+    _insert_character(database_path, 1, "Broken", "Series", "wrong", "series")
+    _insert_reaction(database_path, 1, 999, 1)
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
 def test_duplicate_harem_scan_page_identity_is_scan_scoped(tmp_path):
     database_path = tmp_path / "harem-pages.db"
     _initialize(database_path)
@@ -1029,7 +1210,36 @@ def test_cli_duplicates_unavailable_database_fails_without_creation(tmp_path, mo
     assert not database_path.parent.exists()
 
 
-def test_data_health_command_inventory_has_only_the_three_audited_commands(
+def test_cli_projection_gaps_healthy_database_succeeds(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "projection-gaps"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No data-health findings."
+
+
+def test_cli_projection_gaps_reports_source_event_findings(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="failed")
+    _insert_projection_link(database_path, 1, "kind", "slot")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "projection-gaps"])
+
+    assert result.exit_code == 0
+    assert "DH-PG-001" in result.stdout
+    assert "projection-gap" in result.stdout
+    assert "Total findings: 1" in result.stdout
+    assert "raw_text" not in result.stdout
+
+
+def test_data_health_command_inventory_has_only_the_four_audited_commands(
     tmp_path, monkeypatch
 ):
     database_path = tmp_path / "catalog.db"
@@ -1042,7 +1252,7 @@ def test_data_health_command_inventory_has_only_the_three_audited_commands(
     assert "orphans" in result.stdout
     assert "impossible-identities" in result.stdout
     assert "duplicates" in result.stdout
-    assert "projection-gaps" not in result.stdout
+    assert "projection-gaps" in result.stdout
     assert " all " not in f" {result.stdout} "
 
 

@@ -18,7 +18,7 @@ class DataHealthSchemaError(RuntimeError):
 
 
 class DataHealthRepository:
-    """Own the SQL for the narrow DH-01, DH-02, and DH-03 checks."""
+    """Own the SQL for the narrow data-health checks."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -69,6 +69,36 @@ class DataHealthRepository:
         findings.extend(self._harem_scan_page_duplicate_findings())
         findings.extend(self._antidisable_duplicate_findings())
         return tuple(findings)
+
+    def scan_projection_gaps(self) -> tuple[DataHealthFinding, ...]:
+        """Return completed links whose source event is not currently succeeded."""
+        rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   source.status AS source_status,
+                   COUNT(link.id) AS completed_link_count
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            WHERE link.state = 'completed'
+              AND source.status != 'succeeded'
+            GROUP BY source.id, source.status
+            ORDER BY source.id
+            """
+        )
+        return tuple(
+            DataHealthFinding(
+                check_id="DH-PG-001",
+                category="projection-gap",
+                entity="discord_source_events",
+                local_identifier=int(row["source_event_id"]),
+                reason=(
+                    f"source event status {row['source_status']!r} owns "
+                    f"{int(row['completed_link_count'])} completed projection link(s)"
+                ),
+            )
+            for row in rows
+        )
 
     def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
         return self._grouped_duplicate_findings(
