@@ -1,6 +1,6 @@
 import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
+import re
 
 import pytest
 from typer.testing import CliRunner
@@ -9,7 +9,6 @@ from moa.cli import main
 from moa.database.migrations import MigrationError, validate_current_catalog_schema
 from moa.database.sqlite import connect_read_only
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
-from moa.repositories import data_health_repository
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.data_health_repository import DataHealthSchemaError
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -125,6 +124,92 @@ def _insert_context(
             "(id, server_context_id, name, normalized_name, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, 'now', 'now')",
             (account_id, server_id, account_name, account_normalized),
+        )
+
+
+def _rebuild_without_singular_constraints(path, table):
+    """TEST ONLY: rebuild one table after removing its singular constraints."""
+    with sqlite3.connect(path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        create_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()[0]
+        original_columns = [
+            row[1] for row in connection.execute(f"PRAGMA table_info({table})")
+        ]
+        replacement = f"__dh03_{table}"
+        rebuilt_sql = create_sql.replace(
+            f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1
+        )
+        rebuilt_sql = re.sub(r",\s*UNIQUE\s*\([^)]*\)", "", rebuilt_sql)
+        rebuilt_sql = re.sub(r",\s*PRIMARY KEY\s*\([^)]*\)", "", rebuilt_sql)
+        rebuilt_sql = re.sub(r"\s+UNIQUE(?=\s*(?:,|\n|$))", "", rebuilt_sql)
+        if "id" not in original_columns:
+            rebuilt_sql = re.sub(r"\s+PRIMARY KEY(?=\s|,|\n)", "", rebuilt_sql)
+        connection.execute(rebuilt_sql)
+        column_list = ", ".join(original_columns)
+        connection.execute(
+            f"INSERT INTO {replacement} ({column_list}) "
+            f"SELECT {column_list} FROM {table}"
+        )
+        connection.execute(f"DROP TABLE {table}")
+        connection.execute(f"ALTER TABLE {replacement} RENAME TO {table}")
+
+
+def _drop_index(path, index):
+    with sqlite3.connect(path) as connection:
+        connection.execute(f"DROP INDEX {index}")
+
+
+def _insert_aggregate(path, aggregate_id, message_id):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO discord_message_aggregates "
+            "(id, platform, guild_id, channel_id, message_id, first_received_at, "
+            "last_received_at, created_at, updated_at) "
+            "VALUES (?, 'discord', 'guild', 'channel', ?, 'now', 'now', 'now', 'now')",
+            (aggregate_id, message_id),
+        )
+
+
+def _insert_revision(
+    path,
+    revision_id,
+    aggregate_id,
+    payload_hash,
+    *,
+    marker=None,
+    state="candidate",
+):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO discord_message_revisions "
+            "(id, aggregate_id, source_revision_marker, normalized_payload_hash, "
+            "revision_state, first_received_at, last_received_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'now', 'now', 'now', 'now')",
+            (revision_id, aggregate_id, marker, payload_hash, state),
+        )
+
+
+def _insert_source_event(path, event_id, event_key, revision_id, *, status="received"):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO discord_source_events "
+            "(id, event_key, revision_id, event_kind, status, raw_text, received_at, "
+            "last_seen_at, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'message_create', ?, 'safe', 'now', 'now', 'now', 'now')",
+            (event_id, event_key, revision_id, status),
+        )
+
+
+def _insert_harem_scan(path, scan_id, account_context_id=1, *, scan_kind="keys"):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO harem_scans "
+            "(id, account_context_id, expected_page_count, started_at, scan_kind) "
+            "VALUES (?, ?, 1, 'now', ?)",
+            (scan_id, account_context_id, scan_kind),
         )
 
 
@@ -485,8 +570,10 @@ def test_impossible_identity_scan_is_category_isolated_and_excludes_projection_l
         not finding.check_id.startswith("DH-ORPH-")
         for finding in DataHealthService(database_path).find_impossible_identities()
     )
-    repository_source = Path(data_health_repository.__file__).read_text(encoding="utf-8")
-    assert "discord_projection_links" not in repository_source
+    assert all(
+        not finding.check_id.startswith(("DH-ID-", "DH-DUP-"))
+        for finding in DataHealthService(database_path).find_orphans()
+    )
 
 
 def test_cli_impossible_identities_healthy_database_succeeds(tmp_path, monkeypatch):
@@ -545,3 +632,436 @@ def test_data_health_has_no_all_command(tmp_path, monkeypatch):
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "all"])
 
     assert result.exit_code != 0
+
+
+def test_duplicates_cover_character_server_and_server_scoped_account_keys(tmp_path):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "characters")
+    _rebuild_without_singular_constraints(database_path, "server_contexts")
+    _rebuild_without_singular_constraints(database_path, "account_contexts")
+    _insert_character(database_path, 1, "Same", "Series", "same", "series")
+    _insert_character(database_path, 2, "Same", "Series", "same", "series")
+    _insert_context(database_path, 1, "Server", "server", 1, "Account", "account")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO server_contexts "
+            "(id, name, normalized_name, created_at, updated_at) "
+            "VALUES (2, 'Other', 'server', 'now', 'now')"
+        )
+        connection.execute(
+            "INSERT INTO account_contexts "
+            "(id, server_context_id, name, normalized_name, created_at, updated_at) "
+            "VALUES (2, 1, 'Account', 'account', 'now', 'now')"
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert [(finding.check_id, finding.entity) for finding in findings] == [
+        ("DH-DUP-001", "characters"),
+        ("DH-DUP-002", "server_contexts"),
+        ("DH-DUP-003", "account_contexts"),
+    ]
+    assert "2 rows" in findings[0].reason
+
+
+def test_duplicate_aggregate_identity_excludes_delivery_count(tmp_path):
+    database_path = tmp_path / "aggregate.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_message_aggregates")
+    _insert_aggregate(database_path, 1, "message")
+    _insert_aggregate(database_path, 2, "message")
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert [(finding.check_id, finding.entity) for finding in findings] == [
+        ("DH-DUP-004", "discord_message_aggregates")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("index", "marker", "state", "reason"),
+    [
+        (
+            "uq_discord_revision_versioned",
+            "marker",
+            "candidate",
+            "marker-present revision identity",
+        ),
+        (
+            "uq_discord_revision_unversioned",
+            None,
+            "candidate",
+            "marker-absent revision identity",
+        ),
+        (
+            "uq_discord_active_revision",
+            "active-marker",
+            "active",
+            "single active revision identity",
+        ),
+    ],
+)
+def test_duplicate_revision_branches_reproduce_partial_index_predicates(
+    tmp_path, index, marker, state, reason
+):
+    database_path = tmp_path / f"{index}.db"
+    _initialize(database_path)
+    _drop_index(database_path, index)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash", marker=marker, state=state)
+    second_marker = "active-marker-2" if state == "active" else marker
+    second_hash = "hash-2" if state == "active" else "hash"
+    _insert_revision(
+        database_path,
+        2,
+        1,
+        second_hash,
+        marker=second_marker,
+        state=state,
+    )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-DUP-005"
+    assert reason in findings[0].reason
+
+
+def test_duplicate_source_event_keys_and_revision_ids_are_separate_identities(tmp_path):
+    database_path = tmp_path / "source-events.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_source_events")
+    for aggregate_id in range(1, 4):
+        _insert_aggregate(database_path, aggregate_id, f"message-{aggregate_id}")
+        _insert_revision(database_path, aggregate_id, aggregate_id, f"hash-{aggregate_id}")
+    _insert_source_event(database_path, 1, "same-event-key", 1)
+    _insert_source_event(database_path, 2, "same-event-key", 2)
+    _insert_source_event(database_path, 3, "other-event-key", 3)
+    _insert_source_event(database_path, 4, "third-event-key", 3)
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert len(findings) == 2
+    assert all(finding.check_id == "DH-DUP-006" for finding in findings)
+    assert {"event_key", "revision_id"} == {
+        finding.local_identifier.split("=")[0] for finding in findings
+    }
+
+
+def test_duplicate_processing_attempt_identity_and_one_active_state(tmp_path):
+    database_path = tmp_path / "attempts.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_processing_attempts")
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1)
+    with sqlite3.connect(database_path) as connection:
+        rows = [
+            (1, 1, 1, "succeeded"),
+            (2, 1, 1, "failed"),
+            (3, 1, 2, "processing"),
+            (4, 1, 3, "processing"),
+        ]
+        connection.executemany(
+            "INSERT INTO discord_processing_attempts "
+            "(id, source_event_id, attempt_number, status, retryable, parser_version, "
+            "router_version, started_at, created_at) "
+            "VALUES (?, ?, ?, ?, 0, 'parser', 'router', 'now', 'now')",
+            rows,
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert len(findings) == 2
+    assert all(finding.check_id == "DH-DUP-007" for finding in findings)
+    assert any("attempt identity" in finding.reason for finding in findings)
+    assert any("active processing" in finding.reason for finding in findings)
+
+
+def test_duplicate_server_and_account_attribution_rows_are_independent(tmp_path):
+    database_path = tmp_path / "attributions.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(
+        database_path, "discord_source_event_server_attributions"
+    )
+    _rebuild_without_singular_constraints(
+        database_path, "discord_source_event_account_attributions"
+    )
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1)
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO discord_source_event_server_attributions "
+            "(source_event_id, status, server_name, created_at, updated_at) "
+            "VALUES (?, 'resolved', 'Server', 'now', 'now')",
+            [(1,), (1,)],
+        )
+        connection.executemany(
+            "INSERT INTO discord_source_event_account_attributions "
+            "(source_event_id, status, server_name, account_name, created_at, updated_at) "
+            "VALUES (?, 'resolved', 'Server', 'Account', 'now', 'now')",
+            [(1,), (1,)],
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert [(finding.check_id, finding.entity) for finding in findings] == [
+        ("DH-DUP-008", "discord_source_event_account_attributions"),
+        ("DH-DUP-008", "discord_source_event_server_attributions"),
+    ]
+
+
+def test_duplicate_projection_link_identity_is_the_only_projection_check(tmp_path):
+    database_path = tmp_path / "projection-links.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_projection_links")
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1)
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO discord_projection_links "
+            "(source_event_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state, claimed_at, created_at, updated_at) "
+            "VALUES (1, 'odd-kind', 'slot', NULL, NULL, 'claimed', 'now', 'now', 'now')",
+            [(), ()],
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert [(finding.check_id, finding.entity) for finding in findings] == [
+        ("DH-DUP-009", "discord_projection_links")
+    ]
+
+
+def test_duplicate_harem_scan_page_identity_is_scan_scoped(tmp_path):
+    database_path = tmp_path / "harem-pages.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "harem_scan_pages")
+    _seed_base_rows(database_path)
+    _insert_harem_scan(database_path, 1)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+            "VALUES (1, 1, 1)"
+        )
+        connection.execute(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+            "VALUES (1, 1, 1)"
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert [(finding.check_id, finding.entity) for finding in findings] == [
+        ("DH-DUP-010", "harem_scan_pages")
+    ]
+
+
+def test_duplicate_antidisable_workflow_and_binding_identities(tmp_path):
+    database_path = tmp_path / "antidisable.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_antidisable_workflows")
+    _rebuild_without_singular_constraints(
+        database_path, "discord_antidisable_response_bindings"
+    )
+    _seed_base_rows(database_path)
+    for scan_id in range(1, 5):
+        _insert_harem_scan(database_path, scan_id, scan_kind="antidisable")
+    for aggregate_id in (10, 11, 12, 13, 30, 40):
+        _insert_aggregate(database_path, aggregate_id, f"message-{aggregate_id}")
+    with sqlite3.connect(database_path) as connection:
+        connection.executemany(
+            "INSERT INTO discord_antidisable_workflows "
+            "(harem_scan_id, request_message_aggregate_id, requesting_user_id, "
+            "created_at, expires_at) VALUES (?, ?, 'user', '2026-01-01', '2026-01-02')",
+            [(1, 10), (1, 11), (2, 10), (3, 12), (4, 13)],
+        )
+        connection.executemany(
+            "INSERT INTO discord_antidisable_response_bindings "
+            "(harem_scan_id, response_message_aggregate_id, bound_at) "
+            "VALUES (?, ?, 'now')",
+            [(3, 30), (3, 30), (3, 40), (4, 40)],
+        )
+
+    findings = DataHealthService(database_path).find_duplicates()
+
+    assert len(findings) == 5
+    assert all(finding.check_id == "DH-DUP-011" for finding in findings)
+    assert any("workflow" in finding.reason for finding in findings)
+    assert any("request aggregate" in finding.reason for finding in findings)
+    assert any("response binding" in finding.reason for finding in findings)
+    assert any("response aggregate" in finding.reason for finding in findings)
+
+
+def test_valid_history_repeats_and_distinct_scopes_are_not_duplicates(tmp_path):
+    database_path = tmp_path / "valid-repeats.db"
+    _initialize(database_path)
+    _insert_character(database_path, 1, "Same", "Series A", "same", "series a")
+    _insert_character(database_path, 2, "Same", "Series B", "same", "series b")
+    _insert_context(database_path, 1, "Server One", "server one", 1, "Shared", "shared")
+    _insert_context(database_path, 2, "Server Two", "server two", 2, "Shared", "shared")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+            "VALUES (1, 'test', 'test', 'now', 'repeat')"
+        )
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash-1", marker="one")
+    _insert_revision(database_path, 2, 1, "hash-2", marker="two")
+    _insert_source_event(database_path, 1, "event", 1)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE discord_source_events SET delivery_count = 2 WHERE id = 1")
+        connection.executemany(
+            "INSERT INTO discord_processing_attempts "
+            "(source_event_id, attempt_number, status, retryable, parser_version, "
+            "router_version, started_at, created_at) "
+            "VALUES (1, ?, 'failed', 1, 'parser', 'router', 'now', 'now')",
+            [(1,), (2,)],
+        )
+        connection.executemany(
+            "INSERT INTO discord_projection_links "
+            "(source_event_id, projection_kind, projection_slot, state, claimed_at, "
+            "created_at, updated_at) VALUES (1, ?, ?, 'claimed', 'now', 'now', 'now')",
+            [("kind-a", "slot-a"), ("kind-b", "slot-b")],
+        )
+        connection.executemany(
+            "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+            "VALUES (?, 'test', 'test', 'now', 'repeat')",
+            [(2,), (3,)],
+        )
+        connection.executemany(
+            "INSERT INTO claim_observations "
+            "(account_context_id, character_id, character_name, normalized_character_name, "
+            "observed_at, import_event_id) VALUES (1, 1, 'Same', 'same', 'now', ?)",
+            [(2,), (3,)],
+        )
+        connection.executemany(
+            "INSERT INTO harem_scans "
+            "(id, account_context_id, expected_page_count, started_at, scan_kind) "
+            "VALUES (?, 1, 1, 'now', 'keys')",
+            [(1,), (2,)],
+        )
+        connection.executemany(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+            "VALUES (?, 1, ?)",
+            [(1, 2), (2, 3)],
+        )
+        connection.executemany(
+            "INSERT INTO discord_antidisable_workflows "
+            "(harem_scan_id, request_message_aggregate_id, requesting_user_id, "
+            "created_at, expires_at) VALUES (?, ?, 'user', '2026-01-01', '2026-01-02')",
+            [(1, 1), (2, 2)],
+        )
+
+    assert DataHealthService(database_path).find_duplicates() == ()
+
+
+def test_duplicate_scan_preserves_dh02_and_dh04_category_boundaries(tmp_path):
+    database_path = tmp_path / "boundaries.db"
+    _initialize(database_path)
+    _insert_character(database_path, 1, "Broken", "Series", "wrong", "series")
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO discord_projection_links "
+            "(source_event_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state, claimed_at, completed_at, created_at, updated_at) "
+            "VALUES (1, 'weird', 'target', 'missing_table', 999, 'completed', "
+            "'now', 'now', 'now', 'now')"
+        )
+
+    assert DataHealthService(database_path).find_duplicates() == ()
+    assert [finding.check_id for finding in DataHealthService(database_path).find_impossible_identities()] == [
+        "DH-ID-002"
+    ]
+
+
+def test_cli_duplicates_healthy_database_succeeds(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "duplicates"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No data-health findings."
+
+
+def test_cli_duplicates_reports_deterministic_findings_and_total(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "characters")
+    _insert_character(database_path, 1, "Same", "Series", "same", "series")
+    _insert_character(database_path, 2, "Same", "Series", "same", "series")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "duplicates"])
+
+    assert result.exit_code == 0
+    assert "DH-DUP-001" in result.stdout
+    assert "Total findings: 1" in result.stdout
+    assert "raw_text" not in result.stdout
+
+
+def test_cli_duplicates_invalid_schema_fails(tmp_path, monkeypatch):
+    database_path = tmp_path / "not-moa.db"
+    database_path.touch()
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "duplicates"])
+
+    assert result.exit_code == 1
+    assert "Unrecognized MOA catalog schema" in result.stdout
+
+
+def test_cli_duplicates_unavailable_database_fails_without_creation(tmp_path, monkeypatch):
+    database_path = tmp_path / "missing" / "catalog.db"
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "duplicates"])
+
+    assert result.exit_code == 1
+    assert not database_path.exists()
+    assert not database_path.parent.exists()
+
+
+def test_data_health_command_inventory_has_only_the_three_audited_commands(
+    tmp_path, monkeypatch
+):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "--help"])
+
+    assert result.exit_code == 0
+    assert "orphans" in result.stdout
+    assert "impossible-identities" in result.stdout
+    assert "duplicates" in result.stdout
+    assert "projection-gaps" not in result.stdout
+    assert " all " not in f" {result.stdout} "
+
+
+def test_each_data_health_command_is_category_isolated(tmp_path):
+    database_path = tmp_path / "category-isolation.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "characters")
+    _seed_base_rows(database_path)
+    _insert_character(database_path, 1, "Broken", "Series", "wrong", "series")
+    _insert_character(database_path, 2, "Broken", "Series", "wrong", "series")
+    _insert_reaction(database_path, 1, 999, 1)
+
+    orphan_ids = {finding.check_id for finding in DataHealthService(database_path).find_orphans()}
+    identity_ids = {
+        finding.check_id
+        for finding in DataHealthService(database_path).find_impossible_identities()
+    }
+    duplicate_ids = {finding.check_id for finding in DataHealthService(database_path).find_duplicates()}
+
+    assert orphan_ids == {"DH-ORPH-002"}
+    assert identity_ids == {"DH-ID-002"}
+    assert duplicate_ids == {"DH-DUP-001"}

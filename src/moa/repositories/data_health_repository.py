@@ -18,7 +18,7 @@ class DataHealthSchemaError(RuntimeError):
 
 
 class DataHealthRepository:
-    """Own the SQL for the narrow DH-01 and DH-02 checks."""
+    """Own the SQL for the narrow DH-01, DH-02, and DH-03 checks."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -54,6 +54,353 @@ class DataHealthRepository:
         findings = [*self._resolved_attribution_findings()]
         findings.extend(self._stored_normalization_findings())
         return tuple(findings)
+
+    def scan_duplicates(self) -> tuple[DataHealthFinding, ...]:
+        """Return only the audited DH-03 duplicate-invariant findings."""
+        findings = [*self._character_duplicate_findings()]
+        findings.extend(self._server_duplicate_findings())
+        findings.extend(self._account_duplicate_findings())
+        findings.extend(self._aggregate_duplicate_findings())
+        findings.extend(self._revision_duplicate_findings())
+        findings.extend(self._source_event_duplicate_findings())
+        findings.extend(self._processing_attempt_duplicate_findings())
+        findings.extend(self._attribution_duplicate_findings())
+        findings.extend(self._projection_link_duplicate_findings())
+        findings.extend(self._harem_scan_page_duplicate_findings())
+        findings.extend(self._antidisable_duplicate_findings())
+        return tuple(findings)
+
+    def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-001",
+            "characters",
+            ("normalized_name", "normalized_series"),
+            """
+            SELECT normalized_name, normalized_series, COUNT(*) AS duplicate_count
+            FROM characters
+            GROUP BY normalized_name, normalized_series
+            HAVING COUNT(*) > 1
+            ORDER BY normalized_name, normalized_series
+            """,
+            "character canonical identity",
+        )
+
+    def _server_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-002",
+            "server_contexts",
+            ("normalized_name",),
+            """
+            SELECT normalized_name, COUNT(*) AS duplicate_count
+            FROM server_contexts
+            GROUP BY normalized_name
+            HAVING COUNT(*) > 1
+            ORDER BY normalized_name
+            """,
+            "server normalized identity",
+        )
+
+    def _account_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-003",
+            "account_contexts",
+            ("server_context_id", "normalized_name"),
+            """
+            SELECT server_context_id, normalized_name, COUNT(*) AS duplicate_count
+            FROM account_contexts
+            GROUP BY server_context_id, normalized_name
+            HAVING COUNT(*) > 1
+            ORDER BY server_context_id, normalized_name
+            """,
+            "server-scoped account normalized identity",
+        )
+
+    def _aggregate_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-004",
+            "discord_message_aggregates",
+            ("platform", "guild_id", "channel_id", "message_id"),
+            """
+            SELECT platform, guild_id, channel_id, message_id,
+                   COUNT(*) AS duplicate_count
+            FROM discord_message_aggregates
+            GROUP BY platform, guild_id, channel_id, message_id
+            HAVING COUNT(*) > 1
+            ORDER BY platform, guild_id, channel_id, message_id
+            """,
+            "Discord message aggregate identity",
+        )
+
+    def _revision_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        findings = [
+            *self._grouped_duplicate_findings(
+                "DH-DUP-005",
+                "discord_message_revisions",
+                ("aggregate_id", "source_revision_marker", "normalized_payload_hash"),
+                """
+                SELECT aggregate_id, source_revision_marker, normalized_payload_hash,
+                       COUNT(*) AS duplicate_count
+                FROM discord_message_revisions
+                WHERE source_revision_marker IS NOT NULL
+                GROUP BY aggregate_id, source_revision_marker, normalized_payload_hash
+                HAVING COUNT(*) > 1
+                ORDER BY aggregate_id, source_revision_marker, normalized_payload_hash
+                """,
+                "marker-present revision identity",
+            )
+        ]
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-005",
+                "discord_message_revisions",
+                ("aggregate_id", "normalized_payload_hash"),
+                """
+                SELECT aggregate_id, normalized_payload_hash, COUNT(*) AS duplicate_count
+                FROM discord_message_revisions
+                WHERE source_revision_marker IS NULL
+                GROUP BY aggregate_id, normalized_payload_hash
+                HAVING COUNT(*) > 1
+                ORDER BY aggregate_id, normalized_payload_hash
+                """,
+                "marker-absent revision identity",
+            )
+        )
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-005",
+                "discord_message_revisions",
+                ("aggregate_id",),
+                """
+                SELECT aggregate_id, COUNT(*) AS duplicate_count
+                FROM discord_message_revisions
+                WHERE revision_state = 'active'
+                GROUP BY aggregate_id
+                HAVING COUNT(*) > 1
+                ORDER BY aggregate_id
+                """,
+                "single active revision identity",
+            )
+        )
+        return tuple(findings)
+
+    def _source_event_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        findings = [
+            *self._grouped_duplicate_findings(
+                "DH-DUP-006",
+                "discord_source_events",
+                ("event_key",),
+                """
+                SELECT event_key, COUNT(*) AS duplicate_count
+                FROM discord_source_events
+                GROUP BY event_key
+                HAVING COUNT(*) > 1
+                ORDER BY event_key
+                """,
+                "event_key source-event identity",
+            )
+        ]
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-006",
+                "discord_source_events",
+                ("revision_id",),
+                """
+                SELECT revision_id, COUNT(*) AS duplicate_count
+                FROM discord_source_events
+                GROUP BY revision_id
+                HAVING COUNT(*) > 1
+                ORDER BY revision_id
+                """,
+                "revision_id source-event identity",
+            )
+        )
+        return tuple(findings)
+
+    def _processing_attempt_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        findings = [
+            *self._grouped_duplicate_findings(
+                "DH-DUP-007",
+                "discord_processing_attempts",
+                ("source_event_id", "attempt_number"),
+                """
+                SELECT source_event_id, attempt_number, COUNT(*) AS duplicate_count
+                FROM discord_processing_attempts
+                GROUP BY source_event_id, attempt_number
+                HAVING COUNT(*) > 1
+                ORDER BY source_event_id, attempt_number
+                """,
+                "source-event attempt identity",
+            )
+        ]
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-007",
+                "discord_processing_attempts",
+                ("source_event_id",),
+                """
+                SELECT source_event_id, COUNT(*) AS duplicate_count
+                FROM discord_processing_attempts
+                WHERE status = 'processing'
+                GROUP BY source_event_id
+                HAVING COUNT(*) > 1
+                ORDER BY source_event_id
+                """,
+                "single active processing attempt identity",
+            )
+        )
+        return tuple(findings)
+
+    def _attribution_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        findings = [
+            *self._grouped_duplicate_findings(
+                "DH-DUP-008",
+                "discord_source_event_server_attributions",
+                ("source_event_id",),
+                """
+                SELECT source_event_id, COUNT(*) AS duplicate_count
+                FROM discord_source_event_server_attributions
+                GROUP BY source_event_id
+                HAVING COUNT(*) > 1
+                ORDER BY source_event_id
+                """,
+                "server attribution row identity",
+            )
+        ]
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-008",
+                "discord_source_event_account_attributions",
+                ("source_event_id",),
+                """
+                SELECT source_event_id, COUNT(*) AS duplicate_count
+                FROM discord_source_event_account_attributions
+                GROUP BY source_event_id
+                HAVING COUNT(*) > 1
+                ORDER BY source_event_id
+                """,
+                "account attribution row identity",
+            )
+        )
+        return tuple(findings)
+
+    def _projection_link_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-009",
+            "discord_projection_links",
+            ("source_event_id", "projection_kind", "projection_slot"),
+            """
+            SELECT source_event_id, projection_kind, projection_slot,
+                   COUNT(*) AS duplicate_count
+            FROM discord_projection_links
+            GROUP BY source_event_id, projection_kind, projection_slot
+            HAVING COUNT(*) > 1
+            ORDER BY source_event_id, projection_kind, projection_slot
+            """,
+            "projection-link identity",
+        )
+
+    def _harem_scan_page_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        return self._grouped_duplicate_findings(
+            "DH-DUP-010",
+            "harem_scan_pages",
+            ("harem_scan_id", "page_number"),
+            """
+            SELECT harem_scan_id, page_number, COUNT(*) AS duplicate_count
+            FROM harem_scan_pages
+            GROUP BY harem_scan_id, page_number
+            HAVING COUNT(*) > 1
+            ORDER BY harem_scan_id, page_number
+            """,
+            "scan-scoped harem page identity",
+        )
+
+    def _antidisable_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
+        findings = [
+            *self._grouped_duplicate_findings(
+                "DH-DUP-011",
+                "discord_antidisable_workflows",
+                ("harem_scan_id",),
+                """
+                SELECT harem_scan_id, COUNT(*) AS duplicate_count
+                FROM discord_antidisable_workflows
+                GROUP BY harem_scan_id
+                HAVING COUNT(*) > 1
+                ORDER BY harem_scan_id
+                """,
+                "antidisable workflow per harem scan identity",
+            )
+        ]
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-011",
+                "discord_antidisable_workflows",
+                ("request_message_aggregate_id",),
+                """
+                SELECT request_message_aggregate_id, COUNT(*) AS duplicate_count
+                FROM discord_antidisable_workflows
+                GROUP BY request_message_aggregate_id
+                HAVING COUNT(*) > 1
+                ORDER BY request_message_aggregate_id
+                """,
+                "antidisable request aggregate identity",
+            )
+        )
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-011",
+                "discord_antidisable_response_bindings",
+                ("harem_scan_id", "response_message_aggregate_id"),
+                """
+                SELECT harem_scan_id, response_message_aggregate_id,
+                       COUNT(*) AS duplicate_count
+                FROM discord_antidisable_response_bindings
+                GROUP BY harem_scan_id, response_message_aggregate_id
+                HAVING COUNT(*) > 1
+                ORDER BY harem_scan_id, response_message_aggregate_id
+                """,
+                "antidisable response binding identity",
+            )
+        )
+        findings.extend(
+            self._grouped_duplicate_findings(
+                "DH-DUP-011",
+                "discord_antidisable_response_bindings",
+                ("response_message_aggregate_id",),
+                """
+                SELECT response_message_aggregate_id, COUNT(*) AS duplicate_count
+                FROM discord_antidisable_response_bindings
+                GROUP BY response_message_aggregate_id
+                HAVING COUNT(*) > 1
+                ORDER BY response_message_aggregate_id
+                """,
+                "antidisable response aggregate identity",
+            )
+        )
+        return tuple(findings)
+
+    def _grouped_duplicate_findings(
+        self,
+        check_id: str,
+        entity: str,
+        key_columns: tuple[str, ...],
+        query: str,
+        invariant: str,
+    ) -> tuple[DataHealthFinding, ...]:
+        rows = self._connection.execute(query)
+        return tuple(
+            DataHealthFinding(
+                check_id=check_id,
+                category="duplicate",
+                entity=entity,
+                local_identifier=self._format_duplicate_key(row, key_columns),
+                reason=f"{invariant} is occupied by {int(row['duplicate_count'])} rows",
+            )
+            for row in rows
+        )
+
+    @staticmethod
+    def _format_duplicate_key(row: sqlite3.Row, key_columns: tuple[str, ...]) -> str:
+        return ", ".join(f"{column}={row[column]!r}" for column in key_columns)
 
     def _resolved_attribution_findings(self) -> tuple[DataHealthFinding, ...]:
         rows = self._connection.execute(
