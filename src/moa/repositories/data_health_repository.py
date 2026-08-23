@@ -124,6 +124,34 @@ class DataHealthRepository:
             )
             for row in claimed_rows
         )
+        provenance_rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   COUNT(link.id) AS completed_link_count
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            WHERE source.status = 'succeeded'
+              AND source.legacy_import_event_id IS NULL
+              AND link.state = 'completed'
+            GROUP BY source.id
+            ORDER BY source.id
+            """
+        )
+        findings.extend(
+            DataHealthFinding(
+                check_id="DH-PG-003",
+                category="projection-gap",
+                entity="discord_source_events",
+                local_identifier=int(row["source_event_id"]),
+                reason=(
+                    "succeeded source event owns "
+                    f"{int(row['completed_link_count'])} completed projection link(s) "
+                    "but has no recorded import event provenance"
+                ),
+            )
+            for row in provenance_rows
+        )
         return tuple(findings)
 
     def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:

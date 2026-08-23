@@ -192,14 +192,28 @@ def _insert_revision(
         )
 
 
-def _insert_source_event(path, event_id, event_key, revision_id, *, status="received"):
+def _insert_source_event(
+    path,
+    event_id,
+    event_key,
+    revision_id,
+    *,
+    status="received",
+    legacy_import_event_id=None,
+):
     with sqlite3.connect(path) as connection:
+        if legacy_import_event_id is not None:
+            connection.execute(
+                "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+                "VALUES (?, 'test', 'test', 'now', 'test')",
+                (legacy_import_event_id,),
+            )
         connection.execute(
             "INSERT INTO discord_source_events "
             "(id, event_key, revision_id, event_kind, status, raw_text, received_at, "
-            "last_seen_at, created_at, updated_at) "
-            "VALUES (?, ?, ?, 'message_create', ?, 'safe', 'now', 'now', 'now', 'now')",
-            (event_id, event_key, revision_id, status),
+            "last_seen_at, legacy_import_event_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'message_create', ?, 'safe', 'now', 'now', ?, 'now', 'now')",
+            (event_id, event_key, revision_id, status, legacy_import_event_id),
         )
 
 
@@ -894,10 +908,16 @@ def test_projection_gap_healthy_normal_source_lifecycle_has_no_findings(tmp_path
         router_version="router",
         started_at=OBSERVED_AT,
     )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+            "VALUES (1, 'test', 'test', 'now', 'test')"
+        )
     repository.mark_processing_success(
         source_event_id=received.source_event_id,
         attempt_id=attempt.attempt_id,
         finished_at=OBSERVED_AT,
+        legacy_import_event_id=1,
     )
     _insert_projection_link(database_path, received.source_event_id, "kind", "slot")
 
@@ -1015,7 +1035,7 @@ def test_projection_gap_reports_claimed_links_per_source_in_deterministic_order(
     ]
 
 
-def test_projection_gap_deferred_null_import_state_has_no_pg_findings(tmp_path):
+def test_projection_gap_reports_succeeded_completed_source_without_import_provenance(tmp_path):
     database_path = tmp_path / "projection-gap-null-legacy-import.db"
     _initialize(database_path)
     _insert_aggregate(database_path, 1, "message")
@@ -1023,7 +1043,29 @@ def test_projection_gap_deferred_null_import_state_has_no_pg_findings(tmp_path):
     _insert_source_event(database_path, 1, "event", 1, status="succeeded")
     _insert_projection_link(database_path, 1, "kind", "slot", state="completed")
 
-    assert DataHealthService(database_path).find_projection_gaps() == ()
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.check_id, finding.local_identifier) for finding in findings] == [
+        ("DH-PG-003", 1)
+    ]
+    assert "1 completed projection link(s)" in findings[0].reason
+
+
+def test_projection_gap_groups_null_import_provenance_per_source_event(tmp_path):
+    database_path = tmp_path / "projection-gap-null-legacy-import-grouping.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind-a", "slot-a")
+    _insert_projection_link(database_path, 1, "kind-b", "slot-b")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-003"
+    assert findings[0].local_identifier == 1
+    assert "2 completed projection link(s)" in findings[0].reason
 
 
 def test_projection_gap_excludes_succeeded_source_with_zero_links(tmp_path):
@@ -1041,7 +1083,9 @@ def test_projection_gap_excludes_missing_target_for_succeeded_source(tmp_path):
     _initialize(database_path)
     _insert_aggregate(database_path, 1, "message")
     _insert_revision(database_path, 1, 1, "hash")
-    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_source_event(
+        database_path, 1, "event", 1, status="succeeded", legacy_import_event_id=1
+    )
     _insert_projection_link(database_path, 1, "kind", "slot", projection_table="missing_table")
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
@@ -1053,7 +1097,9 @@ def test_projection_gap_does_not_duplicate_dh03_projection_link_findings(tmp_pat
     _rebuild_without_singular_constraints(database_path, "discord_projection_links")
     _insert_aggregate(database_path, 1, "message")
     _insert_revision(database_path, 1, 1, "hash")
-    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_source_event(
+        database_path, 1, "event", 1, status="succeeded", legacy_import_event_id=1
+    )
     _insert_projection_link(database_path, 1, "kind", "slot")
     _insert_projection_link(database_path, 1, "kind", "slot")
 
