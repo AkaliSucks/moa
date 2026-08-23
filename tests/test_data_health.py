@@ -965,7 +965,9 @@ def test_projection_gap_preserves_retry_history_for_current_success(tmp_path):
     _initialize(database_path)
     _insert_aggregate(database_path, 1, "message")
     _insert_revision(database_path, 1, 1, "hash")
-    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_source_event(
+        database_path, 1, "event", 1, status="succeeded", legacy_import_event_id=1
+    )
     with sqlite3.connect(database_path) as connection:
         connection.executemany(
             "INSERT INTO discord_processing_attempts "
