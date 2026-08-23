@@ -17,6 +17,13 @@ from moa.repositories.discord_message_repository import (
     DiscordMessageProcessingNotFoundError,
     DiscordMessageRepository,
 )
+from moa.services.projection_authority import (
+    ROLL_KEY_PROJECTION,
+    ROLL_PROJECTION,
+    ROLL_RANK_PROJECTION,
+    ROLL_SERVER_CHARACTER_PROJECTION,
+    ProjectionKindAuthority,
+)
 
 
 class RollProjectionCoordinatorError(RuntimeError):
@@ -40,22 +47,30 @@ class RollProjectionResult:
 
 @dataclass(frozen=True, slots=True)
 class _ProjectionSpec:
-    kind: str
+    authority: ProjectionKindAuthority
     slot: str
-    table: str
     result_attribute: str
+
+    @property
+    def kind(self) -> str:
+        return self.authority.projection_kind
+
+    @property
+    def table(self) -> str:
+        return self.authority.target_table
 
 
 class RollProjectionCoordinator:
     """Own one SQLite transaction for a Discord roll and its projections."""
 
     _TARGET_TABLES = frozenset(
-        {
-            "roll_observations",
-            "harem_key_observations",
-            "rank_snapshots",
-            "server_character_observations",
-        }
+        authority.target_table
+        for authority in (
+            ROLL_PROJECTION,
+            ROLL_KEY_PROJECTION,
+            ROLL_RANK_PROJECTION,
+            ROLL_SERVER_CHARACTER_PROJECTION,
+        )
     )
 
     def __init__(
@@ -596,36 +611,32 @@ class RollProjectionCoordinator:
 
         expected = [
             _ProjectionSpec(
-                "catalog.roll",
+                ROLL_PROJECTION,
                 slot(),
-                "roll_observations",
                 "roll_observation_id",
             )
         ]
         if roll.displayed_key_count is not None and roll.displayed_key_type is not None:
             expected.append(
                 _ProjectionSpec(
-                    "catalog.roll_key",
+                    ROLL_KEY_PROJECTION,
                     slot(key_type=self._normalize(roll.displayed_key_type)),
-                    "harem_key_observations",
                     "harem_key_observation_id",
                 )
             )
         if roll.claim_rank is not None:
             expected.append(
                 _ProjectionSpec(
-                    "catalog.roll_rank",
+                    ROLL_RANK_PROJECTION,
                     slot(),
-                    "rank_snapshots",
                     "rank_snapshot_id",
                 )
             )
         if roll.kakera_value is not None:
             expected.append(
                 _ProjectionSpec(
-                    "catalog.roll_server_character",
+                    ROLL_SERVER_CHARACTER_PROJECTION,
                     slot(),
-                    "server_character_observations",
                     "server_character_observation_id",
                 )
             )

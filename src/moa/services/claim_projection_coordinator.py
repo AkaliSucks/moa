@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import ClaimConfirmation
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import CLAIM_PROJECTION
 
 
 class ClaimProjectionCoordinatorError(RuntimeError):
@@ -51,8 +52,9 @@ class ClaimProjectionResult:
 class ClaimProjectionCoordinator:
     """Own one SQLite transaction for a Discord claim and its projection."""
 
-    _PROJECTION_KIND = "catalog.claim"
-    _PROJECTION_TABLE = "claim_observations"
+    _PROJECTION_AUTHORITY = CLAIM_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
     def __init__(

@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import WishlistSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import WISHLIST_PROJECTION
 
 
 class WishlistProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class WishlistProjectionResult:
 class WishlistProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$wl` projection."""
 
-    _PROJECTION_KIND = "catalog.wishlist"
-    _PROJECTION_TABLE = "wishlist_observations"
+    _PROJECTION_AUTHORITY = WISHLIST_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "wishlist"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

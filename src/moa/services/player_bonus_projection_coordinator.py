@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import PlayerBonusSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import PLAYER_BONUS_PROJECTION
 
 
 class PlayerBonusProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class PlayerBonusProjectionResult:
 class PlayerBonusProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$bonus` projection."""
 
-    _PROJECTION_KIND = "catalog.player_bonus"
-    _PROJECTION_TABLE = "player_bonus_observations"
+    _PROJECTION_AUTHORITY = PLAYER_BONUS_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "player_bonus"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

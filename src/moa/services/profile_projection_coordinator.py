@@ -14,6 +14,7 @@ from moa.models.character import ProfileSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.profile_repository import ProfileRepository
+from moa.services.projection_authority import PROFILE_PROJECTION
 
 
 class ProfileProjectionCoordinatorError(RuntimeError):
@@ -51,8 +52,9 @@ class ProfileProjectionResult:
 class ProfileProjectionCoordinator:
     """Own one SQLite transaction for a Discord profile and its projection."""
 
-    _PROJECTION_KIND = "catalog.profile"
-    _PROJECTION_TABLE = "profile_observations"
+    _PROJECTION_AUTHORITY = PROFILE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
     def __init__(

@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import AntidisablePage
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import ANTIDISABLE_PAGE_PROJECTION
 
 
 class AntidisablePageProjectionCoordinatorError(RuntimeError):
@@ -54,8 +55,9 @@ class AntidisablePageProjectionResult:
 class AntidisablePageProjectionCoordinator:
     """Coordinate one SQLite transaction for an account-scoped `$adl` page."""
 
-    _PROJECTION_KIND = "catalog.antidisable_page"
-    _PROJECTION_TABLE = "import_events"
+    _PROJECTION_AUTHORITY = ANTIDISABLE_PAGE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "antidisable"
     _SCAN_KIND = "antidisable"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})

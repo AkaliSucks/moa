@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import DisableListSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import DISABLELIST_PROJECTION
 
 
 class DisableListProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class DisableListProjectionResult:
 class DisableListProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$dl` projection."""
 
-    _PROJECTION_KIND = "catalog.disablelist"
-    _PROJECTION_TABLE = "disablelist_observations"
+    _PROJECTION_AUTHORITY = DISABLELIST_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "disablelist"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import TimerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import TIMER_STATE_PROJECTION
 
 
 class TimerProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class TimerProjectionResult:
 class TimerProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped timer projection."""
 
-    _PROJECTION_KIND = "catalog.timer_state"
-    _PROJECTION_TABLE = "timer_state_observations"
+    _PROJECTION_AUTHORITY = TIMER_STATE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "timer_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

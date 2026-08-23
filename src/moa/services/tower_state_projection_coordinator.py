@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import TowerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import TOWER_STATE_PROJECTION
 
 
 class TowerStateProjectionCoordinatorError(RuntimeError):
@@ -52,8 +53,9 @@ class TowerStateProjectionResult:
 class TowerStateProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped Tower-state projection."""
 
-    _PROJECTION_KIND = "catalog.tower_state"
-    _PROJECTION_TABLE = "tower_state_observations"
+    _PROJECTION_AUTHORITY = TOWER_STATE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "tower_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

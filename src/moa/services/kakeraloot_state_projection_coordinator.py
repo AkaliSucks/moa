@@ -14,6 +14,7 @@ from moa.models.character import KakeralootStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.kakeraloot_state_repository import _KAKERALOOT_STATE_VALUE_FIELDS
+from moa.services.projection_authority import KAKERALOOT_STATE_PROJECTION
 
 
 class KakeralootStateProjectionCoordinatorError(RuntimeError):
@@ -53,8 +54,9 @@ class KakeralootStateProjectionResult:
 class KakeralootStateProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$lk` projection."""
 
-    _PROJECTION_KIND = "catalog.kakeraloot_state"
-    _PROJECTION_TABLE = "kakeraloot_state_observations"
+    _PROJECTION_AUTHORITY = KAKERALOOT_STATE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakeraloot_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

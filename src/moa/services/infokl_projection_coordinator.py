@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import KakeralootSettingsSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import KAKERALOOT_SETTINGS_PROJECTION
 
 
 class InfoklProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class InfoklProjectionResult:
 class InfoklProjectionCoordinator:
     """Own one SQLite transaction for a server-scoped `$infokl` projection."""
 
-    _PROJECTION_KIND = "catalog.kakeraloot_settings"
-    _PROJECTION_TABLE = "kakeraloot_settings_observations"
+    _PROJECTION_AUTHORITY = KAKERALOOT_SETTINGS_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakeraloot_settings"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

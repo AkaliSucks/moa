@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import ServerSettingsSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import SERVER_SETTINGS_PROJECTION
 
 
 class SettingsProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class SettingsProjectionResult:
 class SettingsProjectionCoordinator:
     """Own one SQLite transaction for a server-settings projection."""
 
-    _PROJECTION_KIND = "catalog.server_settings"
-    _PROJECTION_TABLE = "server_settings_observations"
+    _PROJECTION_AUTHORITY = SERVER_SETTINGS_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "server_settings"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

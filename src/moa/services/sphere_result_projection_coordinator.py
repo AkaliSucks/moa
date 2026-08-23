@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import SphereResultSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import SPHERE_RESULT_PROJECTION
 
 
 class SphereResultProjectionCoordinatorError(RuntimeError):
@@ -50,8 +51,9 @@ class SphereResultProjectionResult:
 class SphereResultProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$oq` projection."""
 
-    _PROJECTION_KIND = "catalog.sphere_result"
-    _PROJECTION_TABLE = "sphere_result_observations"
+    _PROJECTION_AUTHORITY = SPHERE_RESULT_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "sphere_result"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 

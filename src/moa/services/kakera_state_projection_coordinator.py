@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import KakeraStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.services.projection_authority import KAKERA_STATE_PROJECTION
 
 
 class KakeraStateProjectionCoordinatorError(RuntimeError):
@@ -52,8 +53,9 @@ class KakeraStateProjectionResult:
 class KakeraStateProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped Kakera-state projection."""
 
-    _PROJECTION_KIND = "catalog.kakera_state"
-    _PROJECTION_TABLE = "kakera_state_observations"
+    _PROJECTION_AUTHORITY = KAKERA_STATE_PROJECTION
+    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakera_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
