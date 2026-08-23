@@ -11,6 +11,7 @@ from moa.database.migrations import (
 )
 from moa.models.data_health import DataHealthFinding
 from moa.repositories._catalog_identity import normalize
+from moa.services.projection_authority import get_projection_authority
 
 
 class DataHealthSchemaError(RuntimeError):
@@ -152,6 +153,65 @@ class DataHealthRepository:
             )
             for row in provenance_rows
         )
+        findings.extend(self._projection_authority_findings())
+        return tuple(findings)
+
+    def _projection_authority_findings(self) -> tuple[DataHealthFinding, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   link.projection_kind,
+                   link.projection_slot,
+                   link.projection_table
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            WHERE link.state = 'completed'
+              AND source.status = 'succeeded'
+              AND source.legacy_import_event_id IS NOT NULL
+            ORDER BY source.id, link.projection_kind, link.projection_slot
+            """
+        )
+        findings = []
+        for row in rows:
+            projection_kind = row["projection_kind"]
+            local_identifier = (
+                f"source_event_id={row['source_event_id']}; "
+                f"projection_kind={projection_kind!r}; "
+                f"projection_slot={row['projection_slot']!r}"
+            )
+            try:
+                authority = get_projection_authority(projection_kind)
+            except KeyError:
+                findings.append(
+                    DataHealthFinding(
+                        check_id="DH-PG-004",
+                        category="projection-gap",
+                        entity="discord_projection_links",
+                        local_identifier=local_identifier,
+                        reason=(
+                            f"projection kind {projection_kind!r} is unknown to the "
+                            "shared projection authority"
+                        ),
+                    )
+                )
+                continue
+
+            stored_table = row["projection_table"]
+            if stored_table != authority.target_table:
+                findings.append(
+                    DataHealthFinding(
+                        check_id="DH-PG-004",
+                        category="projection-gap",
+                        entity="discord_projection_links",
+                        local_identifier=local_identifier,
+                        reason=(
+                            f"projection kind {projection_kind!r} authorizes target "
+                            f"table {authority.target_table!r}, but stored projection "
+                            f"table is {stored_table!r}"
+                        ),
+                    )
+                )
         return tuple(findings)
 
     def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:

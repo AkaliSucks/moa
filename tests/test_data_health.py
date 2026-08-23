@@ -251,6 +251,19 @@ def _insert_projection_link(
             )
 
 
+def _seed_succeeded_projection_source(path, event_id=1):
+    _insert_aggregate(path, event_id, f"message-{event_id}")
+    _insert_revision(path, event_id, event_id, f"hash-{event_id}")
+    _insert_source_event(
+        path,
+        event_id,
+        f"event-{event_id}",
+        event_id,
+        status="succeeded",
+        legacy_import_event_id=event_id,
+    )
+
+
 def _insert_harem_scan(path, scan_id, account_context_id=1, *, scan_kind="keys"):
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -919,7 +932,13 @@ def test_projection_gap_healthy_normal_source_lifecycle_has_no_findings(tmp_path
         finished_at=OBSERVED_AT,
         legacy_import_event_id=1,
     )
-    _insert_projection_link(database_path, received.source_event_id, "kind", "slot")
+    _insert_projection_link(
+        database_path,
+        received.source_event_id,
+        "catalog.profile",
+        "slot",
+        projection_table="profile_observations",
+    )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
 
@@ -976,7 +995,9 @@ def test_projection_gap_preserves_retry_history_for_current_success(tmp_path):
             "VALUES (1, ?, ?, ?, 'parser', 'router', 'now', 'now', 'now')",
             [(1, "failed", 1), (2, "succeeded", 0)],
         )
-    _insert_projection_link(database_path, 1, "kind", "slot")
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations"
+    )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
 
@@ -1088,9 +1109,212 @@ def test_projection_gap_excludes_missing_target_for_succeeded_source(tmp_path):
     _insert_source_event(
         database_path, 1, "event", 1, status="succeeded", legacy_import_event_id=1
     )
-    _insert_projection_link(database_path, 1, "kind", "slot", projection_table="missing_table")
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "slot",
+        projection_table="profile_observations",
+    )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_reports_unknown_projection_kind(tmp_path):
+    database_path = tmp_path / "projection-gap-unknown-kind.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.unknown",
+        "slot",
+        projection_table="arbitrary_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-004"
+    assert findings[0].entity == "discord_projection_links"
+    assert "unknown to the shared projection authority" in findings[0].reason
+    assert "arbitrary_table" not in findings[0].reason
+
+
+def test_projection_gap_reports_known_kind_with_wrong_authorized_table(tmp_path):
+    database_path = tmp_path / "projection-gap-wrong-table.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "slot",
+        projection_table="other_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-004"
+    assert "profile_observations" in findings[0].reason
+    assert "other_table" in findings[0].reason
+
+
+def test_projection_gap_unknown_kind_takes_precedence_over_wrong_table(tmp_path):
+    database_path = tmp_path / "projection-gap-unknown-precedence.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.unknown",
+        "slot",
+        projection_table="other_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-004"
+    assert "unknown to the shared projection authority" in findings[0].reason
+    assert "authorizes target table" not in findings[0].reason
+
+
+def test_projection_gap_reports_one_finding_per_bad_link_deterministically(tmp_path):
+    database_path = tmp_path / "projection-gap-multiple-bad-links.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.unknown",
+        "unknown-slot",
+        projection_table="other_table",
+    )
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "wrong-table-slot",
+        projection_table="other_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 2
+    assert all(finding.check_id == "DH-PG-004" for finding in findings)
+    assert findings == DataHealthService(database_path).find_projection_gaps()
+    assert any("unknown to the shared projection authority" in finding.reason for finding in findings)
+    assert any("authorizes target table" in finding.reason for finding in findings)
+
+
+@pytest.mark.parametrize(
+    ("projection_kind", "projection_table"),
+    [
+        ("catalog.profile", "profile_observations"),
+        ("catalog.roll", "roll_observations"),
+        ("catalog.roll_key", "harem_key_observations"),
+        ("catalog.roll_rank", "rank_snapshots"),
+        ("catalog.roll_server_character", "server_character_observations"),
+        ("catalog.antidisable_page", "import_events"),
+    ],
+)
+def test_projection_gap_accepts_healthy_authority_pairs(
+    tmp_path, projection_kind, projection_table
+):
+    database_path = tmp_path / "projection-gap-healthy-authority.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        projection_kind,
+        "slot",
+        projection_table=projection_table,
+    )
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+@pytest.mark.parametrize(
+    ("projection_kind", "expected_table"),
+    [
+        ("catalog.roll", "roll_observations"),
+        ("catalog.antidisable_page", "import_events"),
+    ],
+)
+def test_projection_gap_reports_wrong_roll_or_antidisable_table(
+    tmp_path, projection_kind, expected_table
+):
+    database_path = tmp_path / "projection-gap-special-table.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        projection_kind,
+        "slot",
+        projection_table="other_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-004"
+    assert expected_table in findings[0].reason
+
+
+@pytest.mark.parametrize(
+    (
+        "source_status",
+        "legacy_import_event_id",
+        "link_state",
+        "projection_kind",
+        "projection_table",
+        "expected_check",
+    ),
+    [
+        ("failed", 1, "completed", "catalog.unknown", "other_table", "DH-PG-001"),
+        ("failed", 1, "completed", "catalog.profile", "other_table", "DH-PG-001"),
+        ("succeeded", 1, "claimed", "catalog.unknown", "other_table", "DH-PG-002"),
+        ("succeeded", None, "completed", "catalog.unknown", "other_table", "DH-PG-003"),
+        ("succeeded", None, "completed", "catalog.profile", "other_table", "DH-PG-003"),
+    ],
+)
+def test_projection_gap_root_cause_states_suppress_authority_findings(
+    tmp_path,
+    source_status,
+    legacy_import_event_id,
+    link_state,
+    projection_kind,
+    projection_table,
+    expected_check,
+):
+    database_path = tmp_path / "projection-gap-root-cause-boundary.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(
+        database_path,
+        1,
+        "event",
+        1,
+        status=source_status,
+        legacy_import_event_id=legacy_import_event_id,
+    )
+    _insert_projection_link(
+        database_path,
+        1,
+        projection_kind,
+        "slot",
+        state=link_state,
+        projection_table=projection_table,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == [expected_check]
 
 
 def test_projection_gap_does_not_duplicate_dh03_projection_link_findings(tmp_path):
@@ -1102,8 +1326,12 @@ def test_projection_gap_does_not_duplicate_dh03_projection_link_findings(tmp_pat
     _insert_source_event(
         database_path, 1, "event", 1, status="succeeded", legacy_import_event_id=1
     )
-    _insert_projection_link(database_path, 1, "kind", "slot")
-    _insert_projection_link(database_path, 1, "kind", "slot")
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations"
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations"
+    )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
     assert [finding.check_id for finding in DataHealthService(database_path).find_duplicates()] == [
