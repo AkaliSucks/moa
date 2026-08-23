@@ -71,8 +71,8 @@ class DataHealthRepository:
         return tuple(findings)
 
     def scan_projection_gaps(self) -> tuple[DataHealthFinding, ...]:
-        """Return completed links whose source event is not currently succeeded."""
-        rows = self._connection.execute(
+        """Return projection-gap findings for completed and claimed links."""
+        completed_rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
                    source.status AS source_status,
@@ -86,7 +86,7 @@ class DataHealthRepository:
             ORDER BY source.id
             """
         )
-        return tuple(
+        findings = [
             DataHealthFinding(
                 check_id="DH-PG-001",
                 category="projection-gap",
@@ -97,8 +97,34 @@ class DataHealthRepository:
                     f"{int(row['completed_link_count'])} completed projection link(s)"
                 ),
             )
-            for row in rows
+            for row in completed_rows
+        ]
+        claimed_rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   COUNT(link.id) AS claimed_link_count
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            WHERE link.state = 'claimed'
+            GROUP BY source.id
+            ORDER BY source.id
+            """
         )
+        findings.extend(
+            DataHealthFinding(
+                check_id="DH-PG-002",
+                category="projection-gap",
+                entity="discord_source_events",
+                local_identifier=int(row["source_event_id"]),
+                reason=(
+                    f"source event owns {int(row['claimed_link_count'])} "
+                    "durably claimed projection link(s)"
+                ),
+            )
+            for row in claimed_rows
+        )
+        return tuple(findings)
 
     def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
         return self._grouped_duplicate_findings(

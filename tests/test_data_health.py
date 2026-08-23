@@ -905,22 +905,22 @@ def test_projection_gap_healthy_normal_source_lifecycle_has_no_findings(tmp_path
 
 
 @pytest.mark.parametrize(
-    "status", ["received", "processing", "failed", "unresolved_attribution"]
+    "status", ["received", "processing", "succeeded", "failed", "unresolved_attribution"]
 )
-def test_projection_gap_reports_each_non_succeeded_current_source_status(tmp_path, status):
+def test_projection_gap_reports_each_current_source_status_for_claimed_links(tmp_path, status):
     database_path = tmp_path / f"projection-gap-{status}.db"
     _initialize(database_path)
     _insert_aggregate(database_path, 1, "message")
     _insert_revision(database_path, 1, 1, "hash")
     _insert_source_event(database_path, 1, "event", 1, status=status)
-    _insert_projection_link(database_path, 1, "kind", "slot")
+    _insert_projection_link(database_path, 1, "kind", "slot", state="claimed")
 
     findings = DataHealthService(database_path).find_projection_gaps()
 
     assert [(finding.check_id, finding.local_identifier) for finding in findings] == [
-        ("DH-PG-001", 1)
+        ("DH-PG-002", 1)
     ]
-    assert status in findings[0].reason
+    assert "durably claimed projection link(s)" in findings[0].reason
 
 
 def test_projection_gap_groups_completed_links_per_source_event(tmp_path):
@@ -935,6 +935,7 @@ def test_projection_gap_groups_completed_links_per_source_event(tmp_path):
     findings = DataHealthService(database_path).find_projection_gaps()
 
     assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-001"
     assert findings[0].local_identifier == 1
     assert "2 completed projection link(s)" in findings[0].reason
 
@@ -958,14 +959,69 @@ def test_projection_gap_preserves_retry_history_for_current_success(tmp_path):
     assert DataHealthService(database_path).find_projection_gaps() == ()
 
 
-@pytest.mark.parametrize("source_status", ["received", "processing", "failed", "succeeded"])
-def test_projection_gap_excludes_claimed_links(tmp_path, source_status):
-    database_path = tmp_path / f"projection-gap-claimed-{source_status}.db"
+def test_projection_gap_reports_claimed_link_with_active_processing_attempt(tmp_path):
+    database_path = tmp_path / "projection-gap-claimed-active-attempt.db"
     _initialize(database_path)
     _insert_aggregate(database_path, 1, "message")
     _insert_revision(database_path, 1, 1, "hash")
-    _insert_source_event(database_path, 1, "event", 1, status=source_status)
+    _insert_source_event(database_path, 1, "event", 1, status="processing")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO discord_processing_attempts "
+            "(source_event_id, attempt_number, status, retryable, parser_version, "
+            "router_version, started_at, created_at) "
+            "VALUES (1, 1, 'processing', 0, 'parser', 'router', 'now', 'now')"
+        )
     _insert_projection_link(database_path, 1, "kind", "slot", state="claimed")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.check_id, finding.local_identifier) for finding in findings] == [
+        ("DH-PG-002", 1)
+    ]
+
+
+def test_projection_gap_groups_claimed_links_per_source_event(tmp_path):
+    database_path = tmp_path / "projection-gap-claimed-grouping.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message-1")
+    _insert_revision(database_path, 1, 1, "hash-1")
+    _insert_source_event(database_path, 1, "event-1", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind-a", "slot-a", state="claimed")
+    _insert_projection_link(database_path, 1, "kind-b", "slot-b", state="claimed")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-002"
+    assert findings[0].local_identifier == 1
+    assert "2 durably claimed projection link(s)" in findings[0].reason
+
+
+def test_projection_gap_reports_claimed_links_per_source_in_deterministic_order(tmp_path):
+    database_path = tmp_path / "projection-gap-claimed-sources.db"
+    _initialize(database_path)
+    for event_id in (1, 2):
+        _insert_aggregate(database_path, event_id, f"message-{event_id}")
+        _insert_revision(database_path, event_id, event_id, f"hash-{event_id}")
+        _insert_source_event(database_path, event_id, f"event-{event_id}", event_id, status="failed")
+        _insert_projection_link(database_path, event_id, "kind", "slot", state="claimed")
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.check_id, finding.local_identifier) for finding in findings] == [
+        ("DH-PG-002", 1),
+        ("DH-PG-002", 2),
+    ]
+
+
+def test_projection_gap_deferred_null_import_state_has_no_pg_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-null-legacy-import.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind", "slot", state="completed")
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
 
@@ -1237,6 +1293,23 @@ def test_cli_projection_gaps_reports_source_event_findings(tmp_path, monkeypatch
     assert "projection-gap" in result.stdout
     assert "Total findings: 1" in result.stdout
     assert "raw_text" not in result.stdout
+
+
+def test_cli_projection_gaps_reports_claimed_link_findings(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message")
+    _insert_revision(database_path, 1, 1, "hash")
+    _insert_source_event(database_path, 1, "event", 1, status="succeeded")
+    _insert_projection_link(database_path, 1, "kind", "slot", state="claimed")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "projection-gaps"])
+
+    assert result.exit_code == 0
+    assert "DH-PG-002" in result.stdout
+    assert "1" in result.stdout
+    assert "Total findings: 1" in result.stdout
 
 
 def test_data_health_command_inventory_has_only_the_four_audited_commands(
