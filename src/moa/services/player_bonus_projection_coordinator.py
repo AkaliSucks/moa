@@ -14,6 +14,13 @@ from moa.models.character import PlayerBonusSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import PLAYER_BONUS_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class PlayerBonusProjectionCoordinatorError(RuntimeError):
@@ -52,7 +59,9 @@ class PlayerBonusProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$bonus` projection."""
 
     _PROJECTION_AUTHORITY = PLAYER_BONUS_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "player_bonus"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "player_bonus"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
@@ -91,7 +100,11 @@ class PlayerBonusProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = self._player_bonus_slot(server, account)
+        projection_slot = resolve_expected_projections(
+            build_projection_expectation_facts(
+                self._IMPORT_KIND, server=server, account=account
+            )
+        ).known_expected_identities[0].projection_slot
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -105,10 +118,20 @@ class PlayerBonusProjectionCoordinator:
             )
             self._validate_lifecycle(connection, event, source_event_id, attempt_id)
             if str(event["status"]) == "succeeded":
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(connection, event, projection_slot, state=state)
+                if len(durable) != 1:
+                    raise PlayerBonusProjectionIntegrityError(
+                        "durable player-bonus expected identity is unresolved"
+                    )
                 return self._coordinate_replay(
                     connection,
                     event,
-                    projection_slot,
+                    durable[0].projection_slot,
                     state=state,
                 )
 
@@ -509,14 +532,6 @@ class PlayerBonusProjectionCoordinator:
                 raise PlayerBonusProjectionTargetError(
                     f"projection target player_bonus_observations:{observation_id} has mismatched {field_name}"
                 )
-
-    @staticmethod
-    def _player_bonus_slot(server: str, account: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

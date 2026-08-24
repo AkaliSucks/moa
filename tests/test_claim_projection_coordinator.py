@@ -16,6 +16,7 @@ from moa.services.claim_projection_coordinator import (
     ClaimProjectionStateError,
     ClaimProjectionTargetError,
 )
+from moa.services.projection_expectations import claim_projection_slot
 
 
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
@@ -609,7 +610,11 @@ def test_edited_revision_gets_independent_claim_projection(tmp_path) -> None:
 def test_persisted_claimed_link_fails_closed(tmp_path) -> None:
     _database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
-    slot = coordinator._claim_slot("Server", "Account", CLAIM.character_name)
+    slot = claim_projection_slot(
+        CatalogRepository._normalize("Server"),
+        CatalogRepository._normalize("Account"),
+        CatalogRepository._normalize(CLAIM.character_name),
+    )
     with connect(coordinator._database_path) as connection:
         connection.execute(
             """

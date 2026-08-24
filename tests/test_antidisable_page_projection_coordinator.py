@@ -15,6 +15,7 @@ from moa.services.antidisable_page_projection_coordinator import (
     AntidisablePageProjectionResult,
     AntidisablePageProjectionStateError,
 )
+from moa.services.projection_expectations import antidisable_page_projection_slot
 
 
 OBSERVED_AT = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
@@ -533,7 +534,7 @@ def test_first_processing_rejects_preexisting_projection_link(
     database_path, catalog, discord, coordinator, source_event_id, attempt_id, scan_id = _new_processing(
         tmp_path
     )
-    slot = coordinator._antidisable_page_slot("Server", "Account", scan_id, 1)
+    slot = antidisable_page_projection_slot("server", "account", scan_id, 1)
     _insert_projection_link(
         database_path,
         source_event_id=source_event_id,
@@ -778,7 +779,7 @@ def test_replay_rejects_completed_link_with_independent_null_target(tmp_path):
     assert tuple(corrupted)[0:4] == (
         "completed",
         "catalog.antidisable_page",
-        coordinator._antidisable_page_slot("Server", "Account", result.scan_id, 1),
+        antidisable_page_projection_slot("server", "account", result.scan_id, 1),
         "import_events",
     )
     assert corrupted["projection_row_id"] is None

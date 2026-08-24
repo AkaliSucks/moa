@@ -15,6 +15,13 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.profile_repository import ProfileRepository
 from moa.services.projection_authority import PROFILE_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class ProfileProjectionCoordinatorError(RuntimeError):
@@ -53,7 +60,9 @@ class ProfileProjectionCoordinator:
     """Own one SQLite transaction for a Discord profile and its projection."""
 
     _PROJECTION_AUTHORITY = PROFILE_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "profile"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
@@ -91,7 +100,11 @@ class ProfileProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = self._profile_slot(server, account)
+        projection_slot = resolve_expected_projections(
+            build_projection_expectation_facts(
+                "profile", server=server, account=account
+            )
+        ).known_expected_identities[0].projection_slot
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -113,10 +126,22 @@ class ProfileProjectionCoordinator:
                     account=account,
                     persisted_account=persisted_account,
                 )
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(
+                        connection, event, projection_slot, profile
+                    )
+                if len(durable) != 1:
+                    raise ProfileProjectionIntegrityError(
+                        "durable profile expected identity is unresolved"
+                    )
                 return self._coordinate_replay(
                     connection,
                     event,
-                    projection_slot,
+                    durable[0].projection_slot,
                     profile,
                 )
 
@@ -498,14 +523,6 @@ class ProfileProjectionCoordinator:
                 f"projection target profile_observations:{profile_observation_id} "
                 "has mismatched profile values or presence"
             )
-
-    @staticmethod
-    def _profile_slot(server: str, account: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

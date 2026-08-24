@@ -20,6 +20,13 @@ from moa.services.mudapins_projection_coordinator import (
     MudapinsProjectionStateError,
     MudapinsProjectionTargetError,
 )
+from moa.services.projection_expectations import server_account_projection_slot
+
+
+def _slot(server: str, account: str) -> str:
+    return server_account_projection_slot(
+        CatalogRepository._normalize(server), CatalogRepository._normalize(account)
+    )
 
 
 OBSERVED_AT = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
@@ -261,7 +268,7 @@ def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
 
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
-    assert coordinator._mudapins_slot("  SeRver  ", "  AcCount  ") == (
+    assert _slot("  SeRver  ", "  AcCount  ") == (
         '{"account":"account","server":"server"}'
     )
 
@@ -574,7 +581,7 @@ def test_edited_discord_revision_gets_independent_projection(tmp_path) -> None:
 def test_persisted_claimed_link_fails_closed(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
-    slot = coordinator._mudapins_slot("Server", "Account")
+    slot = _slot("Server", "Account")
     with connect(database_path) as connection:
         connection.execute(
             """

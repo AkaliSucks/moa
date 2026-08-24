@@ -15,6 +15,13 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.kakeraloot_state_repository import _KAKERALOOT_STATE_VALUE_FIELDS
 from moa.services.projection_authority import KAKERALOOT_STATE_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class KakeralootStateProjectionCoordinatorError(RuntimeError):
@@ -55,7 +62,9 @@ class KakeralootStateProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$lk` projection."""
 
     _PROJECTION_AUTHORITY = KAKERALOOT_STATE_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "kakeraloot_state"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakeraloot_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
@@ -106,12 +115,26 @@ class KakeralootStateProjectionCoordinator:
                 server=server,
                 account=account,
             )
-            projection_slot = self._kakeraloot_state_slot(server, account)
+            projection_slot = resolve_expected_projections(
+                build_projection_expectation_facts(
+                    self._IMPORT_KIND, server=server, account=account
+                )
+            ).known_expected_identities[0].projection_slot
             if str(event["status"]) == "succeeded":
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(connection, event, projection_slot, state=state)
+                if len(durable) != 1:
+                    raise KakeralootStateProjectionIntegrityError(
+                        "durable kakeraloot-state expected identity is unresolved"
+                    )
                 return self._coordinate_replay(
                     connection,
                     event,
-                    projection_slot,
+                    durable[0].projection_slot,
                     state=state,
                 )
 
@@ -535,14 +558,6 @@ class KakeralootStateProjectionCoordinator:
         if observed is None:
             return value == 0 and incoming in (None, 0)
         return False
-
-    @staticmethod
-    def _kakeraloot_state_slot(server: str, account: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

@@ -14,6 +14,12 @@ from moa.models.character import DisableListSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import DISABLELIST_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class DisableListProjectionCoordinatorError(RuntimeError):
@@ -52,7 +58,6 @@ class DisableListProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped `$dl` projection."""
 
     _PROJECTION_AUTHORITY = DISABLELIST_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "disablelist"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
@@ -78,7 +83,13 @@ class DisableListProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = self._disablelist_slot(server, account)
+        expected_identity = resolve_expected_projections(
+            build_projection_expectation_facts(
+                self._IMPORT_KIND, server=server, account=account
+            )
+        ).known_expected_identities[0]
+        projection_kind = expected_identity.projection_kind
+        projection_slot = expected_identity.projection_slot
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -87,9 +98,27 @@ class DisableListProjectionCoordinator:
             self._validate_attribution(connection, source_event_id=source_event_id, server=server, account=account)
             self._validate_lifecycle(connection, event, source_event_id, attempt_id)
             if str(event["status"]) == "succeeded":
-                return self._coordinate_replay(connection, event, projection_slot, state=state)
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(
+                        connection, event, projection_kind, projection_slot, state=state
+                    )
+                if len(durable) != 1:
+                    raise DisableListProjectionIntegrityError(
+                        "durable disablelist expected identity is unresolved"
+                    )
+                return self._coordinate_replay(
+                    connection,
+                    event,
+                    durable[0].projection_kind,
+                    durable[0].projection_slot,
+                    state=state,
+                )
             links = self._load_links(connection, source_event_id)
-            key = (self._PROJECTION_KIND, projection_slot)
+            key = (projection_kind, projection_slot)
             if set(links) - {key}:
                 raise DisableListProjectionIntegrityError(f"source event {source_event_id} has unexpected projection links")
             existing = links.get(key)
@@ -97,7 +126,7 @@ class DisableListProjectionCoordinator:
                 raise DisableListProjectionIntegrityError(
                     f"disablelist projection for source event {source_event_id} is already {existing['state']}"
                 )
-            self._claim_projection_link(connection, source_event_id, projection_slot, observed_at)
+            self._claim_projection_link(connection, source_event_id, projection_kind, projection_slot, observed_at)
             imported = self._catalog._import_disablelist_with_connection(
                 connection, state=state, server=server, account=account, raw=raw, source=source, observed_at=observed_at
             )
@@ -105,7 +134,7 @@ class DisableListProjectionCoordinator:
             observation_id = self._positive_id(imported.disablelist_observation_id, "disablelist_observation_id")
             self._validate_disablelist_target(connection, observation_id, import_event_id, projection_slot, state)
             target = (self._PROJECTION_TABLE, observation_id)
-            self._complete_projection_link(connection, source_event_id, projection_slot, target, finished_at)
+            self._complete_projection_link(connection, source_event_id, projection_kind, projection_slot, target, finished_at)
             success = self._discord._mark_processing_success_with_connection(
                 connection, source_event_id=source_event_id, attempt_id=attempt_id,
                 finished_at=finished_at, legacy_import_event_id=import_event_id,
@@ -116,13 +145,13 @@ class DisableListProjectionCoordinator:
 
         return run_write_transaction(self._database_path, coordinate_with_connection)
 
-    def _coordinate_replay(self, connection: sqlite3.Connection, event: sqlite3.Row, projection_slot: str, *, state: DisableListSnapshot) -> DisableListProjectionResult:
+    def _coordinate_replay(self, connection: sqlite3.Connection, event: sqlite3.Row, projection_kind: str, projection_slot: str, *, state: DisableListSnapshot) -> DisableListProjectionResult:
         import_event_id = self._positive_id(event["legacy_import_event_id"], "legacy_import_event_id")
         import_event = connection.execute("SELECT id, kind FROM import_events WHERE id = ?", (import_event_id,)).fetchone()
         if import_event is None or str(import_event["kind"]) != self._IMPORT_KIND:
             raise DisableListProjectionTargetError("legacy disablelist import event is missing or wrong")
         links = self._load_links(connection, int(event["id"]))
-        key = (self._PROJECTION_KIND, projection_slot)
+        key = (projection_kind, projection_slot)
         if set(links) != {key}:
             raise DisableListProjectionIntegrityError("succeeded source event has an inconsistent disablelist projection link")
         link = links[key]
@@ -175,15 +204,15 @@ class DisableListProjectionCoordinator:
             links[key] = link
         return links
 
-    def _claim_projection_link(self, connection: sqlite3.Connection, source_event_id: int, projection_slot: str, claimed_at: datetime) -> None:
+    def _claim_projection_link(self, connection: sqlite3.Connection, source_event_id: int, projection_kind: str, projection_slot: str, claimed_at: datetime) -> None:
         value = claimed_at.isoformat()
         connection.execute(
             """INSERT INTO discord_projection_links (source_event_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at)
                VALUES (?, ?, ?, NULL, NULL, 'claimed', ?, NULL, ?, ?)""",
-            (source_event_id, self._PROJECTION_KIND, projection_slot, value, value, value),
+            (source_event_id, projection_kind, projection_slot, value, value, value),
         )
 
-    def _complete_projection_link(self, connection: sqlite3.Connection, source_event_id: int, projection_slot: str, target: tuple[str, int], completed_at: datetime) -> None:
+    def _complete_projection_link(self, connection: sqlite3.Connection, source_event_id: int, projection_kind: str, projection_slot: str, target: tuple[str, int], completed_at: datetime) -> None:
         table, row_id = target
         if table not in self._TARGET_TABLES or isinstance(row_id, bool) or row_id <= 0:
             raise DisableListProjectionIntegrityError("disablelist import returned an invalid projection target")
@@ -191,7 +220,7 @@ class DisableListProjectionCoordinator:
         updated = connection.execute(
             """UPDATE discord_projection_links SET projection_table = ?, projection_row_id = ?, state = 'completed', completed_at = ?, updated_at = ?
                WHERE source_event_id = ? AND projection_kind = ? AND projection_slot = ? AND state = 'claimed'""",
-            (table, row_id, value, value, source_event_id, self._PROJECTION_KIND, projection_slot),
+            (table, row_id, value, value, source_event_id, projection_kind, projection_slot),
         )
         if updated.rowcount != 1:
             raise DisableListProjectionIntegrityError("disablelist projection link could not be completed")
@@ -240,10 +269,6 @@ class DisableListProjectionCoordinator:
         if observed is None:
             return value == 0 and incoming in (None, False)
         return False
-
-    @staticmethod
-    def _disablelist_slot(server: str, account: str) -> str:
-        return json.dumps({"account": CatalogRepository._normalize(account), "server": CatalogRepository._normalize(server)}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

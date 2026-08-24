@@ -16,6 +16,7 @@ from moa.services.settings_projection_coordinator import (
     SettingsProjectionStateError,
     SettingsProjectionTargetError,
 )
+from moa.services.projection_expectations import server_projection_slot
 
 
 OBSERVED_AT = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
@@ -166,8 +167,10 @@ def test_first_processing_coordinates_settings_and_success(tmp_path) -> None:
 def test_projection_slot_is_deterministic_and_uses_catalog_normalization(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
-    assert coordinator._settings_slot("  Server   A ") == '{"server":"server a"}'
-    assert coordinator._settings_slot("Server A") == coordinator._settings_slot(" server a ")
+    assert server_projection_slot(CatalogRepository._normalize("  Server   A ")) == '{"server":"server a"}'
+    assert server_projection_slot(CatalogRepository._normalize("Server A")) == (
+        server_projection_slot(CatalogRepository._normalize(" server a "))
+    )
 
 
 @pytest.mark.parametrize(
@@ -299,7 +302,7 @@ def test_persisted_claimed_link_fails_closed(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     _record_attribution(discord, source_event_id)
-    slot = coordinator._settings_slot("Server A")
+    slot = server_projection_slot(CatalogRepository._normalize("Server A"))
     with connect(database_path) as connection:
         connection.execute(
             """

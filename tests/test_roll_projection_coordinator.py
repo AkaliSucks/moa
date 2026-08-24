@@ -16,6 +16,10 @@ from moa.services.roll_projection_coordinator import (
     RollProjectionCoordinator,
     RollProjectionIntegrityError,
 )
+from moa.services.projection_expectations import (
+    build_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
@@ -788,19 +792,31 @@ def test_preexisting_character_update_rolls_back_after_target_integrity_failure(
 def test_projection_slots_are_compact_deterministic_normalized_json(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
-    specs = coordinator._expected_projections(ROLL_ALL, "  SERVER  ", " ACCOUNT ")
+    identities = resolve_expected_projections(
+        build_projection_expectation_facts(
+            "roll",
+            server="  SERVER  ",
+            account=" ACCOUNT ",
+            character=ROLL_ALL.name,
+            series=ROLL_ALL.series,
+            roll_key_present=True,
+            roll_key_type=ROLL_ALL.displayed_key_type,
+            roll_rank_present=True,
+            roll_kakera_value_present=True,
+        )
+    ).known_expected_identities
 
-    assert json.loads(specs[0].slot) == {
+    assert json.loads(identities[0].projection_slot) == {
         "account": "account",
         "character": "coordinator character",
         "series": "coordinator series",
         "server": "server",
     }
-    assert specs[0].slot == (
+    assert identities[0].projection_slot == (
         '{"account":"account","character":"coordinator character",'
         '"series":"coordinator series","server":"server"}'
     )
-    assert json.loads(specs[1].slot)["key_type"] == "gold"
+    assert json.loads(identities[1].projection_slot)["key_type"] == "gold"
 
 
 def test_edited_revision_has_an_independent_projection_set(tmp_path) -> None:
@@ -914,7 +930,15 @@ def test_completed_link_with_wrong_target_table_fails_closed(tmp_path) -> None:
 def test_unexpected_claimed_link_fails_closed(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
-    spec = coordinator._expected_projections(ROLL_NONE, "Server", "Account")[0]
+    identity = resolve_expected_projections(
+        build_projection_expectation_facts(
+            "roll",
+            server="Server",
+            account="Account",
+            character=ROLL_NONE.name,
+            series=ROLL_NONE.series,
+        )
+    ).known_expected_identities[0]
     with connect(database_path) as connection:
         connection.execute(
             """
@@ -925,8 +949,8 @@ def test_unexpected_claimed_link_fails_closed(tmp_path) -> None:
             """,
             (
                 source_event_id,
-                spec.kind,
-                spec.slot,
+                identity.projection_kind,
+                identity.projection_slot,
                 OBSERVED_AT.isoformat(),
                 OBSERVED_AT.isoformat(),
                 OBSERVED_AT.isoformat(),

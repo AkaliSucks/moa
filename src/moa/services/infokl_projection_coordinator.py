@@ -14,6 +14,13 @@ from moa.models.character import KakeralootSettingsSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import KAKERALOOT_SETTINGS_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class InfoklProjectionCoordinatorError(RuntimeError):
@@ -52,7 +59,9 @@ class InfoklProjectionCoordinator:
     """Own one SQLite transaction for a server-scoped `$infokl` projection."""
 
     _PROJECTION_AUTHORITY = KAKERALOOT_SETTINGS_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "kakeraloot_settings"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakeraloot_settings"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
@@ -90,7 +99,9 @@ class InfoklProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = self._infokl_slot(server)
+        projection_slot = resolve_expected_projections(
+            build_projection_expectation_facts(self._IMPORT_KIND, server=server)
+        ).known_expected_identities[0].projection_slot
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -102,7 +113,28 @@ class InfoklProjectionCoordinator:
                     raise InfoklProjectionStateError(
                         f"Discord source event {source_event_id} has already succeeded"
                     )
-                return self._coordinate_replay(connection, event, projection_slot, settings)
+                try:
+                    durable_facts = load_durable_projection_expectation_facts(
+                        connection, source_event_id
+                    )
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(
+                        connection, event, projection_slot, settings
+                    )
+                if durable_facts.source_family != self._IMPORT_KIND:
+                    return self._coordinate_replay(
+                        connection, event, projection_slot, settings
+                    )
+                durable = resolve_expected_projections(
+                    durable_facts
+                ).known_expected_identities
+                if len(durable) != 1:
+                    raise InfoklProjectionIntegrityError(
+                        "durable Infokl expected identity is unresolved"
+                    )
+                return self._coordinate_replay(
+                    connection, event, durable[0].projection_slot, settings
+                )
 
             if attempt_id is None:
                 raise InfoklProjectionStateError(
@@ -431,15 +463,6 @@ class InfoklProjectionCoordinator:
                 raise InfoklProjectionTargetError(
                     f"projection target kakeraloot_settings_observations:{observation_id} has mismatched {field}"
                 )
-
-    @staticmethod
-    def _infokl_slot(server: str) -> str:
-        return json.dumps(
-            {"server": CatalogRepository._normalize(server)},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

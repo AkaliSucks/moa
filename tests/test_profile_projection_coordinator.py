@@ -19,6 +19,13 @@ from moa.services.profile_projection_coordinator import (
     ProfileProjectionStateError,
     ProfileProjectionTargetError,
 )
+from moa.services.projection_expectations import server_account_projection_slot
+
+
+def _slot(server: str, account: str) -> str:
+    return server_account_projection_slot(
+        CatalogRepository._normalize(server), CatalogRepository._normalize(account)
+    )
 
 
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
@@ -609,7 +616,7 @@ def test_completed_link_with_mismatched_import_event_fails_closed(tmp_path) -> N
 def test_unexpected_claimed_link_fails_closed(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
-    slot = coordinator._profile_slot("Server", "Account")
+    slot = _slot("Server", "Account")
     with connect(database_path) as connection:
         connection.execute(
             """

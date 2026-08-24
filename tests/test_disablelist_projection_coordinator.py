@@ -17,6 +17,13 @@ from moa.services.disablelist_projection_coordinator import (
     DisableListProjectionStateError,
     DisableListProjectionTargetError,
 )
+from moa.services.projection_expectations import server_account_projection_slot
+
+
+def _slot(server: str, account: str) -> str:
+    return server_account_projection_slot(
+        CatalogRepository._normalize(server), CatalogRepository._normalize(account)
+    )
 
 
 OBSERVED_AT = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
@@ -100,7 +107,7 @@ def test_first_processing_is_atomic_and_preserves_disablelist_snapshot(tmp_path)
 
 def test_boundary_state_and_normalized_slot_preserve_zero_null_false_and_empty_entries(tmp_path):
     path, _catalog, discord, coordinator = _repositories(tmp_path)
-    assert coordinator._disablelist_slot(" Server A ", " Account A ") == '{"account":"account a","server":"server a"}'
+    assert _slot(" Server A ", " Account A ") == '{"account":"account a","server":"server a"}'
     source_event_id, attempt_id = _receive_and_begin(discord)
     _attribute(discord, source_event_id)
     result = _coordinate(coordinator, source_event_id, attempt_id, BOUNDARY)
@@ -400,7 +407,7 @@ def test_existing_projection_links_fail_closed_without_replacement(tmp_path, lin
     path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord, link_case)
     _attribute(discord, source_event_id)
-    slot = coordinator._disablelist_slot("Server", "Account")
+    slot = _slot("Server", "Account")
     with connect(path) as connection:
         if link_case == "wrong_kind":
             _insert_link(connection, source_event_id, "catalog.wishlist", slot)

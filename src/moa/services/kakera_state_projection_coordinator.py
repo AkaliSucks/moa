@@ -14,6 +14,13 @@ from moa.models.character import KakeraStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import KAKERA_STATE_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class KakeraStateProjectionCoordinatorError(RuntimeError):
@@ -54,7 +61,9 @@ class KakeraStateProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped Kakera-state projection."""
 
     _PROJECTION_AUTHORITY = KAKERA_STATE_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "kakera_state"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "kakera_state"
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
@@ -105,12 +114,26 @@ class KakeraStateProjectionCoordinator:
                 server=server,
                 account=account,
             )
-            projection_slot = self._kakera_state_slot(server, account)
+            projection_slot = resolve_expected_projections(
+                build_projection_expectation_facts(
+                    self._IMPORT_KIND, server=server, account=account
+                )
+            ).known_expected_identities[0].projection_slot
             if str(event["status"]) == "succeeded":
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(connection, event, projection_slot, state=state)
+                if len(durable) != 1:
+                    raise KakeraStateProjectionIntegrityError(
+                        "durable kakera-state expected identity is unresolved"
+                    )
                 return self._coordinate_replay(
                     connection,
                     event,
-                    projection_slot,
+                    durable[0].projection_slot,
                     state=state,
                 )
 
@@ -498,14 +521,6 @@ class KakeraStateProjectionCoordinator:
             raise KakeraStateProjectionTargetError(
                 f"projection target kakera_state_observations:{observation_id} has mismatched observation time"
             )
-
-    @staticmethod
-    def _kakera_state_slot(server: str, account: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

@@ -17,6 +17,13 @@ from moa.services.tower_state_projection_coordinator import (
     TowerStateProjectionStateError,
     TowerStateProjectionTargetError,
 )
+from moa.services.projection_expectations import server_account_projection_slot
+
+
+def _slot(server: str, account: str) -> str:
+    return server_account_projection_slot(
+        CatalogRepository._normalize(server), CatalogRepository._normalize(account)
+    )
 
 
 OBSERVED_AT = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
@@ -288,10 +295,10 @@ def test_completed_tower_values_preserve_repository_presence_semantics(
 def test_tower_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
-    assert coordinator._tower_state_slot("  Server   A ", " Account   A ") == (
+    assert _slot("  Server   A ", " Account   A ") == (
         '{"account":"account a","server":"server a"}'
     )
-    assert coordinator._tower_state_slot("Server A", "Account A") == coordinator._tower_state_slot(
+    assert _slot("Server A", "Account A") == _slot(
         " server a ", " account a "
     )
 
@@ -696,7 +703,7 @@ def test_claimed_tower_link_fails_closed(tmp_path) -> None:
             (
                 source_event_id,
                 coordinator._PROJECTION_KIND,
-                coordinator._tower_state_slot("Server", "Account"),
+                _slot("Server", "Account"),
                 OBSERVED_AT.isoformat(),
                 OBSERVED_AT.isoformat(),
                 OBSERVED_AT.isoformat(),

@@ -14,6 +14,13 @@ from moa.models.character import ClaimConfirmation
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import CLAIM_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class ClaimProjectionCoordinatorError(RuntimeError):
@@ -53,7 +60,9 @@ class ClaimProjectionCoordinator:
     """Own one SQLite transaction for a Discord claim and its projection."""
 
     _PROJECTION_AUTHORITY = CLAIM_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "claim"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
@@ -91,7 +100,14 @@ class ClaimProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = self._claim_slot(server, account, claim.character_name)
+        projection_slot = resolve_expected_projections(
+            build_projection_expectation_facts(
+                "claim",
+                server=server,
+                account=account,
+                character=claim.character_name,
+            )
+        ).known_expected_identities[0].projection_slot
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -113,7 +129,25 @@ class ClaimProjectionCoordinator:
                     account=account,
                     persisted_account=persisted_account,
                 )
-                return self._coordinate_replay(connection, event, projection_slot)
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(
+                        connection, event, projection_slot
+                    )
+                if len(durable) != 1:
+                    return self._coordinate_replay(
+                        connection, event, projection_slot
+                    )
+                if durable[0].projection_slot != projection_slot:
+                    raise ClaimProjectionIntegrityError(
+                        f"succeeded source event {event['id']} has an inconsistent claim projection link"
+                    )
+                return self._coordinate_replay(
+                    connection, event, durable[0].projection_slot
+                )
 
             if attempt_id is None:
                 raise ClaimProjectionStateError(
@@ -484,15 +518,6 @@ class ClaimProjectionCoordinator:
                 f"projection target claim_observations:{claim_observation_id} has mismatched character identity"
             )
         return actual_character_id
-
-    @staticmethod
-    def _claim_slot(server: str, account: str, character_name: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "character_name": CatalogRepository._normalize(character_name),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

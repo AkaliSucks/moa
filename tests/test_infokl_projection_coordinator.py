@@ -16,6 +16,7 @@ from moa.services.infokl_projection_coordinator import (
     InfoklProjectionStateError,
     InfoklProjectionTargetError,
 )
+from moa.services.projection_expectations import server_projection_slot
 
 
 OBSERVED_AT = datetime(2026, 7, 22, 12, 0, tzinfo=timezone.utc)
@@ -186,8 +187,10 @@ def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
-    assert coordinator._infokl_slot("  Server   A ") == '{"server":"server a"}'
-    assert coordinator._infokl_slot("Server A") == coordinator._infokl_slot(" server a ")
+    assert server_projection_slot(CatalogRepository._normalize("  Server   A ")) == '{"server":"server a"}'
+    assert server_projection_slot(CatalogRepository._normalize("Server A")) == (
+        server_projection_slot(CatalogRepository._normalize(" server a "))
+    )
 
 
 @pytest.mark.parametrize(
@@ -383,7 +386,7 @@ def test_persisted_claimed_link_fails_closed(tmp_path) -> None:
     source_event_id, attempt_id = _receive_and_begin(discord)
     _record_attribution(discord, source_event_id)
     with connect(database_path) as connection:
-        slot = coordinator._infokl_slot("Server A")
+        slot = server_projection_slot(CatalogRepository._normalize("Server A"))
         value = OBSERVED_AT.isoformat()
         connection.execute(
             """

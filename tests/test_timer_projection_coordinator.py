@@ -17,6 +17,13 @@ from moa.services.timer_projection_coordinator import (
     TimerProjectionStateError,
     TimerProjectionTargetError,
 )
+from moa.services.projection_expectations import server_account_projection_slot
+
+
+def _slot(server: str, account: str) -> str:
+    return server_account_projection_slot(
+        CatalogRepository._normalize(server), CatalogRepository._normalize(account)
+    )
 
 
 OBSERVED_AT = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
@@ -225,10 +232,10 @@ def test_first_processing_writes_one_timer_projection_and_preserves_snapshot(tmp
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
     _database_path, _catalog, _discord, coordinator = _repositories(tmp_path)
 
-    assert coordinator._timer_slot("  Server   A ", " Account   A ") == (
+    assert _slot("  Server   A ", " Account   A ") == (
         '{"account":"account a","server":"server a"}'
     )
-    assert coordinator._timer_slot("Server A", "Account A") == coordinator._timer_slot(
+    assert _slot("Server A", "Account A") == _slot(
         " server a ", " account a "
     )
 
@@ -448,7 +455,7 @@ def test_claimed_link_fails_closed(tmp_path) -> None:
         connection.execute(
             "INSERT INTO discord_projection_links (source_event_id, projection_kind, projection_slot, state, claimed_at, created_at, updated_at) "
             "VALUES (?, ?, ?, 'claimed', ?, ?, ?)",
-            (source_event_id, coordinator._PROJECTION_KIND, coordinator._timer_slot("Server", "Account"), OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat()),
+            (source_event_id, coordinator._PROJECTION_KIND, _slot("Server", "Account"), OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat()),
         )
 
     with pytest.raises(TimerProjectionIntegrityError, match="still claimed"):

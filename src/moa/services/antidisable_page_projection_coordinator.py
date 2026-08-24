@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +13,13 @@ from moa.models.character import AntidisablePage
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import ANTIDISABLE_PAGE_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class AntidisablePageProjectionCoordinatorError(RuntimeError):
@@ -56,7 +62,9 @@ class AntidisablePageProjectionCoordinator:
     """Coordinate one SQLite transaction for an account-scoped `$adl` page."""
 
     _PROJECTION_AUTHORITY = ANTIDISABLE_PAGE_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        "antidisable"
+    ].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "antidisable"
     _SCAN_KIND = "antidisable"
@@ -114,10 +122,40 @@ class AntidisablePageProjectionCoordinator:
                 server=server,
                 account=account,
             )
-            projection_slot = self._antidisable_page_slot(
-                server, account, scan_id, page_number
-            )
+            projection_slot = resolve_expected_projections(
+                build_projection_expectation_facts(
+                    self._IMPORT_KIND,
+                    server=server,
+                    account=account,
+                    scan_id=scan_id,
+                    page_number=page_number,
+                )
+            ).known_expected_identities[0].projection_slot
             if str(event["status"]) == "succeeded":
+                try:
+                    durable_facts = load_durable_projection_expectation_facts(
+                        connection, source_event_id
+                    )
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(
+                        connection,
+                        event,
+                        page=page,
+                        scan_id=scan_id,
+                        server=server,
+                        account=account,
+                        raw=raw,
+                        source=source,
+                        observed_at=observed_at,
+                        projection_slot=projection_slot,
+                    )
+                durable = resolve_expected_projections(
+                    durable_facts
+                ).known_expected_identities
+                if len(durable) != 1:
+                    raise AntidisablePageProjectionIntegrityError(
+                        "durable Antidisable expected identity is unresolved"
+                    )
                 return self._coordinate_replay(
                     connection,
                     event,
@@ -128,7 +166,7 @@ class AntidisablePageProjectionCoordinator:
                     raw=raw,
                     source=source,
                     observed_at=observed_at,
-                    projection_slot=projection_slot,
+                    projection_slot=durable[0].projection_slot,
                 )
 
             self._validate_scan_for_import(
@@ -656,18 +694,6 @@ class AntidisablePageProjectionCoordinator:
                 "antidisable page projection link could not be completed"
             )
 
-    @staticmethod
-    def _antidisable_page_slot(
-        server: str, account: str, scan_id: int, page_number: int
-    ) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "page_number": page_number,
-            "scan_id": scan_id,
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
     @classmethod
     def _validate_projection_slot(
         cls,
@@ -678,7 +704,15 @@ class AntidisablePageProjectionCoordinator:
         scan_id: int,
         page_number: int,
     ) -> None:
-        expected = cls._antidisable_page_slot(server, account, scan_id, page_number)
+        expected = resolve_expected_projections(
+            build_projection_expectation_facts(
+                cls._IMPORT_KIND,
+                server=server,
+                account=account,
+                scan_id=scan_id,
+                page_number=page_number,
+            )
+        ).known_expected_identities[0].projection_slot
         if projection_slot != expected:
             raise AntidisablePageProjectionTargetError(
                 "antidisable page projection slot is invalid"

@@ -14,6 +14,13 @@ from moa.models.character import TimerStateSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import TIMER_STATE_PROJECTION
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    PROJECTION_EXPECTATION_POLICIES,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class TimerProjectionCoordinatorError(RuntimeError):
@@ -52,9 +59,11 @@ class TimerProjectionCoordinator:
     """Own one SQLite transaction for an account-scoped timer projection."""
 
     _PROJECTION_AUTHORITY = TIMER_STATE_PROJECTION
-    _PROJECTION_KIND = _PROJECTION_AUTHORITY.projection_kind
-    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _IMPORT_KIND = "timer_state"
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
+        _IMPORT_KIND
+    ].possible_projection_kinds[0]
+    _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
     def __init__(
@@ -103,9 +112,25 @@ class TimerProjectionCoordinator:
                 server=server,
                 account=account,
             )
-            projection_slot = self._timer_slot(server, account)
+            projection_slot = resolve_expected_projections(
+                build_projection_expectation_facts(
+                    self._IMPORT_KIND, server=server, account=account
+                )
+            ).known_expected_identities[0].projection_slot
             if str(event["status"]) == "succeeded":
-                return self._coordinate_replay(connection, event, projection_slot)
+                try:
+                    durable = resolve_expected_projections(
+                        load_durable_projection_expectation_facts(connection, source_event_id)
+                    ).known_expected_identities
+                except DurableProjectionExpectationFactsError:
+                    return self._coordinate_replay(connection, event, projection_slot)
+                if len(durable) != 1:
+                    raise TimerProjectionIntegrityError(
+                        "durable timer expected identity is unresolved"
+                    )
+                return self._coordinate_replay(
+                    connection, event, durable[0].projection_slot
+                )
 
             links = self._load_links(connection, source_event_id)
             expected_key = (self._PROJECTION_KIND, projection_slot)
@@ -446,14 +471,6 @@ class TimerProjectionCoordinator:
             raise TimerProjectionTargetError(
                 f"projection target timer_state_observations:{observation_id} has mismatched timer scope"
             )
-
-    @staticmethod
-    def _timer_slot(server: str, account: str) -> str:
-        values = {
-            "account": CatalogRepository._normalize(account),
-            "server": CatalogRepository._normalize(server),
-        }
-        return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:

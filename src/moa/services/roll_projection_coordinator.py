@@ -23,6 +23,14 @@ from moa.services.projection_authority import (
     ROLL_RANK_PROJECTION,
     ROLL_SERVER_CHARACTER_PROJECTION,
     ProjectionKindAuthority,
+    get_projection_authority,
+)
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    ExpectedProjectionSet,
+    build_projection_expectation_facts,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
 )
 
 
@@ -107,7 +115,23 @@ class RollProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        expected = self._expected_projections(roll, server, account)
+        expected_set = resolve_expected_projections(
+            build_projection_expectation_facts(
+                "roll",
+                server=server,
+                account=account,
+                character=roll.name,
+                series=roll.series,
+                roll_key_present=(
+                    roll.displayed_key_count is not None
+                    and roll.displayed_key_type is not None
+                ),
+                roll_key_type=roll.displayed_key_type,
+                roll_rank_present=roll.claim_rank is not None,
+                roll_kakera_value_present=roll.kakera_value is not None,
+            )
+        )
+        expected = self._projection_specs(expected_set)
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -124,6 +148,14 @@ class RollProjectionCoordinator:
                     server=server,
                     account=account,
                 )
+                try:
+                    durable_facts = load_durable_projection_expectation_facts(
+                        connection, source_event_id
+                    )
+                except DurableProjectionExpectationFactsError:
+                    durable_facts = None
+                if durable_facts is not None and durable_facts.source_family == "roll":
+                    resolve_expected_projections(durable_facts)
                 return self._coordinate_replay(connection, event, expected, roll)
 
             if attempt_id is None:
@@ -595,52 +627,22 @@ class RollProjectionCoordinator:
             targets.append((spec.table, int(row_id)))
         return tuple(targets)
 
-    def _expected_projections(
-        self, roll: RollObservation, server: str, account: str
-    ) -> tuple[_ProjectionSpec, ...]:
-        slot_values = {
-            "account": self._normalize(account),
-            "character": self._normalize(roll.name),
-            "series": self._normalize(roll.series),
-            "server": self._normalize(server),
+    @staticmethod
+    def _projection_specs(expected: ExpectedProjectionSet) -> tuple[_ProjectionSpec, ...]:
+        result_attributes = {
+            "catalog.roll": "roll_observation_id",
+            "catalog.roll_key": "harem_key_observation_id",
+            "catalog.roll_rank": "rank_snapshot_id",
+            "catalog.roll_server_character": "server_character_observation_id",
         }
-
-        def slot(**extra: str) -> str:
-            values = {**slot_values, **extra}
-            return json.dumps(values, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-        expected = [
+        return tuple(
             _ProjectionSpec(
-                ROLL_PROJECTION,
-                slot(),
-                "roll_observation_id",
+                get_projection_authority(identity.projection_kind),
+                identity.projection_slot,
+                result_attributes[identity.projection_kind],
             )
-        ]
-        if roll.displayed_key_count is not None and roll.displayed_key_type is not None:
-            expected.append(
-                _ProjectionSpec(
-                    ROLL_KEY_PROJECTION,
-                    slot(key_type=self._normalize(roll.displayed_key_type)),
-                    "harem_key_observation_id",
-                )
-            )
-        if roll.claim_rank is not None:
-            expected.append(
-                _ProjectionSpec(
-                    ROLL_RANK_PROJECTION,
-                    slot(),
-                    "rank_snapshot_id",
-                )
-            )
-        if roll.kakera_value is not None:
-            expected.append(
-                _ProjectionSpec(
-                    ROLL_SERVER_CHARACTER_PROJECTION,
-                    slot(),
-                    "server_character_observation_id",
-                )
-            )
-        return tuple(expected)
+            for identity in expected.known_expected_identities
+        )
 
     @staticmethod
     def _normalize_datetime(value: datetime, field_name: str) -> datetime:
