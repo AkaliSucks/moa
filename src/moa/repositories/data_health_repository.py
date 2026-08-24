@@ -12,6 +12,13 @@ from moa.database.migrations import (
 from moa.models.data_health import DataHealthFinding
 from moa.repositories._catalog_identity import normalize
 from moa.services.projection_authority import get_projection_authority
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    Expectedness,
+    ExpectedProjectionIdentity,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 class DataHealthSchemaError(RuntimeError):
@@ -157,7 +164,119 @@ class DataHealthRepository:
         findings.extend(self._projection_target_findings())
         findings.extend(self._projection_ownership_findings())
         findings.extend(self._projection_context_findings())
+        findings.extend(self._projection_expectation_findings())
         return tuple(findings)
+
+    def _projection_expectation_findings(self) -> tuple[DataHealthFinding, ...]:
+        """Compare authoritative expected identities with completed link identities."""
+        sources = self._connection.execute(
+            """
+            SELECT id AS source_event_id
+            FROM discord_source_events
+            WHERE status = 'succeeded'
+              AND legacy_import_event_id IS NOT NULL
+            ORDER BY id
+            """
+        )
+        findings = []
+        for source in sources:
+            source_event_id = int(source["source_event_id"])
+            links = tuple(
+                self._connection.execute(
+                    """
+                    SELECT projection_kind, projection_slot, projection_table, state
+                    FROM discord_projection_links
+                    WHERE source_event_id = ?
+                    ORDER BY projection_kind, projection_slot
+                    """,
+                    (source_event_id,),
+                )
+            )
+            if any(link["state"] != "completed" for link in links):
+                continue
+
+            observed = set()
+            structurally_valid = True
+            for link in links:
+                projection_kind = link["projection_kind"]
+                try:
+                    authority = get_projection_authority(projection_kind)
+                except KeyError:
+                    structurally_valid = False
+                    break
+                if link["projection_table"] != authority.target_table:
+                    structurally_valid = False
+                    break
+                observed.add(
+                    ExpectedProjectionIdentity(
+                        projection_kind=str(projection_kind),
+                        projection_slot=str(link["projection_slot"]),
+                    )
+                )
+            if not structurally_valid:
+                continue
+
+            try:
+                facts = load_durable_projection_expectation_facts(
+                    self._connection, source_event_id
+                )
+            except DurableProjectionExpectationFactsError:
+                continue
+            expected_set = resolve_expected_projections(facts)
+
+            for identity in expected_set.known_expected_identities:
+                if identity in observed:
+                    continue
+                local_identifier = self._projection_identity_identifier(
+                    source_event_id, identity
+                )
+                findings.append(
+                    DataHealthFinding(
+                        check_id="DH-PG-008",
+                        category="projection-gaps",
+                        entity="discord_source_events",
+                        local_identifier=local_identifier,
+                        reason=(
+                            "expected projection identity is missing: "
+                            f"projection kind {identity.projection_kind!r}, "
+                            f"projection slot {identity.projection_slot!r}"
+                        ),
+                    )
+                )
+
+            for identity in sorted(
+                observed,
+                key=lambda value: (value.projection_kind, value.projection_slot),
+            ):
+                if expected_set.expectedness_for(identity) is not Expectedness.NOT_EXPECTED:
+                    continue
+                local_identifier = self._projection_identity_identifier(
+                    source_event_id, identity
+                )
+                findings.append(
+                    DataHealthFinding(
+                        check_id="DH-PG-008",
+                        category="projection-gaps",
+                        entity="discord_projection_links",
+                        local_identifier=local_identifier,
+                        reason=(
+                            "observed projection identity is not expected: "
+                            f"projection kind {identity.projection_kind!r}, "
+                            f"projection slot {identity.projection_slot!r}"
+                        ),
+                    )
+                )
+        return tuple(findings)
+
+    @staticmethod
+    def _projection_identity_identifier(
+        source_event_id: int, identity: ExpectedProjectionIdentity
+    ) -> str:
+        return (
+            f"source_event_id={source_event_id}; "
+            f"projection_kind={identity.projection_kind!r}; "
+            f"projection_slot={identity.projection_slot!r}"
+        )
 
     def _projection_authority_findings(self) -> tuple[DataHealthFinding, ...]:
         rows = self._connection.execute(

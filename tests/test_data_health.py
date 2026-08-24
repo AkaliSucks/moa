@@ -201,13 +201,15 @@ def _insert_source_event(
     *,
     status="received",
     legacy_import_event_id=None,
+    import_kind="test",
+    insert_import_event=True,
 ):
     with sqlite3.connect(path) as connection:
-        if legacy_import_event_id is not None:
+        if legacy_import_event_id is not None and insert_import_event:
             connection.execute(
                 "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
-                "VALUES (?, 'test', 'test', 'now', 'test')",
-                (legacy_import_event_id,),
+                "VALUES (?, ?, 'test', 'now', 'test')",
+                (legacy_import_event_id, import_kind),
             )
         connection.execute(
             "INSERT INTO discord_source_events "
@@ -247,8 +249,8 @@ def _insert_projection_link(
             connection.execute(
                 "INSERT INTO discord_projection_links "
                 "(source_event_id, projection_kind, projection_slot, state, claimed_at, "
-                "created_at, updated_at) VALUES (?, ?, ?, 'claimed', 'now', 'now', 'now')",
-                (source_event_id, projection_kind, projection_slot),
+                "created_at, updated_at) VALUES (?, ?, ?, ?, 'now', 'now', 'now')",
+                (source_event_id, projection_kind, projection_slot, state),
             )
 
 
@@ -316,7 +318,7 @@ def _insert_generic_projection_target(path, table, row_id, import_event_id, acco
         )
 
 
-def _seed_succeeded_projection_source(path, event_id=1):
+def _seed_succeeded_projection_source(path, event_id=1, *, import_kind="test"):
     _insert_aggregate(path, event_id, f"message-{event_id}")
     _insert_revision(path, event_id, event_id, f"hash-{event_id}")
     _insert_source_event(
@@ -326,6 +328,7 @@ def _seed_succeeded_projection_source(path, event_id=1):
         event_id,
         status="succeeded",
         legacy_import_event_id=event_id,
+        import_kind=import_kind,
     )
 
 
@@ -1185,6 +1188,151 @@ def test_projection_gap_excludes_succeeded_source_with_zero_links(tmp_path):
     _insert_source_event(database_path, 1, "event", 1, status="succeeded")
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_reports_missing_authoritative_singleton_identity(tmp_path):
+    database_path = tmp_path / "projection-gap-008-missing.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-008"
+    assert findings[0].category == "projection-gaps"
+    assert findings[0].entity == "discord_source_events"
+    assert findings[0].local_identifier == (
+        "source_event_id=1; projection_kind='catalog.profile'; "
+        "projection_slot='{\"account\":\"account\",\"server\":\"server\"}'"
+    )
+    assert "expected projection identity is missing" in findings[0].reason
+
+
+def test_projection_gap_reports_authoritative_cross_family_extra_identity(tmp_path):
+    database_path = tmp_path / "projection-gap-008-extra.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_profile_observation(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        '{"account":"account","server":"server"}',
+        projection_table="profile_observations",
+        projection_row_id=999,
+    )
+    _insert_generic_projection_target(database_path, "timer_state_observations", 100, 1)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.timer_state",
+        "unexpected-slot",
+        projection_table="timer_state_observations",
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-008"
+    assert findings[0].entity == "discord_projection_links"
+    assert "catalog.timer_state" in findings[0].local_identifier
+    assert "unexpected-slot" in findings[0].local_identifier
+    assert "observed projection identity is not expected" in findings[0].reason
+
+
+def test_projection_gap_wrong_slot_is_two_set_difference_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-008-wrong-slot.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_profile_observation(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "wrong-slot",
+        projection_table="profile_observations",
+        projection_row_id=999,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.entity, finding.local_identifier) for finding in findings] == [
+        (
+            "discord_projection_links",
+            "source_event_id=1; projection_kind='catalog.profile'; "
+            "projection_slot='wrong-slot'",
+        ),
+        (
+            "discord_source_events",
+            "source_event_id=1; projection_kind='catalog.profile'; "
+            "projection_slot='{\"account\":\"account\",\"server\":\"server\"}'",
+        ),
+    ]
+    assert all(finding.check_id == "DH-PG-008" for finding in findings)
+
+
+def test_projection_gap_claimed_link_suppresses_expected_set_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-008-claimed.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "claimed-slot",
+        state="claimed",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-002"]
+
+
+def test_projection_gap_malformed_link_suppresses_expected_set_findings(tmp_path):
+    database_path = tmp_path / "projection-gap-008-pg004.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.unknown",
+        "slot",
+        projection_table="other_table",
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-004"]
+
+
+def test_projection_gap_durable_expectation_error_suppresses_only_that_source(tmp_path):
+    database_path = tmp_path / "projection-gap-008-durable-error.db"
+    _initialize(database_path)
+    _insert_aggregate(database_path, 1, "message-1")
+    _insert_revision(database_path, 1, 1, "hash-1")
+    _insert_source_event(
+        database_path,
+        1,
+        "event-1",
+        1,
+        status="succeeded",
+        legacy_import_event_id=999,
+        insert_import_event=False,
+    )
+    _seed_succeeded_projection_source(database_path, 2, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path, source_event_id=2)
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert len(findings) == 1
+    assert findings[0].check_id == "DH-PG-008"
+    assert findings[0].local_identifier.startswith("source_event_id=2;")
 
 
 def test_projection_gap_reports_missing_authorized_target_for_succeeded_source(tmp_path):
