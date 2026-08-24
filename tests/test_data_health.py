@@ -264,6 +264,56 @@ def _insert_profile_observation(path, observation_id=999):
         )
 
 
+def _insert_import_event(path, import_event_id):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+            "VALUES (?, 'test', 'test', 'now', 'test')",
+            (import_event_id,),
+        )
+
+
+def _seed_generic_target_dependencies(path):
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO characters "
+            "(id, name, series, normalized_name, normalized_series, created_at, updated_at) "
+            "VALUES (1, 'Character', 'Series', 'character', 'series', 'now', 'now')"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO harem_scans "
+            "(id, account_context_id, expected_page_count, started_at, scan_kind) "
+            "VALUES (1, 1, 1, 'now', 'keys')"
+        )
+
+
+def _insert_generic_projection_target(path, table, row_id, import_event_id):
+    _seed_generic_target_dependencies(path)
+    with sqlite3.connect(path) as connection:
+        columns = []
+        values = []
+        for column in connection.execute(f"PRAGMA table_info({table})"):
+            name, column_type, not_null, default = column[1], column[2], column[3], column[4]
+            if name in {"id", "import_event_id"} or not not_null or default is not None:
+                continue
+            columns.append(name)
+            if name.endswith("_id"):
+                values.append(1)
+            elif "INT" in column_type.upper():
+                values.append(0)
+            elif "REAL" in column_type.upper() or "FLOA" in column_type.upper():
+                values.append(0.0)
+            else:
+                values.append("test")
+        columns = ["id", *columns, "import_event_id"]
+        values = [row_id, *values, import_event_id]
+        placeholders = ", ".join("?" for _ in values)
+        connection.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+
+
 def _seed_succeeded_projection_source(path, event_id=1):
     _insert_aggregate(path, event_id, f"message-{event_id}")
     _insert_revision(path, event_id, event_id, f"hash-{event_id}")
@@ -1334,7 +1384,7 @@ def test_projection_gap_healthy_existing_target_has_no_finding(tmp_path):
     assert DataHealthService(database_path).find_projection_gaps() == ()
 
 
-def test_projection_gap_existing_target_with_other_provenance_has_no_finding(tmp_path):
+def test_projection_gap_reports_existing_target_with_other_provenance(tmp_path):
     database_path = tmp_path / "projection-gap-target-provenance-deferred.db"
     _initialize(database_path)
     _seed_succeeded_projection_source(database_path)
@@ -1350,6 +1400,167 @@ def test_projection_gap_existing_target_with_other_provenance_has_no_finding(tmp
         "slot",
         projection_table="import_events",
         projection_row_id=2,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+    assert "row 2" in findings[0].reason
+    assert "import event 1" in findings[0].reason
+
+
+def test_projection_gap_reports_wrong_valid_generic_target_import(tmp_path):
+    database_path = tmp_path / "projection-gap-wrong-generic-import.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_generic_projection_target(database_path, "profile_observations", 100, 2)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "slot",
+        projection_table="profile_observations",
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+    assert "profile_observations" in findings[0].reason
+    assert "row 100" in findings[0].reason
+    assert "import event 2" in findings[0].reason
+    assert "import event 1" in findings[0].reason
+
+
+@pytest.mark.parametrize(
+    ("projection_kind", "projection_table"),
+    [
+        (authority.projection_kind, authority.target_table)
+        for authority in PROJECTION_AUTHORITIES
+        if authority.target_table != "import_events"
+    ],
+)
+def test_projection_gap_detects_wrong_valid_import_for_all_generic_targets(
+    tmp_path, projection_kind, projection_table
+):
+    database_path = tmp_path / "projection-gap-all-generic-imports.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_generic_projection_target(database_path, projection_table, 100, 2)
+    _insert_projection_link(
+        database_path,
+        1,
+        projection_kind,
+        "slot",
+        projection_table=projection_table,
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+
+
+@pytest.mark.parametrize(
+    ("projection_kind", "projection_table"),
+    [
+        ("catalog.roll", "roll_observations"),
+        ("catalog.roll_key", "harem_key_observations"),
+        ("catalog.roll_rank", "rank_snapshots"),
+        ("catalog.roll_server_character", "server_character_observations"),
+    ],
+)
+def test_projection_gap_roll_targets_use_only_import_ownership(
+    tmp_path, projection_kind, projection_table
+):
+    database_path = tmp_path / "projection-gap-roll-imports.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_generic_projection_target(database_path, projection_table, 100, 2)
+    _insert_projection_link(
+        database_path,
+        1,
+        projection_kind,
+        "slot",
+        projection_table=projection_table,
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+
+
+def test_projection_gap_reports_wrong_valid_antidisable_import(tmp_path):
+    database_path = tmp_path / "projection-gap-wrong-antidisable-import.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.antidisable_page",
+        "slot",
+        projection_table="import_events",
+        projection_row_id=2,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+    assert "row 2" in findings[0].reason
+    assert "import event 1" in findings[0].reason
+
+
+def test_projection_gap_reports_each_wrong_owned_link_deterministically(tmp_path):
+    database_path = tmp_path / "projection-gap-multiple-wrong-imports.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_generic_projection_target(database_path, "profile_observations", 100, 2)
+    _insert_generic_projection_target(database_path, "timer_state_observations", 101, 2)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "profile-slot",
+        projection_table="profile_observations",
+        projection_row_id=100,
+    )
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.timer_state",
+        "timer-slot",
+        projection_table="timer_state_observations",
+        projection_row_id=101,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006", "DH-PG-006"]
+    assert [finding.local_identifier for finding in findings] == [
+        "source_event_id=1; projection_kind='catalog.profile'; projection_slot='profile-slot'",
+        "source_event_id=1; projection_kind='catalog.timer_state'; projection_slot='timer-slot'",
+    ]
+    assert findings == DataHealthService(database_path).find_projection_gaps()
+
+
+def test_projection_gap_matching_generic_ownership_is_healthy(tmp_path):
+    database_path = tmp_path / "projection-gap-matching-generic-import.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path)
+    _insert_generic_projection_target(database_path, "profile_observations", 100, 1)
+    _insert_projection_link(
+        database_path,
+        1,
+        "catalog.profile",
+        "slot",
+        projection_table="profile_observations",
+        projection_row_id=100,
     )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
