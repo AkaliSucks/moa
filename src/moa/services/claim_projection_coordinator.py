@@ -16,6 +16,8 @@ from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.projection_authority import CLAIM_PROJECTION
 from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
+    ExpectedProjectionSet,
+    Expectedness,
     PROJECTION_EXPECTATION_POLICIES,
     build_projection_expectation_facts,
     load_durable_projection_expectation_facts,
@@ -130,23 +132,18 @@ class ClaimProjectionCoordinator:
                     persisted_account=persisted_account,
                 )
                 try:
-                    durable = resolve_expected_projections(
+                    durable_set = resolve_expected_projections(
                         load_durable_projection_expectation_facts(connection, source_event_id)
-                    ).known_expected_identities
-                except DurableProjectionExpectationFactsError:
-                    return self._coordinate_replay(
-                        connection, event, projection_slot
                     )
-                if len(durable) != 1:
-                    return self._coordinate_replay(
-                        connection, event, projection_slot
-                    )
-                if durable[0].projection_slot != projection_slot:
+                except DurableProjectionExpectationFactsError as error:
                     raise ClaimProjectionIntegrityError(
-                        f"succeeded source event {event['id']} has an inconsistent claim projection link"
-                    )
+                        "durable Claim expected identity is unresolved"
+                    ) from error
                 return self._coordinate_replay(
-                    connection, event, durable[0].projection_slot
+                    connection,
+                    event,
+                    durable_set,
+                    target_projection_slot=projection_slot,
                 )
 
             if attempt_id is None:
@@ -310,7 +307,9 @@ class ClaimProjectionCoordinator:
         self,
         connection: sqlite3.Connection,
         event: sqlite3.Row,
-        projection_slot: str,
+        expected_set: ExpectedProjectionSet,
+        *,
+        target_projection_slot: str,
     ) -> ClaimProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -326,7 +325,24 @@ class ClaimProjectionCoordinator:
             )
 
         links = self._load_links(connection, int(event["id"]))
-        key = (self._PROJECTION_KIND, projection_slot)
+        if len(expected_set.assessments) != 1:
+            raise ClaimProjectionIntegrityError(
+                "durable Claim expected identity is unresolved"
+            )
+        assessment = expected_set.assessments[0]
+        kind_keys = [key for key in links if key[0] == self._PROJECTION_KIND]
+        if assessment.expectedness is Expectedness.EXPECTED:
+            assert assessment.identity is not None
+            key = (
+                assessment.identity.projection_kind,
+                assessment.identity.projection_slot,
+            )
+        elif assessment.expectedness is Expectedness.UNKNOWN and len(kind_keys) == 1:
+            key = kind_keys[0]
+        else:
+            raise ClaimProjectionIntegrityError(
+                "durable Claim expected identity is unresolved"
+            )
         if set(links) != {key}:
             raise ClaimProjectionIntegrityError(
                 f"succeeded source event {event['id']} has an inconsistent claim projection link"
@@ -346,7 +362,7 @@ class ClaimProjectionCoordinator:
             connection,
             claim_observation_id=claim_observation_id,
             import_event_id=int(import_event_id),
-            projection_slot=projection_slot,
+            projection_slot=target_projection_slot,
             expected_character_id=None,
         )
         return ClaimProjectionResult(

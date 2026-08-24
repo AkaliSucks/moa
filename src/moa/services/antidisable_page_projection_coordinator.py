@@ -136,19 +136,10 @@ class AntidisablePageProjectionCoordinator:
                     durable_facts = load_durable_projection_expectation_facts(
                         connection, source_event_id
                     )
-                except DurableProjectionExpectationFactsError:
-                    return self._coordinate_replay(
-                        connection,
-                        event,
-                        page=page,
-                        scan_id=scan_id,
-                        server=server,
-                        account=account,
-                        raw=raw,
-                        source=source,
-                        observed_at=observed_at,
-                        projection_slot=projection_slot,
-                    )
+                except DurableProjectionExpectationFactsError as error:
+                    raise AntidisablePageProjectionIntegrityError(
+                        "durable Antidisable expected identity is unresolved"
+                    ) from error
                 durable = resolve_expected_projections(
                     durable_facts
                 ).known_expected_identities

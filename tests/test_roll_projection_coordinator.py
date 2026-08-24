@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import moa.services.roll_projection_coordinator as roll_projection_coordinator_module
 from moa.database.sqlite import connect
 from moa.models.character import RollObservation
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
@@ -17,6 +18,9 @@ from moa.services.roll_projection_coordinator import (
     RollProjectionIntegrityError,
 )
 from moa.services.projection_expectations import (
+    ExpectedProjectionAssessment,
+    ExpectedProjectionSet,
+    Expectedness,
     build_projection_expectation_facts,
     resolve_expected_projections,
 )
@@ -37,6 +41,14 @@ ROLL_NONE = RollObservation(
     series="Coordinator Series",
     claim_rank=None,
     kakera_value=None,
+)
+ROLL_KEY_ONLY = RollObservation(
+    name="Coordinator Character",
+    series="Coordinator Series",
+    claim_rank=None,
+    kakera_value=None,
+    displayed_key_type="GOLD",
+    displayed_key_count=3,
 )
 
 
@@ -256,6 +268,46 @@ def test_first_processing_coordinates_all_roll_projections_and_success(tmp_path)
         event, attempt = _event_and_attempt(connection)
         assert event[0:2] == ("succeeded", result.import_event_id)
         assert attempt[0:2] == ("succeeded", FINISHED_AT.isoformat())
+
+
+def test_first_processing_key_persistence_is_governed_by_shared_authority(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    original_resolver = roll_projection_coordinator_module.resolve_expected_projections
+
+    def suppress_key_expectation(facts):
+        resolved = original_resolver(facts)
+        return ExpectedProjectionSet(
+            tuple(
+                ExpectedProjectionAssessment(
+                    assessment.projection_kind,
+                    Expectedness.NOT_EXPECTED,
+                )
+                if assessment.projection_kind == "catalog.roll_key"
+                else assessment
+                for assessment in resolved.assessments
+            )
+        )
+
+    monkeypatch.setattr(
+        roll_projection_coordinator_module,
+        "resolve_expected_projections",
+        suppress_key_expectation,
+    )
+
+    result = _coordinate_roll(coordinator, source_event_id, attempt_id, ROLL_ALL)
+
+    assert "harem_key_observations" not in dict(result.projection_targets)
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM harem_key_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links "
+            "WHERE projection_kind = 'catalog.roll_key'"
+        ).fetchone()[0] == 0
 
 
 def test_coordinator_calls_supplied_roll_helper_without_public_wrapper(
@@ -622,6 +674,47 @@ def test_successful_replay_validates_links_and_inserts_nothing(tmp_path) -> None
     with connect(database_path) as connection:
         assert _counts(connection) == before_counts
         assert _event_and_attempt(connection) == (before_event, before_attempt)
+
+
+def test_replay_preserves_durable_unknown_key_expectedness(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id, ROLL_NONE)
+    with connect(database_path) as connection:
+        before_counts = _counts(connection)
+
+    replay = _coordinate_roll(coordinator, source_event_id, None, ROLL_KEY_ONLY)
+
+    assert replay.replay_skipped is True
+    assert replay.projection_targets == first.projection_targets
+    with connect(database_path) as connection:
+        assert _counts(connection) == before_counts
+
+
+def test_replay_uses_exact_durable_expected_key_identity(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id, ROLL_ALL)
+    parsed_with_different_key_type = RollObservation(
+        name=ROLL_ALL.name,
+        series=ROLL_ALL.series,
+        claim_rank=ROLL_ALL.claim_rank,
+        kakera_value=ROLL_ALL.kakera_value,
+        displayed_key_type="SILVER",
+        displayed_key_count=ROLL_ALL.displayed_key_count,
+    )
+
+    replay = _coordinate_roll(
+        coordinator,
+        source_event_id,
+        None,
+        parsed_with_different_key_type,
+    )
+
+    assert replay.replay_skipped is True
+    assert replay.projection_targets == first.projection_targets
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 1
 
 
 def test_succeeded_replay_rejects_non_roll_import_kind_without_mutation(tmp_path) -> None:
@@ -991,7 +1084,7 @@ def test_completed_replay_optional_projection_mismatch_fails_closed(tmp_path) ->
         finished_at=FINISHED_AT,
     )
 
-    with pytest.raises(RollProjectionIntegrityError, match="unexpected projection links"):
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched claim rank"):
         coordinator.coordinate_roll(
             source_event_id=source_event_id,
             attempt_id=None,

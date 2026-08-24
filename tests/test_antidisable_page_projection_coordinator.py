@@ -596,6 +596,28 @@ def test_replay_after_reconstructing_coordinator_writes_nothing(tmp_path):
     assert _counts(database_path) == before
 
 
+def test_replay_rejects_unavailable_durable_identity_without_parsed_fallback(tmp_path):
+    database_path, _catalog, _discord, coordinator, source_event_id, result = _setup(
+        tmp_path
+    )
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE import_events SET kind = 'unsupported' WHERE id = ?",
+            (result.import_event_id,),
+        )
+
+    with pytest.raises(
+        AntidisablePageProjectionIntegrityError,
+        match="durable Antidisable expected identity is unresolved",
+    ):
+        _coordinate(
+            coordinator,
+            source_event_id,
+            None,
+            scan_id=result.scan_id,
+        )
+
+
 def test_explicit_scan_coordination_requires_no_listener_memory_state(tmp_path):
     database_path, catalog, discord, coordinator, source_event_id, attempt_id, scan_id = _new_processing(
         tmp_path

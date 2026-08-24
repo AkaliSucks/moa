@@ -16,7 +16,7 @@ from moa.services.claim_projection_coordinator import (
     ClaimProjectionStateError,
     ClaimProjectionTargetError,
 )
-from moa.services.projection_expectations import claim_projection_slot
+from moa.services.projection_expectations import Expectedness, claim_projection_slot
 
 
 OBSERVED_AT = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
@@ -447,6 +447,46 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
     assert _database_snapshot(database_path) == before
 
 
+def test_succeeded_replay_preserves_unknown_durable_claim_identity_without_parsed_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO claim_observations (
+                account_context_id, character_id, character_name,
+                normalized_character_name, observed_at, import_event_id
+            )
+            SELECT account_context_id, character_id, character_name,
+                   normalized_character_name, observed_at, import_event_id
+            FROM claim_observations
+            WHERE id = ?
+            """,
+            (first.claim_observation_id,),
+        )
+    observed_expectedness = []
+    original_replay = coordinator._coordinate_replay
+
+    def capture_expected_set(connection, event, expected_set, *, target_projection_slot):
+        observed_expectedness.append(expected_set.assessments[0].expectedness)
+        return original_replay(
+            connection,
+            event,
+            expected_set,
+            target_projection_slot=target_projection_slot,
+        )
+
+    monkeypatch.setattr(coordinator, "_coordinate_replay", capture_expected_set)
+
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay.replay_skipped is True
+    assert observed_expectedness == [Expectedness.UNKNOWN]
+
+
 def test_coordinator_resolves_existing_account_character_inside_runner(tmp_path) -> None:
     _database_path, catalog, discord, coordinator = _repositories(tmp_path)
     roll = catalog.import_roll(
@@ -693,7 +733,7 @@ def test_semantic_slot_mismatch_on_replay_fails_closed(tmp_path) -> None:
     source_event_id, attempt_id = _receive_and_begin(discord)
     _coordinate(coordinator, source_event_id, attempt_id)
 
-    with pytest.raises(ClaimProjectionIntegrityError, match="inconsistent claim projection link"):
+    with pytest.raises(ClaimProjectionTargetError, match="mismatched claim scope"):
         _coordinate(
             coordinator,
             source_event_id,

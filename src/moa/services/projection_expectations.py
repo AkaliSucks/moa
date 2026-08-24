@@ -99,6 +99,7 @@ class ProjectionExpectationFacts:
     scan_id: int | None = None
     page_number: int | None = None
     roll_key_present: bool | None = False
+    roll_key_count_present: bool | None = None
     roll_key_type: str | None = None
     roll_rank_present: bool | None = False
     roll_kakera_value_present: bool | None = False
@@ -123,6 +124,7 @@ def build_projection_expectation_facts(
     scan_id: int | None = None,
     page_number: int | None = None,
     roll_key_present: bool | None = False,
+    roll_key_count_present: bool | None = None,
     roll_key_type: str | None = None,
     roll_rank_present: bool | None = False,
     roll_kakera_value_present: bool | None = False,
@@ -139,6 +141,7 @@ def build_projection_expectation_facts(
         scan_id=scan_id,
         page_number=page_number,
         roll_key_present=roll_key_present,
+        roll_key_count_present=roll_key_count_present,
         roll_key_type=normalize(roll_key_type) if roll_key_type is not None else None,
         roll_rank_present=roll_rank_present,
         roll_kakera_value_present=roll_kakera_value_present,
@@ -291,13 +294,20 @@ def _resolve_roll(facts: ProjectionExpectationFacts) -> ExpectedProjectionSet:
     assert server is not None and account is not None
     assert character is not None and series is not None
     base_slot = roll_projection_slot(server, account, character, series)
-    key_expectedness = (
-        Expectedness.UNKNOWN
-        if facts.roll_key_present is None
-        else Expectedness.EXPECTED
-        if facts.roll_key_present
-        else Expectedness.NOT_EXPECTED
-    )
+    if facts.roll_key_count_present is not None:
+        key_expectedness = (
+            Expectedness.EXPECTED
+            if facts.roll_key_count_present and facts.roll_key_type is not None
+            else Expectedness.NOT_EXPECTED
+        )
+    else:
+        key_expectedness = (
+            Expectedness.UNKNOWN
+            if facts.roll_key_present is None
+            else Expectedness.EXPECTED
+            if facts.roll_key_present
+            else Expectedness.NOT_EXPECTED
+        )
     rank_expectedness = (
         Expectedness.UNKNOWN
         if facts.roll_rank_present is None

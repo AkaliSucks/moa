@@ -170,7 +170,7 @@ def test_roll_first_processing_presence_policy_and_slot_parity(
             account=" Account ",
             character=" Character ",
             series=" Series ",
-            roll_key_present=key_count_present and key_type is not None,
+            roll_key_count_present=key_count_present,
             roll_key_type=key_type,
             roll_rank_present=rank_present,
             roll_kakera_value_present=kakera_present,

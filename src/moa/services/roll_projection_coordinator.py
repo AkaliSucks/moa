@@ -27,6 +27,7 @@ from moa.services.projection_authority import (
 )
 from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
+    Expectedness,
     ExpectedProjectionSet,
     build_projection_expectation_facts,
     load_durable_projection_expectation_facts,
@@ -122,16 +123,20 @@ class RollProjectionCoordinator:
                 account=account,
                 character=roll.name,
                 series=roll.series,
-                roll_key_present=(
-                    roll.displayed_key_count is not None
-                    and roll.displayed_key_type is not None
-                ),
+                roll_key_count_present=roll.displayed_key_count is not None,
                 roll_key_type=roll.displayed_key_type,
                 roll_rank_present=roll.claim_rank is not None,
                 roll_kakera_value_present=roll.kakera_value is not None,
             )
         )
         expected = self._projection_specs(expected_set)
+        persistence_roll = (
+            roll
+            if any(spec.kind == "catalog.roll_key" for spec in expected)
+            else roll.model_copy(
+                update={"displayed_key_count": None, "displayed_key_type": None}
+            )
+        )
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
@@ -148,15 +153,7 @@ class RollProjectionCoordinator:
                     server=server,
                     account=account,
                 )
-                try:
-                    durable_facts = load_durable_projection_expectation_facts(
-                        connection, source_event_id
-                    )
-                except DurableProjectionExpectationFactsError:
-                    durable_facts = None
-                if durable_facts is not None and durable_facts.source_family == "roll":
-                    resolve_expected_projections(durable_facts)
-                return self._coordinate_replay(connection, event, expected, roll)
+                return self._coordinate_replay(connection, event, roll)
 
             if attempt_id is None:
                 raise DiscordMessageProcessingConflictError(
@@ -191,7 +188,7 @@ class RollProjectionCoordinator:
 
             imported = self._catalog._import_roll_with_connection(
                 connection,
-                roll=roll,
+                roll=persistence_roll,
                 server=server,
                 account=account,
                 raw=raw,
@@ -244,7 +241,6 @@ class RollProjectionCoordinator:
         self,
         connection: sqlite3.Connection,
         event: sqlite3.Row,
-        expected: tuple[_ProjectionSpec, ...],
         roll: RollObservation,
     ) -> RollProjectionResult:
         import_event_id = event["legacy_import_event_id"]
@@ -263,18 +259,30 @@ class RollProjectionCoordinator:
             raise RollProjectionIntegrityError(
                 f"legacy import event {import_event_id} for source event {event['id']} is not a roll import"
             )
+        try:
+            durable_facts = load_durable_projection_expectation_facts(
+                connection, int(event["id"])
+            )
+        except DurableProjectionExpectationFactsError as error:
+            raise RollProjectionIntegrityError(
+                "durable Roll expected set is unavailable"
+            ) from error
+        if durable_facts.source_family != "roll":
+            raise RollProjectionIntegrityError(
+                "durable Roll expected set has the wrong source family"
+            )
+        expected_set = resolve_expected_projections(durable_facts)
         links = self._load_links(connection, int(event["id"]))
-        self._validate_existing_links(
+        actual = self._validate_replay_links(
             connection,
             event,
             links,
-            expected,
-            allow_claimed=False,
+            expected_set,
             roll=roll,
         )
         targets = tuple(
             (spec.table, int(links[(spec.kind, spec.slot)]["projection_row_id"]))
-            for spec in expected
+            for spec in actual
         )
         return RollProjectionResult(
             imported_count=0,
@@ -283,6 +291,95 @@ class RollProjectionCoordinator:
             durable_success_recorded=True,
             projection_targets=targets,
         )
+
+    def _validate_replay_links(
+        self,
+        connection: sqlite3.Connection,
+        event: sqlite3.Row,
+        links: dict[tuple[str, str], sqlite3.Row],
+        expected_set: ExpectedProjectionSet,
+        *,
+        roll: RollObservation,
+    ) -> tuple[_ProjectionSpec, ...]:
+        possible_kinds = {
+            assessment.projection_kind for assessment in expected_set.assessments
+        }
+        if any(kind not in possible_kinds for kind, _slot in links):
+            raise RollProjectionIntegrityError(
+                f"source event {event['id']} has unexpected projection links"
+            )
+        import_event_id = event["legacy_import_event_id"]
+        actual: list[_ProjectionSpec] = []
+        result_attributes = {
+            "catalog.roll": "roll_observation_id",
+            "catalog.roll_key": "harem_key_observation_id",
+            "catalog.roll_rank": "rank_snapshot_id",
+            "catalog.roll_server_character": "server_character_observation_id",
+        }
+        for assessment in expected_set.assessments:
+            kind_keys = [key for key in links if key[0] == assessment.projection_kind]
+            if assessment.expectedness is Expectedness.EXPECTED:
+                assert assessment.identity is not None
+                expected_key = (
+                    assessment.identity.projection_kind,
+                    assessment.identity.projection_slot,
+                )
+                if kind_keys != [expected_key]:
+                    raise RollProjectionIntegrityError(
+                        f"succeeded source event {event['id']} has an inconsistent projection set"
+                    )
+                spec = _ProjectionSpec(
+                    get_projection_authority(assessment.projection_kind),
+                    assessment.identity.projection_slot,
+                    result_attributes[assessment.projection_kind],
+                )
+            elif assessment.expectedness is Expectedness.NOT_EXPECTED:
+                if kind_keys:
+                    raise RollProjectionIntegrityError(
+                        f"source event {event['id']} has unexpected projection links"
+                    )
+                continue
+            else:
+                if len(kind_keys) > 1:
+                    raise RollProjectionIntegrityError(
+                        f"source event {event['id']} has ambiguous projection links"
+                    )
+                if not kind_keys:
+                    continue
+                spec = _ProjectionSpec(
+                    get_projection_authority(assessment.projection_kind),
+                    kind_keys[0][1],
+                    result_attributes[assessment.projection_kind],
+                )
+
+            key = (spec.kind, spec.slot)
+            link = links[key]
+            if str(link["state"]) != "completed":
+                raise RollProjectionIntegrityError(
+                    f"projection link {spec.kind} for source event {event['id']} is not completed"
+                )
+            if import_event_id is None:
+                raise RollProjectionIntegrityError(
+                    f"completed projection link for source event {event['id']} has no import event"
+                )
+            if str(link["projection_table"]) != spec.table:
+                raise RollProjectionIntegrityError(
+                    f"projection link {spec.kind} points to a disallowed table"
+                )
+            if link["projection_row_id"] is None:
+                raise RollProjectionIntegrityError(
+                    f"projection link {spec.kind} has no target"
+                )
+            self._validate_target(
+                connection,
+                event,
+                spec,
+                int(link["projection_row_id"]),
+                int(import_event_id),
+                roll,
+            )
+            actual.append(spec)
+        return tuple(actual)
 
     def _validate_attribution(
         self,
