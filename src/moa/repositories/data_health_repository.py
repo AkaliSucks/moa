@@ -156,6 +156,7 @@ class DataHealthRepository:
         findings.extend(self._projection_authority_findings())
         findings.extend(self._projection_target_findings())
         findings.extend(self._projection_ownership_findings())
+        findings.extend(self._projection_context_findings())
         return tuple(findings)
 
     def _projection_authority_findings(self) -> tuple[DataHealthFinding, ...]:
@@ -346,6 +347,101 @@ class DataHealthRepository:
                     entity="discord_projection_links",
                     local_identifier=local_identifier,
                     reason=reason,
+                )
+            )
+        return tuple(findings)
+
+    def _projection_context_findings(self) -> tuple[DataHealthFinding, ...]:
+        """Report account-context mismatches after the preceding projection gates."""
+        rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   source.legacy_import_event_id,
+                   link.projection_kind,
+                   link.projection_slot,
+                   link.projection_table,
+                   link.projection_row_id,
+                   account.status AS account_status,
+                   account.server_name AS source_account_server_name,
+                   account.account_name AS source_account_name,
+                   server.status AS server_status,
+                   server.server_name AS source_server_name
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            LEFT JOIN discord_source_event_account_attributions AS account
+                ON account.source_event_id = source.id
+            LEFT JOIN discord_source_event_server_attributions AS server
+                ON server.source_event_id = source.id
+            WHERE link.state = 'completed'
+              AND source.status = 'succeeded'
+              AND source.legacy_import_event_id IS NOT NULL
+            ORDER BY source.id, link.projection_kind, link.projection_slot
+            """
+        )
+        findings = []
+        for row in rows:
+            try:
+                authority = get_projection_authority(row["projection_kind"])
+            except KeyError:
+                continue
+            if row["projection_table"] != authority.target_table:
+                continue
+            if row["account_status"] != "resolved" or row["server_status"] != "resolved":
+                continue
+            source_server = normalize(str(row["source_server_name"]))
+            if source_server != normalize(str(row["source_account_server_name"])):
+                continue
+            source_account = normalize(str(row["source_account_name"]))
+
+            quoted_target_table = '"' + authority.target_table.replace('"', '""') + '"'
+            target_columns = {
+                column["name"]
+                for column in self._connection.execute(
+                    f"PRAGMA table_info({quoted_target_table})"
+                )
+            }
+            if "account_context_id" not in target_columns:
+                continue
+
+            target_row = self._connection.execute(
+                f"""
+                SELECT target.import_event_id,
+                       ac.normalized_name AS target_account_name,
+                       sc.normalized_name AS target_server_name
+                FROM {quoted_target_table} AS target
+                JOIN account_contexts AS ac ON ac.id = target.account_context_id
+                JOIN server_contexts AS sc ON sc.id = ac.server_context_id
+                WHERE target.id = ?
+                """,
+                (row["projection_row_id"],),
+            ).fetchone()
+            if target_row is None or target_row["import_event_id"] != row["legacy_import_event_id"]:
+                continue
+
+            target_pair = (
+                normalize(str(target_row["target_server_name"])),
+                normalize(str(target_row["target_account_name"])),
+            )
+            source_pair = (source_server, source_account)
+            if target_pair == source_pair:
+                continue
+            local_identifier = (
+                f"source_event_id={row['source_event_id']}; "
+                f"projection_kind={row['projection_kind']!r}; "
+                f"projection_slot={row['projection_slot']!r}"
+            )
+            findings.append(
+                DataHealthFinding(
+                    check_id="DH-PG-007",
+                    category="projection-gap",
+                    entity="discord_projection_links",
+                    local_identifier=local_identifier,
+                    reason=(
+                        "completed projection target account context differs from "
+                        f"resolved source attribution: expected server/account "
+                        f"{source_pair!r}, actual {target_pair!r}"
+                    ),
                 )
             )
         return tuple(findings)

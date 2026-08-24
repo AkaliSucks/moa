@@ -287,7 +287,7 @@ def _seed_generic_target_dependencies(path):
         )
 
 
-def _insert_generic_projection_target(path, table, row_id, import_event_id):
+def _insert_generic_projection_target(path, table, row_id, import_event_id, account_context_id=1):
     _seed_generic_target_dependencies(path)
     with sqlite3.connect(path) as connection:
         columns = []
@@ -297,7 +297,9 @@ def _insert_generic_projection_target(path, table, row_id, import_event_id):
             if name in {"id", "import_event_id"} or not not_null or default is not None:
                 continue
             columns.append(name)
-            if name.endswith("_id"):
+            if name == "account_context_id":
+                values.append(account_context_id)
+            elif name.endswith("_id"):
                 values.append(1)
             elif "INT" in column_type.upper():
                 values.append(0)
@@ -324,6 +326,25 @@ def _seed_succeeded_projection_source(path, event_id=1):
         event_id,
         status="succeeded",
         legacy_import_event_id=event_id,
+    )
+
+
+def _seed_resolved_projection_attribution(
+    path, source_event_id=1, *, server="Server", account="Account"
+):
+    repository = DiscordMessageRepository(path)
+    repository.record_server_attribution(
+        source_event_id,
+        status="resolved",
+        server_name=server,
+        recorded_at=OBSERVED_AT,
+    )
+    repository.record_account_attribution(
+        source_event_id,
+        status="resolved",
+        server_name=server,
+        account_name=account,
+        recorded_at=OBSERVED_AT,
     )
 
 
@@ -1564,6 +1585,122 @@ def test_projection_gap_matching_generic_ownership_is_healthy(tmp_path):
     )
 
     assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_reports_valid_account_context_mismatch(tmp_path):
+    database_path = tmp_path / "projection-gap-account-context-mismatch.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server A", "server a", 1, "Account A", "account a")
+    _insert_context(database_path, 2, "Server B", "server b", 2, "Account B", "account b")
+    _seed_succeeded_projection_source(database_path)
+    _seed_resolved_projection_attribution(database_path, server="Server A", account="Account A")
+    _insert_generic_projection_target(
+        database_path, "profile_observations", 100, 1, account_context_id=2
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations",
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-007"]
+    assert findings[0].local_identifier == (
+        "source_event_id=1; projection_kind='catalog.profile'; projection_slot='slot'"
+    )
+    assert "('server a', 'account a')" in findings[0].reason
+    assert "('server b', 'account b')" in findings[0].reason
+
+
+def test_projection_gap_matching_account_context_is_healthy(tmp_path):
+    database_path = tmp_path / "projection-gap-account-context-match.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server", "server", 1, "Account", "account")
+    _seed_succeeded_projection_source(database_path)
+    _seed_resolved_projection_attribution(database_path)
+    _insert_generic_projection_target(database_path, "profile_observations", 100, 1)
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations",
+        projection_row_id=100,
+    )
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_compares_server_and_account_pair(tmp_path):
+    database_path = tmp_path / "projection-gap-account-context-server-pair.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server A", "server a", 1, "User", "user")
+    _insert_context(database_path, 2, "Server B", "server b", 2, "User", "user")
+    _seed_succeeded_projection_source(database_path)
+    _seed_resolved_projection_attribution(database_path, server="Server A", account="User")
+    _insert_generic_projection_target(
+        database_path, "profile_observations", 100, 1, account_context_id=2
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations",
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-007"]
+
+
+def test_projection_gap_pg006_suppresses_account_context_mismatch(tmp_path):
+    database_path = tmp_path / "projection-gap-account-context-pg006-precedence.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server A", "server a", 1, "Account A", "account a")
+    _insert_context(database_path, 2, "Server B", "server b", 2, "Account B", "account b")
+    _seed_succeeded_projection_source(database_path)
+    _seed_resolved_projection_attribution(database_path, server="Server A", account="Account A")
+    _insert_generic_projection_target(
+        database_path, "profile_observations", 100, 2, account_context_id=2
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", "slot", projection_table="profile_observations",
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006"]
+
+
+@pytest.mark.parametrize(
+    ("projection_kind", "projection_table"),
+    [
+        (authority.projection_kind, authority.target_table)
+        for authority in PROJECTION_AUTHORITIES
+    ],
+)
+def test_projection_gap_only_account_context_targets_can_report_context_mismatch(
+    tmp_path, projection_kind, projection_table
+):
+    database_path = tmp_path / "projection-gap-account-context-structural-group.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server A", "server a", 1, "Account A", "account a")
+    _insert_context(database_path, 2, "Server B", "server b", 2, "Account B", "account b")
+    _seed_succeeded_projection_source(database_path)
+    _seed_resolved_projection_attribution(database_path, server="Server A", account="Account A")
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(f"PRAGMA table_info('{projection_table}')")
+        }
+    if "account_context_id" not in columns:
+        pytest.skip("target is outside the account-context structural group")
+    _insert_generic_projection_target(
+        database_path, projection_table, 100, 1, account_context_id=2
+    )
+    _insert_projection_link(
+        database_path, 1, projection_kind, "slot", projection_table=projection_table,
+        projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-007"]
 
 
 @pytest.mark.parametrize(
