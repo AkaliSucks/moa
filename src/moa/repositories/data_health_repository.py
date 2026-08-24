@@ -154,6 +154,7 @@ class DataHealthRepository:
             for row in provenance_rows
         )
         findings.extend(self._projection_authority_findings())
+        findings.extend(self._projection_target_findings())
         return tuple(findings)
 
     def _projection_authority_findings(self) -> tuple[DataHealthFinding, ...]:
@@ -212,6 +213,61 @@ class DataHealthRepository:
                         ),
                     )
                 )
+        return tuple(findings)
+
+    def _projection_target_findings(self) -> tuple[DataHealthFinding, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT source.id AS source_event_id,
+                   link.projection_kind,
+                   link.projection_slot,
+                   link.projection_table,
+                   link.projection_row_id
+            FROM discord_projection_links AS link
+            JOIN discord_source_events AS source
+                ON source.id = link.source_event_id
+            WHERE link.state = 'completed'
+              AND source.status = 'succeeded'
+              AND source.legacy_import_event_id IS NOT NULL
+            ORDER BY source.id, link.projection_kind, link.projection_slot
+            """
+        )
+        findings = []
+        for row in rows:
+            projection_kind = row["projection_kind"]
+            try:
+                authority = get_projection_authority(projection_kind)
+            except KeyError:
+                continue
+            if row["projection_table"] != authority.target_table:
+                continue
+
+            quoted_target_table = '"' + authority.target_table.replace('"', '""') + '"'
+            target_row = self._connection.execute(
+                f"SELECT 1 FROM {quoted_target_table} WHERE id = ? LIMIT 1",
+                (row["projection_row_id"],),
+            ).fetchone()
+            if target_row is not None:
+                continue
+
+            local_identifier = (
+                f"source_event_id={row['source_event_id']}; "
+                f"projection_kind={projection_kind!r}; "
+                f"projection_slot={row['projection_slot']!r}"
+            )
+            findings.append(
+                DataHealthFinding(
+                    check_id="DH-PG-005",
+                    category="projection-gap",
+                    entity="discord_projection_links",
+                    local_identifier=local_identifier,
+                    reason=(
+                        "completed projection references missing authorized target "
+                        f"table {authority.target_table!r} row "
+                        f"{row['projection_row_id']}"
+                    ),
+                )
+            )
         return tuple(findings)
 
     def _character_duplicate_findings(self) -> tuple[DataHealthFinding, ...]:
