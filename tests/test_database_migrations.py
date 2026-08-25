@@ -119,6 +119,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_5_database(database_path):
@@ -132,6 +133,7 @@ def _make_version_5_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_6_database(database_path, completed_towers_by_account):
@@ -153,6 +155,7 @@ def _make_version_6_database(database_path, completed_towers_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_7_kakeraloot_database(database_path, states_by_account):
@@ -174,6 +177,7 @@ def _make_version_7_kakeraloot_database(database_path, states_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_8_profile_database(database_path, profiles_by_account):
@@ -188,6 +192,7 @@ def _make_version_8_profile_database(database_path, profiles_by_account):
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
@@ -217,6 +222,7 @@ def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
         )
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _make_version_10_disablelist_database(database_path, toggles_by_account):
@@ -254,6 +260,7 @@ def _make_version_10_disablelist_database(database_path, toggles_by_account):
             "DROP COLUMN irl_disabled_observed"
         )
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
 
 
 def _insert_aggregate(
@@ -520,6 +527,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
+        (12, "raw-evidence-lifecycle-foundation"),
     ]
     with _open_database(database_path) as connection:
         indexes = {
@@ -534,9 +542,20 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "uq_discord_active_revision",
         "uq_discord_processing_attempt",
         "ix_discord_antidisable_workflows_expires_at",
+        "ix_import_events_raw_message_expiry",
+        "ix_discord_source_events_raw_evidence_expiry",
+        "ix_discord_processing_attempts_source_status_finished",
     } <= indexes
 
     expected_columns = {
+        "import_events": {
+            "id",
+            "kind",
+            "source",
+            "observed_at",
+            "raw_message",
+            "raw_message_expired_at",
+        },
         "discord_message_aggregates": {
             "id",
             "platform",
@@ -570,6 +589,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "raw_text",
             "payload_json",
             "payload_capture_version",
+            "raw_evidence_expired_at",
             "source_observed_at",
             "received_at",
             "last_seen_at",
@@ -591,6 +611,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "lease_expires_at",
             "failure_code",
             "failure_detail",
+            "failure_detail_expired_at",
             "created_at",
         },
         "discord_projection_links": {
@@ -640,6 +661,44 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
                 row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
             }
             assert actual == columns
+
+
+def test_raw_evidence_lifecycle_upgrade_preserves_existing_text_and_defaults_markers_null(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_version_10_disablelist_database(
+        database_path, {"legacy": (True, False)}
+    )
+
+    with _open_database(database_path) as connection:
+        connection.execute("DROP INDEX ix_import_events_raw_message_expiry")
+        connection.execute("DROP INDEX ix_discord_source_events_raw_evidence_expiry")
+        connection.execute(
+            "DROP INDEX ix_discord_processing_attempts_source_status_finished"
+        )
+        raw_before = connection.execute(
+            "SELECT id, raw_message FROM import_events ORDER BY id"
+        ).fetchall()
+        connection.execute("ALTER TABLE import_events DROP COLUMN raw_message_expired_at")
+        connection.execute(
+            "ALTER TABLE discord_source_events DROP COLUMN raw_evidence_expired_at"
+        )
+        connection.execute(
+            "ALTER TABLE discord_processing_attempts DROP COLUMN failure_detail_expired_at"
+        )
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT id, raw_message FROM import_events ORDER BY id"
+        ).fetchall() == raw_before
+        for table, column in (
+            ("import_events", "raw_message_expired_at"),
+            ("discord_source_events", "raw_evidence_expired_at"),
+            ("discord_processing_attempts", "failure_detail_expired_at"),
+        ):
+            assert connection.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} IS NOT NULL"
+            ).fetchone()[0] == 0
 
 
 def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds(
@@ -722,6 +781,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
+        (12, "raw-evidence-lifecycle-foundation"),
     ]
 
 
@@ -821,7 +881,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 12))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 13))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -973,8 +1033,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            10,
-            "ranked-harem-roulette-presence",
+            12,
+            "raw-evidence-lifecycle-foundation",
         )
 
 
@@ -1177,6 +1237,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
+        (12, "raw-evidence-lifecycle-foundation"),
     ]
 
 
@@ -1266,6 +1327,7 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
         connection.execute("DELETE FROM schema_migrations WHERE version = 9")
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 12")
         source_event_id = _insert_source_event(
             connection,
             _insert_revision(connection, _insert_aggregate(connection)),
@@ -1936,6 +1998,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
+        (12, "raw-evidence-lifecycle-foundation"),
     ]
 
 
@@ -1967,6 +2030,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (9, "profile-response-presence"),
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
+        (12, "raw-evidence-lifecycle-foundation"),
     ]
 
 
@@ -3168,11 +3232,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (12, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (13, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(12,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(13,)]

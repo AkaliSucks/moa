@@ -157,6 +157,13 @@ CATALOG_REQUIRED_COLUMNS = {
 }
 
 
+CATALOG_CURRENT_REQUIRED_COLUMNS = {
+    "import_events": frozenset({"raw_message_expired_at"}),
+    "discord_source_events": frozenset({"raw_evidence_expired_at"}),
+    "discord_processing_attempts": frozenset({"failure_detail_expired_at"}),
+}
+
+
 def _validate_catalog_schema_tables(
     connection: sqlite3.Connection,
     expected_tables: frozenset[str],
@@ -178,7 +185,10 @@ def _validate_catalog_schema_tables(
         )
 
     missing_columns = []
-    for table, required in CATALOG_REQUIRED_COLUMNS.items():
+    required_columns = dict(CATALOG_REQUIRED_COLUMNS)
+    if expected_tables == CURRENT_CATALOG_TABLES:
+        required_columns.update(CATALOG_CURRENT_REQUIRED_COLUMNS)
+    for table, required in required_columns.items():
         columns = {
             row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
         }
@@ -798,6 +808,45 @@ def _apply_disablelist_toggle_presence(connection: sqlite3.Connection) -> None:
         )
 
 
+def _apply_raw_evidence_lifecycle_foundation(connection: sqlite3.Connection) -> None:
+    """Add lifecycle markers without changing any retained evidence."""
+    columns_by_table = {
+        table: {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for table in (
+            "import_events",
+            "discord_source_events",
+            "discord_processing_attempts",
+        )
+    }
+    additions = (
+        ("import_events", "raw_message_expired_at"),
+        ("discord_source_events", "raw_evidence_expired_at"),
+        ("discord_processing_attempts", "failure_detail_expired_at"),
+    )
+    for table, column in additions:
+        if column not in columns_by_table[table]:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NULL")
+
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_import_events_raw_message_expiry
+        ON import_events(raw_message_expired_at, observed_at, id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_discord_source_events_raw_evidence_expiry
+        ON discord_source_events(status, raw_evidence_expired_at, id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS ix_discord_processing_attempts_source_status_finished
+        ON discord_processing_attempts(source_event_id, status, finished_at)
+        """
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -853,5 +902,10 @@ CATALOG_MIGRATIONS = (
         version=11,
         name="disablelist-toggle-presence",
         apply=_apply_disablelist_toggle_presence,
+    ),
+    Migration(
+        version=12,
+        name="raw-evidence-lifecycle-foundation",
+        apply=_apply_raw_evidence_lifecycle_foundation,
     ),
 )

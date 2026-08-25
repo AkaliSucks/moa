@@ -494,6 +494,42 @@ def test_repair_bugged_imports_removes_timer_rolls_and_orphaned_split_rows(tmp_p
     assert service.inspect_bugged_imports() == (0, 0)
 
 
+def test_expired_bugged_import_is_reported_bounded_and_never_parsed(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    service = CatalogService(CatalogRepository(database_path))
+    raw_message = (
+        "Each kakera button consumes 100% of your reaction power.\n"
+        "Your characters with 10+ keys consume half the power (50%)"
+    )
+    service.import_roll(
+        RollObservation(
+            name="Each kakera button consumes 100% of your reaction power.",
+            series="Your characters with 10+ keys consume half the power (50%)",
+            claim_rank=None,
+            kakera_value=0,
+        ),
+        "Server",
+        "account",
+        raw_message,
+        "discord",
+    )
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE import_events SET raw_message_expired_at = ?",
+            ("2026-10-16T00:00:00+00:00",),
+        )
+
+    def fail_parse(*_args, **_kwargs):
+        raise AssertionError("expired raw evidence must not be parsed")
+
+    monkeypatch.setattr(MudaeTextParser, "parse_roll", fail_parse)
+    inspection = service.inspect_bugged_imports_with_lifecycle()
+
+    assert inspection.expired_imports == 1
+    assert service.inspect_bugged_imports() == (0, 1)
+    assert service.repair_bugged_imports() == (0, 0)
+
+
 def test_repair_bugged_imports_with_no_candidates_is_noop(tmp_path) -> None:
     service = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
 

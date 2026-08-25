@@ -346,7 +346,8 @@ class AntidisablePageProjectionCoordinator:
             page_number=page_number,
         )
         import_event = connection.execute(
-            "SELECT id, kind, source, observed_at, raw_message FROM import_events WHERE id = ?",
+            "SELECT id, kind, source, observed_at, raw_message, raw_message_expired_at "
+            "FROM import_events WHERE id = ?",
             (import_event_id,),
         ).fetchone()
         if import_event is None:
@@ -360,7 +361,10 @@ class AntidisablePageProjectionCoordinator:
         if (
             str(import_event["source"]) != source
             or str(import_event["observed_at"]) != observed_at.isoformat()
-            or str(import_event["raw_message"]) != raw
+            or (
+                import_event["raw_message_expired_at"] is None
+                and str(import_event["raw_message"]) != raw
+            )
         ):
             raise AntidisablePageProjectionTargetError(
                 f"import event {import_event_id} does not match the supplied page"
@@ -586,7 +590,10 @@ class AntidisablePageProjectionCoordinator:
 
     @staticmethod
     def _validate_source_payload(event: sqlite3.Row, raw: str) -> None:
-        if str(event["raw_text"]) != raw:
+        if (
+            event["raw_evidence_expired_at"] is None
+            and str(event["raw_text"]) != raw
+        ):
             raise AntidisablePageProjectionIntegrityError(
                 f"source event {event['id']} raw message does not match the supplied page"
             )

@@ -93,7 +93,17 @@ class ProcessingAttemptResult:
     router_version: str
     failure_code: str | None
     failure_detail: str | None
+    failure_detail_expired_at: datetime | None
     legacy_import_event_id: int | None
+
+    @property
+    def failure_detail_state(self) -> Literal["absent", "retained", "expired"]:
+        """Classify failure detail without exposing expired content as retained."""
+        if self.failure_detail_expired_at is not None:
+            return "expired"
+        if self.failure_detail is None:
+            return "absent"
+        return "retained"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1678,6 +1688,7 @@ class DiscordMessageRepository:
                 a.router_version,
                 a.failure_code,
                 a.failure_detail,
+                a.failure_detail_expired_at,
                 e.legacy_import_event_id
             FROM discord_processing_attempts AS a
             JOIN discord_source_events AS e ON e.id = a.source_event_id
@@ -1712,6 +1723,11 @@ class DiscordMessageRepository:
             failure_code=(str(row["failure_code"]) if row["failure_code"] is not None else None),
             failure_detail=(
                 str(row["failure_detail"]) if row["failure_detail"] is not None else None
+            ),
+            failure_detail_expired_at=(
+                datetime.fromisoformat(str(row["failure_detail_expired_at"]))
+                if row["failure_detail_expired_at"] is not None
+                else None
             ),
             legacy_import_event_id=(
                 int(row["legacy_import_event_id"])
@@ -1923,16 +1939,20 @@ class DiscordMessageRepository:
         payload_capture_version: str | None,
         source_observed_at: str | None,
     ) -> None:
-        immutable_values_match = (
+        structural_values_match = (
             row["event_key"] == event_key
             and int(row["revision_id"]) == revision_id
             and row["event_kind"] == event_kind
-            and row["raw_text"] == raw_text
-            and row["payload_json"] == payload_json
             and row["payload_capture_version"] == payload_capture_version
             and row["source_observed_at"] == source_observed_at
         )
-        if not immutable_values_match:
+        if not structural_values_match:
+            raise DiscordMessageReceiveConflictError(
+                "Existing Discord source event does not match the requested immutable data"
+            )
+        if row["raw_evidence_expired_at"] is None and (
+            row["raw_text"] != raw_text or row["payload_json"] != payload_json
+        ):
             raise DiscordMessageReceiveConflictError(
                 "Existing Discord source event does not match the requested immutable data"
             )

@@ -325,6 +325,39 @@ def test_conflicting_immutable_payload_rolls_back_without_overwrite(
     assert tuple(event) == ("raw message", '{"content":"raw message"}', 1)
 
 
+def test_expired_raw_evidence_allows_structurally_valid_duplicate_without_comparing_payload(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    first = receive(repository)
+
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE discord_source_events "
+            "SET raw_text = ?, payload_json = ?, raw_evidence_expired_at = ? "
+            "WHERE id = ?",
+            ("redacted", '{"redacted":true}', "2026-10-16T00:00:00+00:00", first.source_event_id),
+        )
+
+    replay = receive(repository)
+
+    assert replay.source_event_id == first.source_event_id
+    assert replay.delivery_count == 2
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT raw_text, payload_json, raw_evidence_expired_at, delivery_count "
+            "FROM discord_source_events WHERE id = ?",
+            (first.source_event_id,),
+        ).fetchone()
+    assert tuple(row) == (
+        "redacted",
+        '{"redacted":true}',
+        "2026-10-16T00:00:00+00:00",
+        2,
+    )
+
+
 def test_mid_transaction_failure_leaves_no_orphan_rows(tmp_path) -> None:
     database_path = tmp_path / "messages.db"
     repository = DiscordMessageRepository(database_path)
@@ -812,6 +845,7 @@ def test_failed_completion_stores_details_and_marks_event_failed(tmp_path) -> No
     assert result.retryable is True
     assert result.failure_code == "parser_error"
     assert result.failure_detail == "malformed payload"
+    assert result.failure_detail_state == "retained"
     with connect(database_path) as connection:
         event_status = connection.execute("SELECT status FROM discord_source_events").fetchone()[0]
         row = connection.execute("SELECT * FROM discord_processing_attempts").fetchone()
@@ -819,6 +853,46 @@ def test_failed_completion_stores_details_and_marks_event_failed(tmp_path) -> No
     assert row["status"] == "failed"
     assert row["retryable"] == 1
     assert row["finished_at"] == finished_at.isoformat()
+
+
+def test_processing_result_classifies_absent_and_expired_failure_detail(tmp_path) -> None:
+    database_path = tmp_path / "messages.db"
+    repository = DiscordMessageRepository(database_path)
+    received = receive(repository)
+    attempt = repository.begin_processing_attempt(
+        source_event_id=received.source_event_id,
+        parser_version="parser-1",
+        router_version="router-1",
+        started_at=datetime(2026, 7, 18, 2, 0, tzinfo=timezone.utc),
+    )
+    result = repository.mark_processing_failure(
+        source_event_id=received.source_event_id,
+        attempt_id=attempt.attempt_id,
+        status="failed",
+        retryable=False,
+        failure_code="parser_error",
+        failure_detail=None,
+        finished_at=datetime(2026, 7, 18, 2, 1, tzinfo=timezone.utc),
+    )
+    assert result.failure_detail is None
+    assert result.failure_detail_expired_at is None
+    assert result.failure_detail_state == "absent"
+
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE discord_processing_attempts "
+            "SET failure_detail = ?, failure_detail_expired_at = ? WHERE id = ?",
+            ("redacted", "2026-10-16T00:00:00+00:00", attempt.attempt_id),
+        )
+        expired_result = repository._processing_result(
+            connection, received.source_event_id, attempt.attempt_id
+        )
+
+    assert expired_result.failure_detail == "redacted"
+    assert expired_result.failure_detail_expired_at == datetime(
+        2026, 10, 16, tzinfo=timezone.utc
+    )
+    assert expired_result.failure_detail_state == "expired"
 
 
 def test_public_mark_processing_failure_uses_one_runner_callback(

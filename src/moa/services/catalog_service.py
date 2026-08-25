@@ -80,7 +80,11 @@ from moa.models.character import (
     AntidisablePage,
     UnavailableCharacterPage,
 )
-from moa.repositories.catalog_repository import CatalogRepository, CatalogRepositoryProtocol
+from moa.repositories.catalog_repository import (
+    BuggedImportInspection,
+    CatalogRepository,
+    CatalogRepositoryProtocol,
+)
 
 
 class CatalogService:
@@ -206,6 +210,9 @@ class CatalogService:
 
     def inspect_bugged_imports(self) -> tuple[int, int]:
         return self._repository.inspect_bugged_imports()
+
+    def inspect_bugged_imports_with_lifecycle(self) -> BuggedImportInspection:
+        return self._repository.inspect_bugged_imports_with_lifecycle()
 
     def repair_bugged_imports(self) -> tuple[int, int]:
         return self._repository.repair_bugged_imports()

@@ -263,6 +263,8 @@ class CatalogRepositoryProtocol(Protocol):
 
     def inspect_bugged_imports(self) -> tuple[int, int]: ...
 
+    def inspect_bugged_imports_with_lifecycle(self) -> "BuggedImportInspection": ...
+
     def repair_bugged_imports(self) -> tuple[int, int]: ...
 
     def import_harem_key_page(
@@ -526,6 +528,16 @@ class _RepairEventSnapshot:
     source: str
     observed_at: str
     raw_message: str
+    raw_message_expired_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BuggedImportInspection:
+    """Bounded inspection result including policy-expired raw candidates."""
+
+    suspicious_imports: int
+    suspicious_characters: int
+    expired_imports: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +574,7 @@ class _BuggedImportRepairPlan:
     timers: tuple[_RepairCandidateSnapshot, ...]
     repairs: tuple[_ParsedRepairPlan, ...]
     malformed_characters: tuple[_MalformedCharacterSnapshot, ...]
+    expired_import_event_ids: tuple[int, ...]
 
 
 class CatalogRepository:
@@ -2448,6 +2461,11 @@ class CatalogRepository:
 
     def inspect_bugged_imports(self) -> tuple[int, int]:
         """Count timer-as-roll imports and imports reparsed by the fixed parser."""
+        inspection = self.inspect_bugged_imports_with_lifecycle()
+        return inspection.suspicious_imports, inspection.suspicious_characters
+
+    def inspect_bugged_imports_with_lifecycle(self) -> BuggedImportInspection:
+        """Count repair candidates and raw evidence excluded by lifecycle policy."""
         with self._connection() as connection:
             snapshots = self._load_bugged_import_snapshots(connection)
         plan = self._plan_bugged_import_repairs(snapshots)
@@ -2461,7 +2479,11 @@ class CatalogRepository:
         } | {
             character.id for character in plan.malformed_characters
         }
-        return len(import_event_ids), len(character_ids)
+        return BuggedImportInspection(
+            suspicious_imports=len(import_event_ids),
+            suspicious_characters=len(character_ids),
+            expired_imports=len(plan.expired_import_event_ids),
+        )
 
     def repair_bugged_imports(self) -> tuple[int, int]:
         """Repair or remove only evidence identified from its preserved raw text.
@@ -2610,6 +2632,7 @@ class CatalogRepository:
             SELECT import_events.id AS import_event_id, import_events.kind,
                    import_events.source, import_events.observed_at,
                    import_events.raw_message,
+                   import_events.raw_message_expired_at,
                    roll_observations.id AS observation_id,
                    roll_observations.character_id,
                    characters.name, characters.series
@@ -2626,6 +2649,7 @@ class CatalogRepository:
             SELECT DISTINCT import_events.id AS import_event_id, import_events.kind,
                    import_events.source, import_events.observed_at,
                    import_events.raw_message,
+                   import_events.raw_message_expired_at,
                    server_character_observations.id AS observation_id,
                    server_character_observations.character_id,
                    characters.name, characters.series
@@ -2669,17 +2693,26 @@ class CatalogRepository:
     def _plan_bugged_import_repairs(
         self, snapshots: _BuggedImportSnapshots
     ) -> _BuggedImportRepairPlan:
-        parser = MudaeTextParser() if snapshots.rolls or snapshots.character_details else None
+        parser: MudaeTextParser | None = None
+
+        def get_parser() -> MudaeTextParser:
+            nonlocal parser
+            if parser is None:
+                parser = MudaeTextParser()
+            return parser
         timers: dict[int, _RepairCandidateSnapshot] = {}
         repairs: dict[int, _ParsedRepairPlan] = {}
+        expired_import_event_ids: set[int] = set()
 
         for candidate in snapshots.rolls:
+            if candidate.event.raw_message_expired_at is not None:
+                expired_import_event_ids.add(candidate.event.id)
+                continue
             if self._is_timer_like_message(candidate.event.raw_message):
                 timers[candidate.event.id] = candidate
                 continue
             try:
-                assert parser is not None
-                parsed = parser.parse_roll(candidate.event.raw_message)
+                parsed = get_parser().parse_roll(candidate.event.raw_message)
             except MudaeParseError:
                 continue
             repair = _ParsedRepairPlan(candidate=candidate, observation=parsed)
@@ -2687,9 +2720,11 @@ class CatalogRepository:
                 repairs[candidate.event.id] = repair
 
         for candidate in snapshots.character_details:
+            if candidate.event.raw_message_expired_at is not None:
+                expired_import_event_ids.add(candidate.event.id)
+                continue
             try:
-                assert parser is not None
-                parsed = parser.parse_character_details(candidate.event.raw_message)
+                parsed = get_parser().parse_character_details(candidate.event.raw_message)
             except MudaeParseError:
                 continue
             repair = _ParsedRepairPlan(candidate=candidate, observation=parsed)
@@ -2700,6 +2735,7 @@ class CatalogRepository:
             timers=tuple(timers.values()),
             repairs=tuple(repairs.values()),
             malformed_characters=snapshots.malformed_characters,
+            expired_import_event_ids=tuple(sorted(expired_import_event_ids)),
         )
 
     @staticmethod
@@ -2711,6 +2747,11 @@ class CatalogRepository:
                 source=str(row["source"]),
                 observed_at=str(row["observed_at"]),
                 raw_message=str(row["raw_message"]),
+                raw_message_expired_at=(
+                    str(row["raw_message_expired_at"])
+                    if row["raw_message_expired_at"] is not None
+                    else None
+                ),
             ),
             observation_id=int(row["observation_id"]),
             character_id=int(row["character_id"]),
@@ -2733,6 +2774,7 @@ class CatalogRepository:
             SELECT import_events.id AS import_event_id, import_events.kind,
                    import_events.source, import_events.observed_at,
                    import_events.raw_message,
+                   import_events.raw_message_expired_at,
                    observations.id AS observation_id, observations.character_id,
                    characters.name, characters.series
             FROM import_events

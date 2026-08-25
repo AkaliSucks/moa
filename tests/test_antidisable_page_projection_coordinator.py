@@ -840,6 +840,37 @@ def test_replay_import_event_integrity_fail_closed(tmp_path, tamper):
     )
 
 
+def test_replay_skips_expired_raw_equality_but_keeps_structural_page_checks(tmp_path):
+    database_path, _catalog, _discord, coordinator, source_event_id, result = _setup(tmp_path)
+    with connect(database_path) as connection:
+        connection.execute(
+            "UPDATE discord_source_events SET raw_text = ?, raw_evidence_expired_at = ? "
+            "WHERE id = ?",
+            ("redacted source", "2026-10-16T00:00:00+00:00", source_event_id),
+        )
+        connection.execute(
+            "UPDATE import_events SET raw_message = ?, raw_message_expired_at = ? "
+            "WHERE id = ?",
+            ("redacted import", "2026-10-16T00:00:00+00:00", result.import_event_id),
+        )
+
+    replay = _coordinate(
+        coordinator,
+        source_event_id,
+        None,
+        scan_id=result.scan_id,
+        raw="newly supplied raw text",
+    )
+
+    assert replay.replay_skipped is True
+    assert replay.import_event_id == result.import_event_id
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT raw_text FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
+        ).fetchone()[0] == "redacted source"
+
+
 @pytest.mark.parametrize("tamper", ["page_missing", "page_scan", "page_number", "count", "character", "series"])
 def test_replay_page_target_integrity_fail_closed(tmp_path, tamper):
     database_path, catalog, discord, coordinator, source_event_id, result = _setup(tmp_path)
