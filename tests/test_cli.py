@@ -29,6 +29,34 @@ from moa.services.tower_state_projection_coordinator import TowerStateProjection
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
+def test_tower_cli_registration_and_rendering() -> None:
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["tower", "--help"])
+    assert help_result.exit_code == 0
+    assert "list" in help_result.stdout
+    assert "show" in help_result.stdout
+
+    list_result = runner.invoke(main.app, ["tower", "list"])
+    assert list_result.exit_code == 0
+    assert "Kakera Tower Floors" in list_result.stdout
+    assert "Additional Rolls" in list_result.stdout
+
+    show_result = runner.invoke(main.app, ["tower", "show", "11"])
+    assert show_result.exit_code == 0
+    assert "Floor 11: Additional Rolls" in show_result.stdout
+    assert "Category: rolling" in show_result.stdout
+    assert "Description: Adds one roll per hour." in show_result.stdout
+    assert "First tower: +1 roll per hour" in show_result.stdout
+    assert "Progression:" in show_result.stdout
+    assert "Caps at +10 rolls/hour" in show_result.stdout
+    assert "Initial cap: 10" in show_result.stdout
+
+    unknown_result = runner.invoke(main.app, ["tower", "show", "13"])
+    assert unknown_result.exit_code == 1
+    assert "Tower floor not found." in unknown_result.stdout
+
+
 def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
     monkeypatch,
 ) -> None:
