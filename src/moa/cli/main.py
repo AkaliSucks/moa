@@ -10,6 +10,7 @@ from rich.table import Table
 
 from moa.core.config import ConfigService
 from moa.cli.config_commands import build_config_app
+from moa.cli.tower_commands import build_tower_app
 from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     relocate_database,
@@ -69,7 +70,6 @@ from moa.services.settings_projection_coordinator import SettingsProjectionCoord
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.top_search_service import TopSearchService
-from moa.services.tower_service import TowerService
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 from moa.utils.display import (
@@ -82,7 +82,6 @@ from moa.utils.display import (
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 command_app = typer.Typer(help="Mudae command and flag reference")
-tower_app = typer.Typer(help="Tower commands")
 badge_app = typer.Typer(help="Kakera Badge commands")
 reaction_app = typer.Typer(help="Kakera reaction commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
@@ -100,6 +99,7 @@ recommend_app = typer.Typer(help="Make transparent recommendations from imported
 server_app = typer.Typer(help="Compare imported server-wide configuration")
 discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot")
 console = Console()
+tower_app = build_tower_app(console)
 config_app = build_config_app(console)
 
 app.add_typer(tower_app, name="tower")
@@ -3369,45 +3369,6 @@ def catalog_repair_bugged_data(
     )
     console.print(f"[green]Deleted {deleted_characters} orphaned character row(s).[/green]")
     console.print(f"Backup saved to: {backup_path}")
-
-
-@tower_app.command("list")
-def list_towers():
-    service = TowerService()
-    table = Table(title="Kakera Tower Floors")
-    table.add_column("#", justify="right", style="cyan")
-    table.add_column("Floor", style="green")
-    table.add_column("Category")
-    table.add_column("First-tower effect")
-
-    for perk in service.all():
-        table.add_row(
-            str(perk.id),
-            perk.name,
-            perk.category,
-            perk.first_tower_effect,
-        )
-
-    console.print(table)
-
-
-@tower_app.command("show")
-def show_tower(perk_id: int):
-    service = TowerService()
-
-    perk = service.get(perk_id)
-
-    if perk is None:
-        console.print("[red]Tower floor not found.[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"[bold cyan]Floor {perk.id}: {perk.name}[/bold cyan]")
-    console.print(f"[bold]Category:[/bold] {perk.category}")
-    console.print(f"[bold]Description:[/bold] {perk.description}")
-    console.print(f"[bold]First tower:[/bold] {perk.first_tower_effect}")
-    console.print(f"[bold]Progression:[/bold] {perk.progression_note}")
-    if perk.initial_cap_level is not None:
-        console.print(f"[bold]Initial cap:[/bold] {perk.initial_cap_level}")
 
 
 if __name__ == "__main__":
