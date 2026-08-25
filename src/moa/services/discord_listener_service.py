@@ -25,6 +25,7 @@ from moa.commands import (
     InvocationSource,
 )
 from moa.core.config import ConfigAccount, ConfigService
+from moa.core.logging import emit_operational_event
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
@@ -1444,6 +1445,14 @@ class DiscordListenerService:
             return
         if kind is None:
             detected = self._router.detect(raw_message)
+            if received_event is not None:
+                emit_operational_event(
+                    self._logger,
+                    "parser.rejected",
+                    source_event_id=received_event.source_event_id,
+                    parser_outcome="rejected",
+                    outcome="rejected",
+                )
             self._logger.warning(
                 "Ignored Mudae response %s while tracking %s; parser did not accept it "
                 "(router=%s, lines=%d)",
@@ -1839,10 +1848,31 @@ class DiscordListenerService:
                 result.message,
             )
             if getattr(result, "replay_skipped", False):
+                if received_event is not None:
+                    emit_operational_event(
+                        self._logger,
+                        "projection.replayed",
+                        source_event_id=received_event.source_event_id,
+                        projection_kind=kind,
+                        replayed=True,
+                    )
                 self._logger.info(
                     "Skipped duplicate durable %s projection for source event %s",
                     kind,
                     received_event.source_event_id if received_event is not None else "unknown",
+                )
+            elif durable_success_recorded and received_event is not None:
+                emit_operational_event(
+                    self._logger,
+                    "projection.completed",
+                    source_event_id=received_event.source_event_id,
+                    processing_attempt_id=(
+                        processing_attempt.attempt_id
+                        if processing_attempt is not None
+                        else None
+                    ),
+                    projection_kind=kind,
+                    outcome="succeeded",
                 )
         except Exception as error:  # Keep one malformed Discord payload from stopping the listener.
             self._record_processing_failure(received_event, processing_attempt, error, message.id)
@@ -2464,6 +2494,12 @@ class DiscordListenerService:
                 source_observed_at=envelope.source_observed_at,
                 received_at=envelope.received_at,
             )
+            emit_operational_event(
+                self._logger,
+                "source.received",
+                source_event_id=received_event.source_event_id,
+                outcome="received",
+            )
             return received_event, envelope
         except Exception as error:  # Keep callback stability while refusing downstream work.
             self._logger.warning(
@@ -2730,6 +2766,14 @@ class DiscordListenerService:
         if processing_attempt is None or received_event is None:
             self._logger.warning("Could not import Mudae message %s: %s", message_id, error)
             return
+        emit_operational_event(
+            self._logger,
+            "processing.failed",
+            source_event_id=received_event.source_event_id,
+            processing_attempt_id=processing_attempt.attempt_id,
+            failure_code="downstream_processing_error",
+            outcome="failed",
+        )
         try:
             self._discord_message_repository.mark_processing_failure(
                 source_event_id=processing_attempt.source_event_id,

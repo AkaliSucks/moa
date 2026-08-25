@@ -4579,12 +4579,13 @@ def _durable_kakeraloot_counts(database_path):
         )
 
 
-def test_listener_first_durable_sphere_uses_coordinator_owned_success(tmp_path) -> None:
+def test_listener_first_durable_sphere_uses_coordinator_owned_success(tmp_path, caplog) -> None:
     listener, _repository, database_path = _durable_listener(tmp_path)
     importer = Mock(wraps=listener._importer)
     listener._importer = importer
     message = _durable_sphere_message()
 
+    caplog.set_level(logging.INFO, logger="moa.discord")
     asyncio.run(listener.handle_bot_response(message))
 
     durable_context = importer.import_message.call_args.kwargs[
@@ -4608,6 +4609,13 @@ def test_listener_first_durable_sphere_uses_coordinator_owned_success(tmp_path) 
         "Test Server",
         "user_a",
     )
+    assert (
+        "event=source.received component=discord_listener outcome=received source_event_id=1"
+    ) in caplog.text
+    assert (
+        "event=projection.completed component=discord_listener outcome=succeeded "
+        "source_event_id=1 processing_attempt_id=1 projection_kind=sphere_result"
+    ) in caplog.text
 
 
 def test_listener_sphere_attribution_is_persisted_before_attempt_creation(tmp_path) -> None:
@@ -7879,11 +7887,12 @@ def test_listener_zero_projection_observation_still_succeeds(tmp_path) -> None:
     assert event["status"] == "succeeded"
 
 
-def test_listener_downstream_exception_records_retryable_failure(tmp_path) -> None:
+def test_listener_downstream_exception_records_retryable_failure(tmp_path, caplog) -> None:
     importer = Mock()
     importer.import_message.side_effect = ValueError("importer exploded")
     listener, _repository, database_path = _durable_listener(tmp_path, importer=importer)
 
+    caplog.set_level(logging.INFO, logger="moa.discord")
     asyncio.run(listener.handle_bot_response(_durable_roll_message()))
 
     attempt = _receipt_rows(database_path, "discord_processing_attempts")[0]
@@ -7893,6 +7902,29 @@ def test_listener_downstream_exception_records_retryable_failure(tmp_path) -> No
     assert attempt["failure_code"] == "downstream_processing_error"
     assert attempt["failure_detail"] == "importer exploded"
     assert event["status"] == "failed"
+    assert (
+        "event=processing.failed component=discord_listener outcome=failed "
+        "source_event_id=1 processing_attempt_id=1 failure_code=downstream_processing_error"
+    ) in caplog.text
+    structured_lines = [
+        record.message for record in caplog.records if record.message.startswith("event=")
+    ]
+    assert all("importer exploded" not in line for line in structured_lines)
+
+
+def test_listener_parser_rejection_emits_bounded_event(tmp_path, caplog) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    message = _durable_roll_message()
+    message.content = "not a Mudae response"
+
+    caplog.set_level(logging.INFO, logger="moa.discord")
+    asyncio.run(listener.handle_bot_response(message))
+
+    assert _receipt_rows(database_path, "discord_source_events")[0]["id"] == 1
+    assert (
+        "event=parser.rejected component=discord_listener outcome=rejected "
+        "source_event_id=1 parser_outcome=rejected"
+    ) in caplog.text
 
 
 def test_listener_retryable_failure_replay_creates_attempt_two(tmp_path) -> None:
@@ -7938,7 +7970,7 @@ def test_listener_same_process_duplicate_creates_no_new_attempt(tmp_path) -> Non
     assert events[0]["delivery_count"] == 2
 
 
-def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path) -> None:
+def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path, caplog) -> None:
     first_listener, _repository, database_path = _durable_listener(tmp_path)
     message = _durable_roll_message()
     asyncio.run(first_listener.handle_bot_response(message))
@@ -7956,6 +7988,7 @@ def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path)
         discord_message_repository=DiscordMessageRepository(database_path),
     )
     restarted_listener._mudae_user_id = 999
+    caplog.set_level(logging.INFO, logger="moa.discord")
     asyncio.run(restarted_listener.handle_bot_response(message))
 
     attempts = _receipt_rows(database_path, "discord_processing_attempts")
@@ -7964,6 +7997,10 @@ def test_listener_succeeded_restart_replay_replays_without_new_attempt(tmp_path)
     assert attempts[0]["status"] == "succeeded"
     assert event["status"] == "succeeded"
     importer.import_message.assert_called_once()
+    assert (
+        "event=projection.replayed component=discord_listener source_event_id=1 "
+        "projection_kind=roll replayed=true"
+    ) in caplog.text
 
 
 def test_listener_succeeded_restart_replay_passes_none_attempt_and_skips_projection(
