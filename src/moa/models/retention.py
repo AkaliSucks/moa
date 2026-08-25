@@ -1,4 +1,4 @@
-"""Privacy-safe models for report-only evidence retention eligibility."""
+"""Privacy-safe aggregate models for evidence retention lifecycle operations."""
 
 from __future__ import annotations
 
@@ -53,6 +53,36 @@ class RetentionEligibilityReport:
 
     def category(self, name: str) -> RetentionCategoryReport:
         """Return a named category report."""
+
+        for category in self.categories:
+            if category.category == name:
+                return category
+        raise KeyError(name)
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionCategoryApplyResult:
+    """Aggregate committed expiry counts for one sensitive evidence category."""
+
+    category: str
+    recomputed_eligible_count: int
+    expired_count: int
+    retained_blocked_count: int
+    already_expired_count: int
+    absent_count: int
+    blocked_reason_counts: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionExpiryResult:
+    """One bounded result returned only after expiry commits successfully."""
+
+    apply_as_of: datetime
+    cutoff: datetime
+    categories: tuple[RetentionCategoryApplyResult, ...]
+
+    def category(self, name: str) -> RetentionCategoryApplyResult:
+        """Return a named category result."""
 
         for category in self.categories:
             if category.category == name:

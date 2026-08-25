@@ -48,6 +48,20 @@ class _SourceLifecycle:
     reason: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class _CategorySelection:
+    report: RetentionCategoryReport
+    row_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _RetentionEligibilitySelection:
+    report: RetentionEligibilityReport
+    import_event_ids: tuple[int, ...]
+    source_event_ids: tuple[int, ...]
+    failure_attempt_ids: tuple[int, ...]
+
+
 @dataclass(slots=True)
 class _CategoryAccumulator:
     eligible_count: int = 0
@@ -95,19 +109,35 @@ class RetentionEligibilityRepository:
     def build_report(self, as_of: datetime) -> RetentionEligibilityReport:
         """Classify all three evidence categories against one captured instant."""
 
+        return self._select_for_expiry(as_of).report
+
+    def _select_for_expiry(self, as_of: datetime) -> _RetentionEligibilitySelection:
+        """Return transaction-local aggregates and IDs from the shared policy."""
+
         as_of = _normalize_datetime(as_of, "as_of")
         cutoff = as_of - timedelta(days=RETENTION_DAYS)
-        import_report = self._scan_import_messages(cutoff)
-        source_report = self._scan_source_evidence(cutoff)
-        failure_report = self._scan_failure_details(cutoff)
-        return RetentionEligibilityReport(
+        import_selection = self._scan_import_messages(cutoff)
+        source_selection = self._scan_source_evidence(cutoff)
+        failure_selection = self._scan_failure_details(cutoff)
+        report = RetentionEligibilityReport(
             as_of=as_of,
             cutoff=cutoff,
-            categories=(import_report, source_report, failure_report),
+            categories=(
+                import_selection.report,
+                source_selection.report,
+                failure_selection.report,
+            ),
+        )
+        return _RetentionEligibilitySelection(
+            report=report,
+            import_event_ids=import_selection.row_ids,
+            source_event_ids=source_selection.row_ids,
+            failure_attempt_ids=failure_selection.row_ids,
         )
 
-    def _scan_source_evidence(self, cutoff: datetime) -> RetentionCategoryReport:
+    def _scan_source_evidence(self, cutoff: datetime) -> _CategorySelection:
         result = _CategoryAccumulator()
+        selected_ids: list[int] = []
         rows = self._connection.execute(
             """
             SELECT id, status, raw_text, raw_evidence_expired_at
@@ -123,12 +153,17 @@ class RetentionEligibilityRepository:
             if state == "expired":
                 result.already_expired_count += 1
                 continue
-            lifecycle = self._source_lifecycle(int(row["id"]))
-            self._record_lifecycle(result, lifecycle, cutoff)
-        return result.finish(DISCORD_SOURCE_RAW_EVIDENCE)
+            row_id = int(row["id"])
+            lifecycle = self._source_lifecycle(row_id)
+            if self._record_lifecycle(result, lifecycle, cutoff):
+                selected_ids.append(row_id)
+        return _CategorySelection(
+            result.finish(DISCORD_SOURCE_RAW_EVIDENCE), tuple(selected_ids)
+        )
 
-    def _scan_failure_details(self, cutoff: datetime) -> RetentionCategoryReport:
+    def _scan_failure_details(self, cutoff: datetime) -> _CategorySelection:
         result = _CategoryAccumulator()
+        selected_ids: list[int] = []
         rows = self._connection.execute(
             """
             SELECT id, source_event_id, failure_detail, failure_detail_expired_at
@@ -145,11 +180,15 @@ class RetentionEligibilityRepository:
                 result.already_expired_count += 1
                 continue
             lifecycle = self._source_lifecycle(int(row["source_event_id"]))
-            self._record_lifecycle(result, lifecycle, cutoff)
-        return result.finish(PROCESSING_ATTEMPT_FAILURE_DETAIL)
+            if self._record_lifecycle(result, lifecycle, cutoff):
+                selected_ids.append(int(row["id"]))
+        return _CategorySelection(
+            result.finish(PROCESSING_ATTEMPT_FAILURE_DETAIL), tuple(selected_ids)
+        )
 
-    def _scan_import_messages(self, cutoff: datetime) -> RetentionCategoryReport:
+    def _scan_import_messages(self, cutoff: datetime) -> _CategorySelection:
         result = _CategoryAccumulator()
+        selected_ids: list[int] = []
         rows = self._connection.execute(
             """
             SELECT id, raw_message, raw_message_expired_at, observed_at
@@ -187,8 +226,9 @@ class RetentionEligibilityRepository:
                     observed_at,
                     None if observed_at is not None else MISSING_SUCCESS_ANCHOR,
                 )
-            self._record_lifecycle(result, lifecycle, cutoff)
-        return result.finish(IMPORT_RAW_MESSAGE)
+            if self._record_lifecycle(result, lifecycle, cutoff):
+                selected_ids.append(int(row["id"]))
+        return _CategorySelection(result.finish(IMPORT_RAW_MESSAGE), tuple(selected_ids))
 
     def _source_lifecycle(self, source_event_id: int) -> _SourceLifecycle:
         source = self._connection.execute(
@@ -277,22 +317,23 @@ class RetentionEligibilityRepository:
         result: _CategoryAccumulator,
         lifecycle: _SourceLifecycle,
         cutoff: datetime,
-    ) -> None:
+    ) -> bool:
         if lifecycle.reason is not None:
             result.retained_blocked_count += 1
             assert result.blocked_reasons is not None
             result.blocked_reasons[lifecycle.reason] += 1
-            return
+            return False
         if lifecycle.anchor is None:
             raise RetentionEligibilityDataError("classified lifecycle has no anchor")
         if lifecycle.anchor <= cutoff:
             result.eligible_count += 1
             assert result.eligible_anchors is not None
             result.eligible_anchors.append(lifecycle.anchor)
-        else:
-            result.retained_blocked_count += 1
-            assert result.blocked_reasons is not None
-            result.blocked_reasons[NOT_OLD_ENOUGH] += 1
+            return True
+        result.retained_blocked_count += 1
+        assert result.blocked_reasons is not None
+        result.blocked_reasons[NOT_OLD_ENOUGH] += 1
+        return False
 
 
 def _evidence_state(value: object, expired_at: object) -> str:

@@ -16,6 +16,7 @@ from moa.services.antidisable_page_projection_coordinator import (
     AntidisablePageProjectionStateError,
 )
 from moa.services.projection_expectations import antidisable_page_projection_slot
+from moa.services.retention_expiry_service import RetentionExpiryService
 
 
 OBSERVED_AT = datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc)
@@ -869,6 +870,27 @@ def test_replay_skips_expired_raw_equality_but_keeps_structural_page_checks(tmp_
             "SELECT raw_text FROM discord_source_events WHERE id = ?",
             (source_event_id,),
         ).fetchone()[0] == "redacted source"
+
+
+def test_replay_uses_structural_checks_after_real_retention_apply(tmp_path):
+    database_path, _catalog, _discord, coordinator, source_event_id, result = _setup(tmp_path)
+    apply_as_of = FINISHED_AT.replace(year=2027)
+
+    applied = RetentionExpiryService(
+        database_path, clock=lambda: apply_as_of
+    ).apply()
+    replay = _coordinate(
+        coordinator,
+        source_event_id,
+        None,
+        scan_id=result.scan_id,
+        raw="newly supplied raw text",
+    )
+
+    assert applied.category("discord_source_raw_evidence").expired_count == 1
+    assert applied.category("import_raw_message").expired_count == 1
+    assert replay.replay_skipped is True
+    assert replay.import_event_id == result.import_event_id
 
 
 @pytest.mark.parametrize("tamper", ["page_missing", "page_scan", "page_number", "count", "character", "series"])

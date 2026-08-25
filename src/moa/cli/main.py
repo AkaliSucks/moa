@@ -14,8 +14,10 @@ from moa.database.legacy_database_relocation import (
     relocate_database,
 )
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
+from moa.models.retention import RetentionExpiryResult
 from moa.repositories.data_health_repository import DataHealthSchemaError
 from moa.repositories.retention_eligibility_repository import RetentionEligibilityDataError
+from moa.repositories.retention_expiry_repository import RetentionExpiryError
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
@@ -41,6 +43,7 @@ from moa.services.discord_listener_service import (
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
 from moa.services.data_health_service import DataHealthService
 from moa.services.retention_eligibility_service import RetentionEligibilityService
+from moa.services.retention_expiry_service import RetentionExpiryService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
@@ -2491,8 +2494,45 @@ def catalog_data_health_projection_gaps() -> None:
 
 
 @data_health_app.command("retention")
-def catalog_data_health_retention() -> None:
-    """Report aggregate raw-evidence retention eligibility without applying expiry."""
+def catalog_data_health_retention(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help=(
+            "Intentionally remove eligible raw evidence. Historical raw repair/reparse may "
+            "become unavailable; this does not guarantee forensic secure erasure."
+        ),
+    ),
+) -> None:
+    """Report retention eligibility, or explicitly apply logical evidence expiry."""
+    if apply:
+        try:
+            result = RetentionExpiryService(Path(DEFAULT_DATABASE_PATH)).apply()
+        except (
+            DataHealthSchemaError,
+            RetentionEligibilityDataError,
+            RetentionExpiryError,
+            OSError,
+            ValueError,
+            TypeError,
+            sqlite3.Error,
+        ):
+            console.print(
+                "[red]Unable to apply raw-evidence retention expiry; "
+                "no success is claimed.[/red]"
+            )
+            raise typer.Exit(1) from None
+
+        try:
+            _render_retention_expiry_result(result)
+        except Exception:
+            typer.echo(
+                "Retention expiry committed, but presentation failed; do not re-run automatically.",
+                err=True,
+            )
+            raise typer.Exit(1) from None
+        return
+
     try:
         report = RetentionEligibilityService(Path(DEFAULT_DATABASE_PATH)).report()
     except (
@@ -2533,6 +2573,35 @@ def catalog_data_health_retention() -> None:
             category.newest_eligible_anchor.isoformat()
             if category.newest_eligible_anchor is not None
             else "-",
+            reasons or "-",
+        )
+    console.print(table)
+
+
+def _render_retention_expiry_result(result: RetentionExpiryResult) -> None:
+    console.print(
+        f"[bold cyan]Retention expiry applied[/bold cyan] — committed at "
+        f"{result.apply_as_of.isoformat()} (cutoff {result.cutoff.isoformat()})"
+    )
+    table = Table()
+    table.add_column("Category", style="cyan")
+    table.add_column("Recomputed eligible", justify="right")
+    table.add_column("Expired", justify="right")
+    table.add_column("Retained/blocked", justify="right")
+    table.add_column("Already expired", justify="right")
+    table.add_column("Absent", justify="right")
+    table.add_column("Blocked reasons")
+    for category in result.categories:
+        reasons = ", ".join(
+            f"{reason}={count}" for reason, count in category.blocked_reason_counts
+        )
+        table.add_row(
+            category.category,
+            str(category.recomputed_eligible_count),
+            str(category.expired_count),
+            str(category.retained_blocked_count),
+            str(category.already_expired_count),
+            str(category.absent_count),
             reasons or "-",
         )
     console.print(table)
