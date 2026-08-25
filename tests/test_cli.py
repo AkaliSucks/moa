@@ -1407,6 +1407,20 @@ def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_p
     assert "Active" in shown.stdout
 
 
+def test_config_profile_add_and_show_selected_profile(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    runner = CliRunner()
+
+    added = runner.invoke(main.app, ["config", "profile", "add", "seasonal"])
+    shown = runner.invoke(main.app, ["config", "show", "--profile", "seasonal"])
+
+    assert added.exit_code == 0
+    assert "Created MOA profile `seasonal`." in added.stdout
+    assert shown.exit_code == 0
+    assert "MOA config" in shown.stdout
+    assert "No server/account identities configured yet." in shown.stdout
+
+
 def test_config_commands_allow_observed_users(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
     runner = CliRunner()
