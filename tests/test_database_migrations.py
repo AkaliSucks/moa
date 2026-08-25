@@ -8,6 +8,7 @@ from moa.database.migrations import (
     CATALOG_TABLES,
     Migration,
     MigrationError,
+    validate_current_catalog_schema,
     run_migrations,
 )
 from moa.database.sqlite import connect
@@ -699,6 +700,19 @@ def test_raw_evidence_lifecycle_upgrade_preserves_existing_text_and_defaults_mar
             assert connection.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE {column} IS NOT NULL"
             ).fetchone()[0] == 0
+
+
+def test_current_schema_validation_requires_baseline_import_event_columns_with_lifecycle(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        connection.execute("ALTER TABLE import_events DROP COLUMN raw_message")
+
+        with pytest.raises(MigrationError, match="import_events: raw_message"):
+            validate_current_catalog_schema(connection)
 
 
 def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds(

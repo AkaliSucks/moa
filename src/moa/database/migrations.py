@@ -187,7 +187,8 @@ def _validate_catalog_schema_tables(
     missing_columns = []
     required_columns = dict(CATALOG_REQUIRED_COLUMNS)
     if expected_tables == CURRENT_CATALOG_TABLES:
-        required_columns.update(CATALOG_CURRENT_REQUIRED_COLUMNS)
+        for table, required in CATALOG_CURRENT_REQUIRED_COLUMNS.items():
+            required_columns[table] = required_columns.get(table, frozenset()) | required
     for table, required in required_columns.items():
         columns = {
             row[1] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
