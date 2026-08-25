@@ -361,6 +361,344 @@ def _insert_harem_scan(path, scan_id, account_context_id=1, *, scan_kind="keys")
         )
 
 
+def _seed_roll_projection_source(
+    path,
+    *,
+    claim_rank=1,
+    kakera_value=100,
+    key_mode="none",
+):
+    _insert_context(path, 1, "Server", "server", 1, "Account", "account")
+    _insert_character(path, 1, "Character", "Series", "character", "series")
+    if key_mode == "mismatched":
+        _insert_character(path, 2, "Other", "Series", "other", "series")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO import_events (id, kind, source, observed_at, raw_message) "
+            "VALUES (1, 'roll', 'test', 'now', 'test')"
+        )
+    _insert_aggregate(path, 1, "message-1")
+    _insert_revision(path, 1, 1, "hash-1")
+    _insert_source_event(
+        path,
+        1,
+        "event-1",
+        1,
+        status="succeeded",
+        legacy_import_event_id=1,
+        insert_import_event=False,
+    )
+    _seed_resolved_projection_attribution(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO roll_observations "
+            "(id, account_context_id, character_id, claim_rank, kakera_value, "
+            "observed_at, import_event_id) VALUES (1, 1, 1, ?, ?, 'now', 1)",
+            (claim_rank, kakera_value),
+        )
+        connection.execute(
+            "INSERT INTO rank_snapshots "
+            "(id, character_id, claim_rank, like_rank, observed_at, import_event_id) "
+            "VALUES (10, 1, ?, NULL, 'now', 1)",
+            (claim_rank,),
+        )
+        connection.execute(
+            "INSERT INTO server_character_observations "
+            "(id, server_context_id, character_id, kakera_value, observed_at, import_event_id) "
+            "VALUES (11, 1, 1, 100, 'now', 1)"
+        )
+        if key_mode in {"matching", "mismatched"}:
+            character_id = 1 if key_mode == "matching" else 2
+            character_name = "Character" if character_id == 1 else "Other"
+            normalized_name = "character" if character_id == 1 else "other"
+            connection.execute(
+                "INSERT INTO harem_key_observations "
+                "(id, account_context_id, character_id, character_name, "
+                "normalized_character_name, key_type, key_count, kakera_value, "
+                "observed_at, import_event_id) "
+                "VALUES (12, 1, ?, ?, ?, 'gold', 1, 100, 'now', 1)",
+                (character_id, character_name, normalized_name),
+            )
+
+
+PROFILE_SLOT = '{"account":"account","server":"server"}'
+ROLL_SLOT = (
+    '{"account":"account","character":"character",'
+    '"series":"series","server":"server"}'
+)
+ROLL_KEY_SLOT = (
+    '{"account":"account","character":"character",'
+    '"key_type":"gold","series":"series","server":"server"}'
+)
+
+
+def test_projection_gap_unknown_roll_key_absence_does_not_report_missing(tmp_path):
+    database_path = tmp_path / "projection-gap-008-roll-unknown-absent.db"
+    _initialize(database_path)
+    _seed_roll_projection_source(database_path, key_mode="none")
+    _insert_projection_link(
+        database_path, 1, "catalog.roll", ROLL_SLOT,
+        projection_table="roll_observations", projection_row_id=1,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_rank", ROLL_SLOT,
+        projection_table="rank_snapshots", projection_row_id=10,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_server_character", ROLL_SLOT,
+        projection_table="server_character_observations", projection_row_id=11,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert not any(
+        finding.check_id == "DH-PG-008"
+        and "catalog.roll_key" in finding.local_identifier
+        for finding in findings
+    )
+    assert findings == ()
+
+
+def test_projection_gap_unknown_roll_key_presence_does_not_report_unexpected(tmp_path):
+    database_path = tmp_path / "projection-gap-008-roll-unknown-present.db"
+    _initialize(database_path)
+    _seed_roll_projection_source(database_path, key_mode="mismatched")
+    _insert_projection_link(
+        database_path, 1, "catalog.roll", ROLL_SLOT,
+        projection_table="roll_observations", projection_row_id=1,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_key", "unknown-key-slot",
+        projection_table="harem_key_observations", projection_row_id=12,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_rank", ROLL_SLOT,
+        projection_table="rank_snapshots", projection_row_id=10,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_server_character", ROLL_SLOT,
+        projection_table="server_character_observations", projection_row_id=11,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert findings == ()
+
+
+def test_projection_gap_roll_partial_expectedness_compares_only_known_dimensions(tmp_path):
+    database_path = tmp_path / "projection-gap-008-roll-partial.db"
+    _initialize(database_path)
+    _seed_roll_projection_source(database_path, kakera_value=None, key_mode="none")
+    _insert_projection_link(
+        database_path, 1, "catalog.roll", ROLL_SLOT,
+        projection_table="roll_observations", projection_row_id=1,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_server_character", ROLL_SLOT,
+        projection_table="server_character_observations", projection_row_id=11,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [(finding.entity, finding.local_identifier) for finding in findings] == [
+        (
+            "discord_projection_links",
+            "source_event_id=1; projection_kind='catalog.roll_server_character'; "
+            "projection_slot='{" + '"account":"account","character":"character",'
+            '"series":"series","server":"server"}' + "'",
+        ),
+        (
+            "discord_source_events",
+            "source_event_id=1; projection_kind='catalog.roll_rank'; "
+            "projection_slot='{" + '"account":"account","character":"character",'
+            '"series":"series","server":"server"}' + "'",
+        ),
+    ]
+    assert all(finding.check_id == "DH-PG-008" for finding in findings)
+    assert not any("catalog.roll_key" in finding.local_identifier for finding in findings)
+    assert "observed projection identity is not expected" in findings[0].reason
+    assert "expected projection identity is missing" in findings[1].reason
+
+
+def test_projection_gap_unknown_claim_expectedness_does_not_guess(tmp_path):
+    database_path = tmp_path / "projection-gap-008-claim-unknown.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="claim")
+    _seed_resolved_projection_attribution(database_path)
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert findings == ()
+
+
+def test_projection_gap_unknown_antidisable_expectedness_does_not_guess(tmp_path):
+    database_path = tmp_path / "projection-gap-008-antidisable-unknown.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="antidisable")
+    _seed_resolved_projection_attribution(database_path)
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert findings == ()
+
+
+def test_projection_gap_pg005_identity_remains_observed_with_independent_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-pg005-coexistence.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_generic_projection_target(database_path, "timer_state_observations", 100, 1)
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", PROFILE_SLOT,
+        projection_table="profile_observations", projection_row_id=999,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.timer_state", "unexpected-slot",
+        projection_table="timer_state_observations", projection_row_id=100,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-005", "DH-PG-008"]
+    assert "catalog.profile" in findings[0].local_identifier
+    assert "catalog.profile" not in findings[1].local_identifier
+    assert "catalog.timer_state" in findings[1].local_identifier
+
+
+def test_projection_gap_pg006_identity_remains_observed_with_independent_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-pg006-coexistence.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_import_event(database_path, 2)
+    _insert_generic_projection_target(database_path, "profile_observations", 100, 2)
+    _insert_generic_projection_target(database_path, "timer_state_observations", 101, 1)
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", PROFILE_SLOT,
+        projection_table="profile_observations", projection_row_id=100,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.timer_state", "unexpected-slot",
+        projection_table="timer_state_observations", projection_row_id=101,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-006", "DH-PG-008"]
+    assert "catalog.profile" in findings[0].local_identifier
+    assert "catalog.profile" not in findings[1].local_identifier
+    assert "catalog.timer_state" in findings[1].local_identifier
+
+
+def test_projection_gap_pg007_identity_remains_observed_with_independent_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-pg007-coexistence.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server A", "server a", 1, "Account A", "account a")
+    _insert_context(database_path, 2, "Server B", "server b", 2, "Account B", "account b")
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path, server="Server A", account="Account A")
+    _insert_generic_projection_target(
+        database_path, "profile_observations", 100, 1, account_context_id=2
+    )
+    _insert_generic_projection_target(
+        database_path, "timer_state_observations", 101, 1, account_context_id=1
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", '{"account":"account a","server":"server a"}',
+        projection_table="profile_observations", projection_row_id=100,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.timer_state", "unexpected-slot",
+        projection_table="timer_state_observations", projection_row_id=101,
+    )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == ["DH-PG-007", "DH-PG-008"]
+    assert "catalog.profile" in findings[0].local_identifier
+    assert "catalog.profile" not in findings[1].local_identifier
+    assert "catalog.timer_state" in findings[1].local_identifier
+
+
+def test_projection_gap_duplicate_identity_is_collapsed_for_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-duplicate-collapse.db"
+    _initialize(database_path)
+    _rebuild_without_singular_constraints(database_path, "discord_projection_links")
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_profile_observation(database_path)
+    for _ in range(2):
+        _insert_projection_link(
+            database_path, 1, "catalog.profile", PROFILE_SLOT,
+            projection_table="profile_observations", projection_row_id=999,
+        )
+
+    findings = DataHealthService(database_path).find_projection_gaps()
+
+    assert [finding.check_id for finding in findings] == []
+    duplicate_findings = DataHealthService(database_path).find_duplicates()
+    assert [finding.check_id for finding in duplicate_findings] == ["DH-DUP-009"]
+
+
+def test_projection_gap_healthy_singleton_exact_set_has_no_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-healthy-singleton.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_profile_observation(database_path)
+    _insert_projection_link(
+        database_path, 1, "catalog.profile", PROFILE_SLOT,
+        projection_table="profile_observations", projection_row_id=999,
+    )
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_healthy_roll_exact_set_has_no_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-healthy-roll.db"
+    _initialize(database_path)
+    _seed_roll_projection_source(database_path, key_mode="matching")
+    _insert_projection_link(
+        database_path, 1, "catalog.roll", ROLL_SLOT,
+        projection_table="roll_observations", projection_row_id=1,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_key", ROLL_KEY_SLOT,
+        projection_table="harem_key_observations", projection_row_id=12,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_rank", ROLL_SLOT,
+        projection_table="rank_snapshots", projection_row_id=10,
+    )
+    _insert_projection_link(
+        database_path, 1, "catalog.roll_server_character", ROLL_SLOT,
+        projection_table="server_character_observations", projection_row_id=11,
+    )
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
+def test_projection_gap_healthy_antidisable_exact_set_has_no_pg008(tmp_path):
+    database_path = tmp_path / "projection-gap-008-healthy-antidisable.db"
+    _initialize(database_path)
+    _insert_context(database_path, 1, "Server", "server", 1, "Account", "account")
+    _seed_succeeded_projection_source(database_path, import_kind="antidisable")
+    _seed_resolved_projection_attribution(database_path)
+    _insert_harem_scan(database_path, 1, scan_kind="antidisable")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
+            "VALUES (1, 1, 1)"
+        )
+    _insert_projection_link(
+        database_path, 1, "catalog.antidisable_page",
+        '{"account":"account","page_number":1,"scan_id":1,"server":"server"}',
+        projection_table="import_events", projection_row_id=1,
+    )
+
+    assert DataHealthService(database_path).find_projection_gaps() == ()
+
+
 def test_healthy_catalog_has_no_findings_and_preserves_database_state(tmp_path):
     database_path = tmp_path / "catalog.db"
     _initialize(database_path)
@@ -2176,6 +2514,21 @@ def test_cli_projection_gaps_healthy_database_succeeds(tmp_path, monkeypatch):
 
     assert result.exit_code == 0
     assert result.stdout.strip() == "No data-health findings."
+
+
+def test_cli_projection_gaps_renders_pg008_missing_expected_identity(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    _seed_succeeded_projection_source(database_path, import_kind="profile")
+    _seed_resolved_projection_attribution(database_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "data-health", "projection-gaps"])
+
+    assert result.exit_code == 0
+    assert "DH-PG-008" in result.stdout
+    assert "projection-gap" in result.stdout
+    assert "Total findings: 1" in result.stdout
 
 
 def test_cli_projection_gaps_reports_source_event_findings(tmp_path, monkeypatch):
