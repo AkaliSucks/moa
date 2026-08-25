@@ -15,6 +15,7 @@ from moa.database.legacy_database_relocation import (
 )
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 from moa.repositories.data_health_repository import DataHealthSchemaError
+from moa.repositories.retention_eligibility_repository import RetentionEligibilityDataError
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
@@ -39,6 +40,7 @@ from moa.services.discord_listener_service import (
 )
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
 from moa.services.data_health_service import DataHealthService
+from moa.services.retention_eligibility_service import RetentionEligibilityService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
@@ -2486,6 +2488,54 @@ def catalog_data_health_projection_gaps() -> None:
         )
     console.print(table)
     console.print(f"Total findings: {len(findings)}")
+
+
+@data_health_app.command("retention")
+def catalog_data_health_retention() -> None:
+    """Report aggregate raw-evidence retention eligibility without applying expiry."""
+    try:
+        report = RetentionEligibilityService(Path(DEFAULT_DATABASE_PATH)).report()
+    except (
+        DataHealthSchemaError,
+        RetentionEligibilityDataError,
+        OSError,
+        ValueError,
+        TypeError,
+        sqlite3.Error,
+    ):
+        console.print("[red]Unable to generate the retention eligibility report.[/red]")
+        raise typer.Exit(1) from None
+
+    console.print(
+        f"[bold cyan]Retention eligibility[/bold cyan] — as of {report.as_of.isoformat()} "
+        f"(cutoff {report.cutoff.isoformat()})"
+    )
+    table = Table()
+    table.add_column("Category", style="cyan")
+    table.add_column("Eligible", justify="right")
+    table.add_column("Retained/blocked", justify="right")
+    table.add_column("Already expired", justify="right")
+    table.add_column("Absent", justify="right")
+    table.add_column("Oldest eligible anchor")
+    table.add_column("Newest eligible anchor")
+    table.add_column("Blocked reasons")
+    for category in report.categories:
+        reasons = ", ".join(f"{reason}={count}" for reason, count in category.blocked_reason_counts)
+        table.add_row(
+            category.category,
+            str(category.eligible_count),
+            str(category.retained_blocked_count),
+            str(category.already_expired_count),
+            str(category.absent_count),
+            category.oldest_eligible_anchor.isoformat()
+            if category.oldest_eligible_anchor is not None
+            else "-",
+            category.newest_eligible_anchor.isoformat()
+            if category.newest_eligible_anchor is not None
+            else "-",
+            reasons or "-",
+        )
+    console.print(table)
 
 
 @catalog_app.command("top")
