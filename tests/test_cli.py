@@ -29,6 +29,58 @@ from moa.services.tower_state_projection_coordinator import TowerStateProjection
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
 
+def test_command_cli_registration_rendering_and_validation() -> None:
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["command", "--help"])
+    assert help_result.exit_code == 0
+    assert "explain" in help_result.stdout
+    assert "flags" in help_result.stdout
+
+    explain_result = runner.invoke(
+        main.app,
+        ["command", "explain", "$mmwy=a+ Re:Zero$--Some bundle"],
+    )
+    assert explain_result.exit_code == 0
+    assert "Command:" in explain_result.stdout
+    assert "$mm" in explain_result.stdout
+    assert "Include:" in explain_result.stdout
+    assert "Re:Zero" in explain_result.stdout
+    assert "Exclude:" in explain_result.stdout
+    assert "Some bundle" in explain_result.stdout
+    assert "Flag" in explain_result.stdout
+    assert "Category" in explain_result.stdout
+    assert "w" in explain_result.stdout
+    assert "gender" in explain_result.stdout
+    assert "Waifu characters." in explain_result.stdout
+
+    no_flags_result = runner.invoke(main.app, ["command", "explain", "$mm"])
+    assert no_flags_result.exit_code == 0
+    assert "Command:" in no_flags_result.stdout
+    assert "$mm" in no_flags_result.stdout
+    assert "No flags supplied." in no_flags_result.stdout
+
+    flags_result = runner.invoke(main.app, ["command", "flags", "-c", "spheres"])
+    assert flags_result.exit_code == 0
+    assert "Mudae command flags" in flags_result.stdout
+    assert "Flag" in flags_result.stdout
+    assert "Category" in flags_result.stdout
+    assert "spheres" in flags_result.stdout
+    assert "z" in flags_result.stdout
+    assert "Characters with spheres." in flags_result.stdout
+
+    invalid_result = runner.invoke(main.app, ["command", "explain", "$mm?"])
+    assert invalid_result.exit_code == 1
+    assert "Unknown Mudae flag near" in invalid_result.stdout
+
+    unmatched_result = runner.invoke(
+        main.app,
+        ["command", "flags", "-c", "not-a-category"],
+    )
+    assert unmatched_result.exit_code == 1
+    assert "No Mudae flags matched that category." in unmatched_result.stdout
+
+
 def test_tower_cli_registration_and_rendering() -> None:
     runner = CliRunner()
 
