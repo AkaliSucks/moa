@@ -86,6 +86,34 @@ def test_reaction_cli_registration_and_rendering() -> None:
     assert "Kakera reaction not found." in unknown_result.stdout
 
 
+def test_key_cli_registration_and_rendering() -> None:
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["key", "--help"])
+    assert help_result.exit_code == 0
+    assert "list" in help_result.stdout
+    assert "show" in help_result.stdout
+
+    list_result = runner.invoke(main.app, ["key", "list"])
+    assert list_result.exit_code == 0
+    assert "Character Key Tiers" in list_result.stdout
+    assert "This is universal key knowledge." in list_result.stdout
+    assert "Bronze Key" in list_result.stdout
+    assert "1-2" in list_result.stdout
+
+    show_result = runner.invoke(main.app, ["key", "show", "chaos"])
+    assert show_result.exit_code == 0
+    assert "Chaos Key - Keys 10+" in show_result.stdout
+    assert "Keys ten and above on a character" in show_result.stdout
+    assert "Kakera reactions" in show_result.stdout
+    assert "half power" in show_result.stdout
+    assert "Character becomes a Soulmate." in show_result.stdout
+
+    unknown_result = runner.invoke(main.app, ["key", "show", "not-a-tier"])
+    assert unknown_result.exit_code == 1
+    assert "Character key tier not found." in unknown_result.stdout
+
+
 def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
     monkeypatch,
 ) -> None:
