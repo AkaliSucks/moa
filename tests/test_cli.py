@@ -1591,3 +1591,43 @@ def test_config_use_accepts_discord_ids(monkeypatch, tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "Lake Arrowhead 2025 / ernieuuu" in result.stdout
+
+
+def test_badge_cli_registration_rendering_and_validation() -> None:
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["badge", "--help"])
+    assert help_result.exit_code == 0
+    assert "list" in help_result.stdout
+    assert "cost" in help_result.stdout
+
+    list_result = runner.invoke(main.app, ["badge", "list"])
+    assert list_result.exit_code == 0
+    assert "Kakera Badges" in list_result.stdout
+    assert "Default base value" in list_result.stdout
+    assert "Bronze" in list_result.stdout
+    assert "1,000" in list_result.stdout
+
+    cost_result = runner.invoke(
+        main.app,
+        [
+            "badge",
+            "cost",
+            "GOLD",
+            "4",
+            "--base-value",
+            "1000",
+            "--ruby-iv",
+        ],
+    )
+    assert cost_result.exit_code == 0
+    assert "GOLD 4" in cost_result.stdout
+    assert "3,000 Kakera" in cost_result.stdout
+    assert "with Ruby IV" in cost_result.stdout
+
+    invalid_result = runner.invoke(
+        main.app,
+        ["badge", "cost", "NOT_A_BADGE", "1", "--base-value", "1000"],
+    )
+    assert invalid_result.exit_code == 1
+    assert "Unknown badge: NOT_A_BADGE" in invalid_result.stdout
