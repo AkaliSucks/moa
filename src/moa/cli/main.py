@@ -10,6 +10,7 @@ from rich.table import Table
 
 from moa.core.config import ConfigService
 from moa.cli.config_commands import build_config_app
+from moa.cli.reaction_commands import build_reaction_app
 from moa.cli.tower_commands import build_tower_app
 from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
@@ -61,7 +62,6 @@ from moa.services.loot_service import KakeralootService
 from moa.services.harem_search_service import HaremSearchService
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
-from moa.services.reaction_service import ReactionService
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
@@ -83,7 +83,6 @@ from moa.utils.display import (
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 command_app = typer.Typer(help="Mudae command and flag reference")
 badge_app = typer.Typer(help="Kakera Badge commands")
-reaction_app = typer.Typer(help="Kakera reaction commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 key_app = typer.Typer(help="Character key reference commands")
 roll_app = typer.Typer(help="Browse imported roll observations")
@@ -101,6 +100,7 @@ discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot"
 console = Console()
 tower_app = build_tower_app(console)
 config_app = build_config_app(console)
+reaction_app = build_reaction_app(console)
 
 app.add_typer(tower_app, name="tower")
 app.add_typer(command_app, name="command")
@@ -615,45 +615,6 @@ def badge_cost(
         f"[green]{badge_id.strip().upper()} {level}[/green] costs "
         f"[cyan]{cost:,} Kakera[/cyan]{discount_label}."
     )
-
-
-@reaction_app.command("list")
-def list_reactions() -> None:
-    """List the known Kakera reaction types and baseline values."""
-    table = Table(title="Kakera Reactions")
-    table.add_column("Reaction", style="green")
-    table.add_column("Value range", justify="right", style="cyan")
-    table.add_column("Base average", justify="right")
-    table.add_column("Power")
-
-    for reaction in ReactionService().all():
-        if reaction.minimum_value is None:
-            value_range = "Variable"
-        elif reaction.minimum_value == reaction.maximum_value:
-            value_range = f"{reaction.minimum_value:,}"
-        else:
-            value_range = f"{reaction.minimum_value:,}-{reaction.maximum_value:,}"
-
-        average = "-" if reaction.average_value is None else f"{reaction.average_value:,.1f}"
-        table.add_row(reaction.name, value_range, average, reaction.power_cost_policy.title())
-
-    console.print(table)
-
-
-@reaction_app.command("show")
-def show_reaction(reaction_id: str) -> None:
-    """Show the baseline rules for one Kakera reaction type."""
-    reaction = ReactionService().get(reaction_id)
-    if reaction is None:
-        console.print("[red]Kakera reaction not found.[/red]")
-        raise typer.Exit(1)
-
-    console.print(f"[bold cyan]{reaction.name}[/bold cyan]")
-    console.print(f"[bold]Type:[/bold] {reaction.reaction_type}")
-    console.print(f"[bold]Reaction power:[/bold] {reaction.power_cost_policy}")
-    if reaction.average_value is not None:
-        console.print(f"[bold]Base average:[/bold] {reaction.average_value:,.4f} Kakera")
-    console.print(f"[bold]Details:[/bold] {reaction.description}")
 
 
 @loot_app.command("list")
