@@ -10,6 +10,7 @@ from rich.table import Table
 
 from moa.core.config import ConfigService
 from moa.cli.config_commands import build_config_app
+from moa.cli.key_commands import build_key_app
 from moa.cli.reaction_commands import build_reaction_app
 from moa.cli.tower_commands import build_tower_app
 from moa.database.legacy_database_relocation import (
@@ -55,7 +56,6 @@ from moa.services.listener_process_guard import (
     ListenerProcessGuardResourceError,
 )
 from moa.services.keyfarm_service import KeyFarmService
-from moa.services.key_service import KeyService
 from moa.services.key_progress_service import KeyProgressService
 from moa.services.kakeraloot_budget_service import KakeralootBudgetService
 from moa.services.loot_service import KakeralootService
@@ -84,7 +84,6 @@ app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 command_app = typer.Typer(help="Mudae command and flag reference")
 badge_app = typer.Typer(help="Kakera Badge commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
-key_app = typer.Typer(help="Character key reference commands")
 roll_app = typer.Typer(help="Browse imported roll observations")
 account_app = typer.Typer(help="Imported account-state summary commands")
 action_app = typer.Typer(help="Use fresh imported timers to show available actions")
@@ -100,6 +99,7 @@ discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot"
 console = Console()
 tower_app = build_tower_app(console)
 config_app = build_config_app(console)
+key_app = build_key_app(console)
 reaction_app = build_reaction_app(console)
 
 app.add_typer(tower_app, name="tower")
@@ -803,49 +803,6 @@ def next_loot_spending_step(
             f"{upgrade.cost:,}",
             affordability,
         )
-    console.print(table)
-
-
-@key_app.command("list")
-def list_keys() -> None:
-    """List every character-key tier, including Chaos keys not present in an account."""
-    table = Table(title="Character Key Tiers (universal reference)")
-    table.add_column("Tier", style="green")
-    table.add_column("Key counts", justify="right", style="cyan")
-    table.add_column("Milestones")
-    for tier in KeyService().all():
-        key_counts = (
-            f"{tier.minimum_key_count}-{tier.maximum_key_count}"
-            if tier.maximum_key_count is not None
-            else f"{tier.minimum_key_count}+"
-        )
-        table.add_row(tier.name, key_counts, str(len(tier.milestones)))
-    console.print(table)
-    console.print(
-        "[dim]This is universal key knowledge. Account harem imports only show which tiers "
-        "your characters currently have.[/dim]"
-    )
-
-
-@key_app.command("show")
-def show_key(key_id: str) -> None:
-    """Show every milestone for one character-key tier."""
-    tier = KeyService().get(key_id)
-    if tier is None:
-        console.print("[red]Character key tier not found.[/red]")
-        raise typer.Exit(1)
-    key_counts = (
-        f"{tier.minimum_key_count}-{tier.maximum_key_count}"
-        if tier.maximum_key_count is not None
-        else f"{tier.minimum_key_count}+"
-    )
-    console.print(f"[bold cyan]{tier.name}[/bold cyan] - Keys {key_counts}")
-    console.print(f"[bold]Details:[/bold] {tier.description}")
-    table = Table()
-    table.add_column("Key count", justify="right", style="cyan")
-    table.add_column("Unlocked effects")
-    for milestone in tier.milestones:
-        table.add_row(str(milestone.key_count), "\n".join(milestone.effects))
     console.print(table)
 
 
