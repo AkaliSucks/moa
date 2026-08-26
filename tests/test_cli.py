@@ -57,6 +57,35 @@ def test_tower_cli_registration_and_rendering() -> None:
     assert "Tower floor not found." in unknown_result.stdout
 
 
+def test_reaction_cli_registration_and_rendering() -> None:
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["reaction", "--help"])
+    assert help_result.exit_code == 0
+    assert "list" in help_result.stdout
+    assert "show" in help_result.stdout
+
+    list_result = runner.invoke(main.app, ["reaction", "list"])
+    assert list_result.exit_code == 0
+    assert "Kakera Reactions" in list_result.stdout
+    assert "Red Kakera" in list_result.stdout
+    assert "1,401-1,500" in list_result.stdout
+    assert "1,450.5" in list_result.stdout
+    assert "Standard" in list_result.stdout
+
+    show_result = runner.invoke(main.app, ["reaction", "show", "RED"])
+    assert show_result.exit_code == 0
+    assert "Red Kakera" in show_result.stdout
+    assert "Type: range" in show_result.stdout
+    assert "Reaction power: standard" in show_result.stdout
+    assert "Base average: 1,450.5000 Kakera" in show_result.stdout
+    assert "Details: A high-value standard reaction whose value is within its listed range." in show_result.stdout
+
+    unknown_result = runner.invoke(main.app, ["reaction", "show", "not-a-reaction"])
+    assert unknown_result.exit_code == 1
+    assert "Kakera reaction not found." in unknown_result.stdout
+
+
 def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
     monkeypatch,
 ) -> None:
