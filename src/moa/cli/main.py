@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from moa.core.config import ConfigService
+from moa.cli.badge_commands import build_badge_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.key_commands import build_key_app
 from moa.cli.reaction_commands import build_reaction_app
@@ -29,7 +30,6 @@ from moa.repositories.catalog_repository import (
     ImportEventDeletionBlockedError,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
-from moa.services.badge_service import BadgeService
 from moa.services.account_overview_service import AccountOverviewService
 from moa.services.account_comparison_service import AccountComparisonService
 from moa.services.action_service import ActionService
@@ -82,7 +82,6 @@ from moa.utils.display import (
 
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 command_app = typer.Typer(help="Mudae command and flag reference")
-badge_app = typer.Typer(help="Kakera Badge commands")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 roll_app = typer.Typer(help="Browse imported roll observations")
 account_app = typer.Typer(help="Imported account-state summary commands")
@@ -99,6 +98,7 @@ discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot"
 console = Console()
 tower_app = build_tower_app(console)
 config_app = build_config_app(console)
+badge_app = build_badge_app(console)
 key_app = build_key_app(console)
 reaction_app = build_reaction_app(console)
 
@@ -566,55 +566,6 @@ def compare_servers(
         )
     console.print(table)
     console.print("[dim]This compares imported server configuration only; it does not compare player state.[/dim]")
-
-
-@badge_app.command("list")
-def list_badges() -> None:
-    """List the seven Kakera Badge definitions."""
-    table = Table(title="Kakera Badges")
-    table.add_column("Badge", style="green")
-    table.add_column("Default base value", justify="right", style="cyan")
-    table.add_column("Level IV highlight")
-
-    for badge in BadgeService().all():
-        table.add_row(
-            badge.name,
-            f"{badge.default_base_value:,}",
-            badge.levels[-1].effects[-1],
-        )
-
-    console.print(table)
-
-
-@badge_app.command("cost")
-def badge_cost(
-    badge_id: str,
-    level: int,
-    base_value: int = typer.Option(
-        ..., "--base-value", "-b", help="Server-configured base badge value."
-    ),
-    ruby_iv_active: bool = typer.Option(
-        False, "--ruby-iv", help="Apply Ruby IV's 25% discount."
-    ),
-) -> None:
-    """Calculate one badge-level purchase cost for a server configuration."""
-    service = BadgeService()
-    try:
-        cost = service.cost_for_level(
-            badge_id,
-            level,
-            base_value,
-            ruby_iv_active=ruby_iv_active,
-        )
-    except ValueError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-
-    discount_label = " with Ruby IV" if ruby_iv_active else ""
-    console.print(
-        f"[green]{badge_id.strip().upper()} {level}[/green] costs "
-        f"[cyan]{cost:,} Kakera[/cyan]{discount_label}."
-    )
 
 
 @loot_app.command("list")
