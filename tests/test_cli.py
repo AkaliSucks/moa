@@ -2725,3 +2725,169 @@ def test_harem_status_and_complete_cli_preserve_lifecycle_outputs_and_errors(
     assert "scan is not complete" in failed.stdout
     assert "Traceback" not in failed.stdout
     assert events[-1] == ("complete", 13)
+
+
+def test_adl_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    events: list[str] = []
+
+    def recording_init(_self) -> None:
+        events.append("construct")
+
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", recording_init)
+    monkeypatch.setattr(
+        catalog_service_module.CatalogService,
+        "begin_antidisable_scan",
+        lambda *_args: events.append("begin"),
+    )
+    monkeypatch.setattr(
+        catalog_service_module.CatalogService,
+        "harem_scan_progress",
+        lambda *_args: events.append("status"),
+    )
+    monkeypatch.setattr(
+        catalog_service_module.CatalogService,
+        "complete_antidisable_scan",
+        lambda *_args: events.append("complete"),
+    )
+    runner = CliRunner()
+
+    parent_help = runner.invoke(main.app, ["adl", "--help"])
+    assert parent_help.exit_code == 0
+    assert {
+        line.split()[1]
+        for line in parent_help.stdout.splitlines()
+        if "│" in line and line.split()[1] in {"begin", "status", "complete"}
+    } == {"begin", "status", "complete"}
+
+    begin_help = runner.invoke(main.app, ["adl", "begin", "--help"])
+    status_help = runner.invoke(main.app, ["adl", "status", "--help"])
+    complete_help = runner.invoke(main.app, ["adl", "complete", "--help"])
+    assert begin_help.exit_code == status_help.exit_code == complete_help.exit_code == 0
+    assert "--server" in begin_help.stdout and "-s" in begin_help.stdout
+    assert "--account" in begin_help.stdout and "-a" in begin_help.stdout
+    assert "Usage: root adl status [OPTIONS] {scan_id}" in status_help.stdout
+    assert "Usage: root adl complete [OPTIONS] {scan_id}" in complete_help.stdout
+    assert events == []
+
+
+def test_adl_begin_cli_constructs_service_once_and_preserves_workflow_guidance(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+
+    def recording_init(_self) -> None:
+        events.append(("construct", None))
+
+    def begin(_self, server: str, account: str):
+        events.append(("begin", (server, account)))
+        return SimpleNamespace(id=7, account_name=account, server_name=server)
+
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", recording_init)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "begin_antidisable_scan", begin)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main.app,
+        ["adl", "begin", "--server", "Lake", "--account", "ernieuuu"],
+    )
+    assert result.exit_code == 0
+    assert events == [("construct", None), ("begin", ("Lake", "ernieuuu"))]
+    assert "Started antidisable scan 7" in result.stdout
+    assert "$adl" in result.stdout
+    assert "import adl --scan 7" in result.stdout
+    assert "--server 'Lake'" in result.stdout
+    assert "--account 'ernieuuu'" in result.stdout
+
+    events.clear()
+
+    def fail_begin(_self, _server: str, _account: str):
+        events.append(("begin", "failed"))
+        raise ValueError("scan already active")
+
+    monkeypatch.setattr(catalog_service_module.CatalogService, "begin_antidisable_scan", fail_begin)
+    failed = runner.invoke(
+        main.app,
+        ["adl", "begin", "--server", "Lake", "--account", "ernieuuu"],
+    )
+    assert failed.exit_code == 1
+    assert "scan already active" in failed.stdout
+    assert "Started antidisable scan" not in failed.stdout
+    assert "Traceback" not in failed.stdout
+    assert events == [("construct", None), ("begin", "failed")]
+
+
+def test_adl_status_and_complete_cli_preserve_lifecycle_outputs_and_errors(
+    monkeypatch,
+) -> None:
+    events: list[tuple[str, int]] = []
+
+    def recording_init(_self) -> None:
+        events.append(("construct", 0))
+
+    def status(_self, scan_id: int):
+        events.append(("status", scan_id))
+        if scan_id == 99:
+            return None
+        if scan_id == 98:
+            return SimpleNamespace(scan_kind="keys")
+        return SimpleNamespace(
+            id=scan_id,
+            scan_kind="antidisable",
+            server_name="Lake",
+            account_name="ernieuuu",
+            expected_page_count=None if scan_id == 1 else 3,
+            imported_pages=() if scan_id == 1 else (1, 2),
+            completed_at=None,
+        )
+
+    def complete(_self, scan_id: int):
+        events.append(("complete", scan_id))
+        if scan_id == 13:
+            raise ValueError("scan is not complete")
+        return SimpleNamespace(
+            id=scan_id,
+            server_name="Lake",
+            account_name="ernieuuu",
+        )
+
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", recording_init)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "harem_scan_progress", status)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "complete_antidisable_scan", complete)
+    runner = CliRunner()
+
+    unknown_pages = runner.invoke(main.app, ["adl", "status", "1"])
+    assert unknown_pages.exit_code == 0
+    assert "Pages: none of unknown · Status: in progress" in unknown_pages.stdout
+    assert events == [("construct", 0), ("status", 1)]
+
+    events.clear()
+    partial = runner.invoke(main.app, ["adl", "status", "2"])
+    assert partial.exit_code == 0
+    assert "Pages: 1, 2 of 3 · Status: in progress" in partial.stdout
+    assert events == [("construct", 0), ("status", 2)]
+
+    events.clear()
+    wrong_kind = runner.invoke(main.app, ["adl", "status", "98"])
+    assert wrong_kind.exit_code == 1
+    assert "Antidisable scan not found." in wrong_kind.stdout
+    assert events == [("construct", 0), ("status", 98)]
+
+    events.clear()
+    missing = runner.invoke(main.app, ["adl", "status", "99"])
+    assert missing.exit_code == 1
+    assert "Antidisable scan not found." in missing.stdout
+    assert events == [("construct", 0), ("status", 99)]
+
+    events.clear()
+    completed = runner.invoke(main.app, ["adl", "complete", "12"])
+    assert completed.exit_code == 0
+    assert "Antidisable scan 12 is complete and active" in completed.stdout
+    assert events == [("construct", 0), ("complete", 12)]
+
+    events.clear()
+    failed = runner.invoke(main.app, ["adl", "complete", "13"])
+    assert failed.exit_code == 1
+    assert "scan is not complete" in failed.stdout
+    assert "Antidisable scan 13 is complete and active" not in failed.stdout
+    assert "Traceback" not in failed.stdout
+    assert events == [("construct", 0), ("complete", 13)]
