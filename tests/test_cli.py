@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 import moa.services.action_service as action_service_module
+import moa.services.keyfarm_service as keyfarm_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
@@ -30,6 +31,102 @@ from moa.services.sphere_result_projection_coordinator import SphereResultProjec
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
+
+
+def test_recommend_keyfarm_resolves_context_and_constructs_service_at_callback_time(
+    tmp_path, monkeypatch
+) -> None:
+    server = "Lake Arrowhead 2025"
+    account = "ernieuuu"
+    database_path = tmp_path / "catalog.db"
+    catalog = CatalogService(CatalogRepository(database_path))
+    harem = (
+        "Power · :silverkey: (5) 1,448 ka\n"
+        "Emilia · :silverkey: (5) 1,295 ka\n"
+        "Megumin · :silverkey: (5) 1,505 ka\n"
+        "Page 1 / 1"
+    )
+    bonus = (
+        "Spawn bonus for wishes: +210% ($k)\n"
+        "Additional % spawn bonus for $starwish: +180% ($kt) (= 390%)\n"
+        "Chance to get an additional key on wishes: +10% ($kt)"
+    )
+    wishlist = (
+        "ernieuuu's Wishlist - 3/13 $wl, 2/2 $sw\n"
+        "Power ⭐\n"
+        "Emilia ⭐\n"
+        "Megumin"
+    )
+    catalog.import_harem_key_page(
+        MudaeTextParser().parse_harem_key_page(harem), server, account, harem, "test"
+    )
+    catalog.import_player_bonus(
+        MudaeTextParser().parse_player_bonus(bonus), server, account, bonus, "test"
+    )
+    catalog.import_wishlist(
+        MudaeTextParser().parse_wishlist(wishlist), server, account, wishlist, "test"
+    )
+    events: list[str] = []
+
+    class RecordingConfigService:
+        def resolve_context(self, requested_server, requested_account):
+            events.append("resolve")
+            return requested_server, requested_account
+
+    def isolated_catalog() -> CatalogService:
+        events.append("catalog")
+        return catalog
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(keyfarm_service_module, "CatalogService", isolated_catalog)
+    runner = CliRunner()
+
+    recommend_help = runner.invoke(main.app, ["recommend", "--help"])
+    assert recommend_help.exit_code == 0
+    assert "keyfarm" in recommend_help.stdout
+    assert events == []
+
+    keyfarm_help = runner.invoke(main.app, ["recommend", "keyfarm", "--help"])
+    assert keyfarm_help.exit_code == 0
+    assert "--server" in keyfarm_help.stdout
+    assert "-s" in keyfarm_help.stdout
+    assert "--account" in keyfarm_help.stdout
+    assert "-a" in keyfarm_help.stdout
+    assert "--limit" in keyfarm_help.stdout
+    assert "15" in keyfarm_help.stdout
+    assert events == []
+
+    result = runner.invoke(
+        main.app,
+        [
+            "recommend",
+            "keyfarm",
+            "--server",
+            server,
+            "--account",
+            account,
+            "--limit",
+            "1",
+        ],
+    )
+    assert result.exit_code == 0
+    assert events == ["resolve", "catalog"]
+    assert "key-farm recommendations" in result.stdout
+    assert "Power" in result.stdout
+    assert "Kakera" in result.stdout
+    assert "Megumin" not in result.stdout
+
+    missing_catalog = CatalogService(CatalogRepository(tmp_path / "missing.db"))
+    monkeypatch.setattr(keyfarm_service_module, "CatalogService", lambda: missing_catalog)
+    events.clear()
+    missing = runner.invoke(
+        main.app,
+        ["recommend", "keyfarm", "--server", server, "--account", account],
+    )
+    assert missing.exit_code == 1
+    assert events == ["resolve"]
+    assert "Import a $bonus snapshot" in missing.stdout
+    assert "Power" not in missing.stdout
 
 
 def test_command_cli_registration_rendering_and_validation() -> None:
