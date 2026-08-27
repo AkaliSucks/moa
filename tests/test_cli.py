@@ -5,28 +5,34 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+import moa.services.account_comparison_service as account_comparison_service_module
+import moa.services.account_overview_service as account_overview_service_module
 import moa.services.action_service as action_service_module
+import moa.services.catalog_service as catalog_service_module
 import moa.services.kakeraloot_budget_service as kakeraloot_budget_service_module
 import moa.services.keyfarm_service as keyfarm_service_module
 import moa.services.loot_service as loot_service_module
+import moa.services.progress_service as progress_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
-from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.antidisable_page_projection_coordinator import (
     AntidisablePageProjectionCoordinator,
 )
+from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
-from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
-from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
+from moa.services.kakeraloot_state_projection_coordinator import (
+    KakeralootStateProjectionCoordinator,
+)
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
+from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
@@ -601,10 +607,30 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
         def recent_key_gains(self, server: str, account: str, limit: int):
             return (latest_key,)
 
-    monkeypatch.setattr(main, "AccountOverviewService", lambda: SimpleNamespace(overview=lambda *_: overview))
-    monkeypatch.setattr(main, "ActionService", lambda: SimpleNamespace(readiness=lambda *_: readiness))
-    monkeypatch.setattr(main, "CatalogService", FakeCatalogService)
-    monkeypatch.setattr(main, "KeyFarmService", lambda: SimpleNamespace(recommend=lambda *_: ()))
+    monkeypatch.setattr(account_overview_service_module.AccountOverviewService, "__init__", lambda self: None)
+    monkeypatch.setattr(
+        account_overview_service_module.AccountOverviewService,
+        "overview",
+        lambda self, *_: overview,
+    )
+    monkeypatch.setattr(action_service_module.ActionService, "__init__", lambda self: None)
+    monkeypatch.setattr(
+        action_service_module.ActionService,
+        "readiness",
+        lambda self, *_: readiness,
+    )
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", lambda self: None)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "kakera_reaction_summary", FakeCatalogService.kakera_reaction_summary)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "kakera_reactions", FakeCatalogService.kakera_reactions)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "recent_rolls", FakeCatalogService.recent_rolls)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "roll_statistics", FakeCatalogService.roll_statistics)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "recent_key_gains", FakeCatalogService.recent_key_gains)
+    monkeypatch.setattr(keyfarm_service_module.KeyFarmService, "__init__", lambda self: None)
+    monkeypatch.setattr(
+        keyfarm_service_module.KeyFarmService,
+        "recommend",
+        lambda self, *_: (_ for _ in ()).throw(ValueError("not ready")),
+    )
 
     result = CliRunner().invoke(
         main.app,
@@ -634,6 +660,230 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert partial_result.exit_code == 0
     assert "Not fully observed" in partial_result.stdout
     assert "Quantity 5; Quality 0" not in partial_result.stdout
+
+
+def test_account_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    events: list[str] = []
+
+    class UnexpectedConfigService:
+        def __init__(self):
+            events.append("config")
+            raise AssertionError("account help must not resolve configured context")
+
+    def unexpected_constructor(*args, **kwargs):
+        events.append("service")
+        raise AssertionError("account help must not construct services")
+
+    monkeypatch.setattr(main, "ConfigService", UnexpectedConfigService)
+    for service_class in (
+        account_overview_service_module.AccountOverviewService,
+        account_comparison_service_module.AccountComparisonService,
+        progress_service_module.ProgressService,
+        action_service_module.ActionService,
+        keyfarm_service_module.KeyFarmService,
+        catalog_service_module.CatalogService,
+    ):
+        monkeypatch.setattr(service_class, "__init__", unexpected_constructor)
+
+    runner = CliRunner()
+    help_result = runner.invoke(main.app, ["account", "--help"])
+    assert help_result.exit_code == 0
+    assert [name for name in ("activity", "overview", "compare", "progress") if name in help_result.stdout] == [
+        "activity",
+        "overview",
+        "compare",
+        "progress",
+    ]
+    assert events == []
+
+    expected_help = {
+        "activity": ("--server", "-s", "--account", "-a"),
+        "overview": ("--server", "-s", "--account", "-a"),
+        "compare": (
+            "--left-server",
+            "--left-account",
+            "--right-server",
+            "--right-account",
+        ),
+        "progress": ("--server", "-s", "--account", "-a"),
+    }
+    for command, fragments in expected_help.items():
+        result = runner.invoke(main.app, ["account", command, "--help"])
+        assert result.exit_code == 0
+        for fragment in fragments:
+            assert fragment in result.stdout
+    assert events == []
+
+
+def test_account_resolver_driven_commands_resolve_before_service_reads(monkeypatch) -> None:
+    events: list[object] = []
+
+    class RecordingConfigService:
+        def resolve_context(self, server, account):
+            events.append(("resolve", server, account))
+            if server == "missing":
+                raise ValueError("No configured account context")
+            return server or "Lake", account or "ernieuuu"
+
+    overview = SimpleNamespace(
+        account_name="ernieuuu",
+        kakera_balance=12000,
+        kakera_balance_source="$k",
+        personal_rare_multiplier=None,
+        server_rare_multiplier=None,
+        max_badge_count=3,
+        badge_count=7,
+        tower_level=None,
+        completed_towers=None,
+        next_tower_cost=None,
+        tower_shortfall=None,
+        kakeraloots_unlocked=True,
+        missing_kakeraloot_prerequisites=(),
+        has_kakeraloots=True,
+        kakeraloot_status_note=None,
+        quantity_level=5,
+        quality_level=4,
+        loot_usage_count=12,
+        wishlist_count=4,
+        wishlist_capacity=10,
+        starwish_count=1,
+        starwish_capacity=2,
+        disable_slots_used=2,
+        disable_slots_capacity=16,
+        keyed_harem_count=25,
+    )
+    progress = SimpleNamespace(
+        account_name="ernieuuu",
+        observations=(
+            SimpleNamespace(
+                observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+                kakera_balance=12000,
+                max_badge_count=3,
+            ),
+        ),
+        kakera_change=None,
+        elapsed_seconds=None,
+        kakera_per_day=None,
+    )
+
+    class RecordingOverviewService:
+        def __init__(self):
+            events.append("overview-construct")
+
+        def overview(self, server, account):
+            events.append(("overview-read", server, account))
+            return overview
+
+    class RecordingProgressService:
+        def __init__(self):
+            events.append("progress-construct")
+
+        def kakera_progress(self, server, account):
+            events.append(("progress-read", server, account))
+            return progress
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(account_overview_service_module.AccountOverviewService, "__init__", RecordingOverviewService.__init__)
+    monkeypatch.setattr(account_overview_service_module.AccountOverviewService, "overview", RecordingOverviewService.overview)
+    monkeypatch.setattr(progress_service_module.ProgressService, "__init__", RecordingProgressService.__init__)
+    monkeypatch.setattr(progress_service_module.ProgressService, "kakera_progress", RecordingProgressService.kakera_progress)
+
+    overview_result = CliRunner().invoke(main.app, ["account", "overview", "--server", "Lake", "--account", "ernieuuu"])
+    assert overview_result.exit_code == 0
+    assert "ernieuuu - account overview" in overview_result.stdout
+    assert "12,000 Kakera ($k)" in overview_result.stdout
+    assert events == [
+        ("resolve", "Lake", "ernieuuu"),
+        "overview-construct",
+        ("overview-read", "Lake", "ernieuuu"),
+    ]
+
+    events.clear()
+    progress_result = CliRunner().invoke(main.app, ["account", "progress", "--server", "Lake", "--account", "ernieuuu"])
+    assert progress_result.exit_code == 0
+    assert "ernieuuu - Kakera progression" in progress_result.stdout
+    assert "12,000" in progress_result.stdout
+    assert events == [
+        ("resolve", "Lake", "ernieuuu"),
+        "progress-construct",
+        ("progress-read", "Lake", "ernieuuu"),
+    ]
+
+    events.clear()
+    missing_result = CliRunner().invoke(main.app, ["account", "overview", "--server", "missing", "--account", "ernieuuu"])
+    assert missing_result.exit_code == 1
+    assert "No configured account context" in missing_result.stdout
+    assert events == [("resolve", "missing", "ernieuuu")]
+
+
+def test_account_progress_no_snapshots_is_informational(monkeypatch) -> None:
+    class RecordingConfigService:
+        def resolve_context(self, server, account):
+            return server or "Lake", account or "ernieuuu"
+
+    class EmptyProgressService:
+        def kakera_progress(self, server, account):
+            return SimpleNamespace(observations=())
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(progress_service_module.ProgressService, "__init__", lambda self: None)
+    monkeypatch.setattr(progress_service_module.ProgressService, "kakera_progress", lambda self, server, account: EmptyProgressService().kakera_progress(server, account))
+    result = CliRunner().invoke(main.app, ["account", "progress", "--server", "Lake", "--account", "ernieuuu"])
+    assert result.exit_code == 0
+    assert "No $k snapshots imported for this server/account yet." in result.stdout
+    assert "Observed (UTC)" not in result.stdout
+
+
+def test_account_compare_uses_explicit_context_without_configured_resolution(monkeypatch) -> None:
+    events: list[object] = []
+
+    class UnexpectedConfigService:
+        def resolve_context(self, server, account):
+            raise AssertionError("account compare must not resolve configured context")
+
+    comparison = SimpleNamespace(
+        left_account_name="alpha",
+        left_server_name="Lake",
+        right_account_name="beta",
+        right_server_name="Hill",
+        rows=(
+            SimpleNamespace(label="Kakera balance", left_value="9,283 ($k)", right_value="Not imported"),
+            SimpleNamespace(label="Kakeraloots", left_value="Not imported", right_value="Not imported"),
+        ),
+    )
+
+    class RecordingComparisonService:
+        def __init__(self):
+            events.append("construct")
+
+        def compare(self, left_server, left_account, right_server, right_account):
+            events.append(("compare", left_server, left_account, right_server, right_account))
+            return comparison
+
+    monkeypatch.setattr(main, "ConfigService", UnexpectedConfigService)
+    monkeypatch.setattr(account_comparison_service_module.AccountComparisonService, "__init__", RecordingComparisonService.__init__)
+    monkeypatch.setattr(account_comparison_service_module.AccountComparisonService, "compare", RecordingComparisonService.compare)
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "account",
+            "compare",
+            "--left-server",
+            "Lake",
+            "--left-account",
+            "alpha",
+            "--right-server",
+            "Hill",
+            "--right-account",
+            "beta",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "alpha (Lake) vs beta (Hill)" in result.stdout
+    assert "9,283 ($k)" in result.stdout
+    assert "Not imported" in result.stdout
+    assert "Only imported state is compared" in result.stdout
+    assert events == ["construct", ("compare", "Lake", "alpha", "Hill", "beta")]
 
 
 def test_roll_cli_characterization_preserves_help_resolution_and_empty_paths(monkeypatch) -> None:
@@ -927,9 +1177,8 @@ def test_account_overview_does_not_render_partial_kakeraloot_state_as_factual(
         disable_slots_capacity=None,
         keyed_harem_count=0,
     )
-    monkeypatch.setattr(
-        main, "AccountOverviewService", lambda: SimpleNamespace(overview=lambda *_: overview)
-    )
+    monkeypatch.setattr(account_overview_service_module.AccountOverviewService, "__init__", lambda self: None)
+    monkeypatch.setattr(account_overview_service_module.AccountOverviewService, "overview", lambda self, *_: overview)
 
     result = CliRunner().invoke(
         main.app,
