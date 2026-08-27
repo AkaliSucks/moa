@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+import moa.services.action_service as action_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
@@ -427,6 +428,79 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert partial_result.exit_code == 0
     assert "Not fully observed" in partial_result.stdout
     assert "Quantity 5; Quality 0" not in partial_result.stdout
+
+
+def test_action_now_resolves_context_and_constructs_service_at_callback_time(monkeypatch) -> None:
+    events: list[tuple[str, object]] = []
+
+    class RecordingConfigService:
+        def resolve_context(self, server, account):
+            events.append(("resolve", (server, account)))
+            return server or "Lake", account or "ernieuuu"
+
+    class RecordingCatalogService:
+        def __init__(self):
+            events.append(("construct", None))
+            self._state = SimpleNamespace(
+                server_name="Lake",
+                account_name="ernieuuu",
+                observed_at=datetime.now(timezone.utc),
+                snapshot=SimpleNamespace(
+                    can_claim_now=True,
+                    claim_reset_minutes=152,
+                    rolls_left=0,
+                    rolls_reset_minutes=32,
+                    daily_kakera_ready=True,
+                    rt_available=True,
+                    can_react_kakera_now=True,
+                    reaction_power_percent=72,
+                    oq_stored=1,
+                    daily_reset_minutes=496,
+                    ouro_refill_minutes=918,
+                    vote_reset_minutes=350,
+                    gold_key_reset_minutes=152,
+                ),
+            )
+
+        def timer_state(self, server, account):
+            events.append(("read", (server, account)))
+            return self._state
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(action_service_module, "CatalogService", RecordingCatalogService)
+    runner = CliRunner()
+
+    action_help = runner.invoke(main.app, ["action", "--help"])
+    assert action_help.exit_code == 0
+    assert "now" in action_help.stdout
+    assert events == []
+
+    now_help = runner.invoke(main.app, ["action", "now", "--help"])
+    assert now_help.exit_code == 0
+    assert "--server" in now_help.stdout
+    assert "-s" in now_help.stdout
+    assert "--account" in now_help.stdout
+    assert "-a" in now_help.stdout
+    assert events == []
+
+    result = runner.invoke(
+        main.app,
+        ["action", "now", "-s", "Lake", "-a", "ernieuuu"],
+    )
+
+    assert result.exit_code == 0
+    assert events == [
+        ("resolve", ("Lake", "ernieuuu")),
+        ("construct", None),
+        ("read", ("Lake", "ernieuuu")),
+    ]
+    assert "ernieuuu - action readiness" in result.stdout
+    assert "Actions were available when this $tu snapshot was imported." in result.stdout
+    assert "Claim" in result.stdout
+    assert "$dk" in result.stdout
+    assert "Upcoming timers from this snapshot" in result.stdout
+    assert "Roll reset" in result.stdout
+    assert "32 min" in result.stdout
 
 
 def test_account_overview_does_not_render_partial_kakeraloot_state_as_factual(
