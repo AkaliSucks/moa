@@ -37,7 +37,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         if page.limit is None or page.page_number is None or page.page_count is None:
             console.print("[bold cyan]Ranked characters (partial import)[/bold cyan]")
         else:
@@ -51,8 +51,8 @@ def build_parse_app(
         for character in page.characters:
             table.add_row(f"#{character.claim_rank:,}", character.name, character.series)
         console.print(table)
-    
-    
+
+
     @parse_app.command("im")
     def parse_im(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $im response."),
@@ -64,15 +64,15 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         console.print(f"[bold cyan]{character.name}[/bold cyan] — {character.series}")
         console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(character.claim_rank)}")
         console.print(f"[bold]Like rank:[/bold] {_format_optional_rank(character.like_rank)}")
         console.print(f"[bold]Kakera value:[/bold] {format_mudae_kakera(character.kakera_value)}")
         console.print(f"[bold]Gender:[/bold] {format_mudae_gender(character.gender)}")
         console.print(f"[bold]Key:[/bold] {format_mudae_key_marker(character.key_type, character.key_count)}")
-    
-    
+
+
     @parse_app.command("roll")
     def parse_roll(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
@@ -84,7 +84,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         console.print(f"[bold cyan]{roll.name}[/bold cyan] — {roll.series}")
         console.print(f"[bold]Claim rank:[/bold] {_format_optional_rank(roll.claim_rank)}")
         console.print(f"[bold]Kakera value:[/bold] {format_mudae_kakera(roll.kakera_value)}")
@@ -93,8 +93,8 @@ def build_parse_app(
                 f"[bold]Displayed keys:[/bold] "
                 f"{format_mudae_key_marker(roll.displayed_key_type, roll.displayed_key_count)}"
             )
-    
-    
+
+
     @parse_app.command("reaction")
     def parse_kakera_reaction(
         path: Path | None = typer.Argument(None, help="Text file containing one Mudae reaction receipt."),
@@ -110,8 +110,8 @@ def build_parse_app(
             f"[bold cyan]{receipt.account_name}[/bold cyan] received "
             f"[green]{format_mudae_reaction_kakera(receipt.kakera_earned, receipt.reaction_label)}[/green]"
         )
-    
-    
+
+
     @parse_app.command("mm")
     def parse_mm(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
@@ -123,7 +123,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         page_label = (
             f"Page {page.page_number}/{page.page_count}"
             if page.page_number is not None and page.page_count is not None
@@ -143,8 +143,8 @@ def build_parse_app(
         console.print(table)
         if page.total_harem_value is not None:
             console.print(f"[bold]Total harem value:[/bold] {page.total_harem_value:,} Kakera")
-    
-    
+
+
     @parse_app.command("bonus")
     def parse_bonus(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $bonus response."),
@@ -156,15 +156,15 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         table = Table(title="Parsed player bonuses")
         table.add_column("Metric", style="green")
         table.add_column("Mudae value")
         for metric in bonus.metrics:
             table.add_row(metric.label, metric.detail)
         console.print(table)
-    
-    
+
+
     @parse_app.command("mmr")
     def parse_mmr(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk/$mmrt page."),
@@ -176,7 +176,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         page_label = (
             f"Page {page.page_number}/{page.page_count}"
             if page.page_number is not None and page.page_count is not None
@@ -196,8 +196,8 @@ def build_parse_app(
                 format_mudae_kakera(entry.kakera_value),
             )
         console.print(table)
-    
-    
+
+
     @parse_app.command("wishlist")
     def parse_wishlist(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $wl response."),
@@ -209,7 +209,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         table = Table(
             title=(
                 f"Wishlist {wishlist.wishlist_count}/{wishlist.wishlist_capacity} · "
@@ -221,8 +221,8 @@ def build_parse_app(
         for entry in wishlist.entries:
             table.add_row(entry.name, "Starwish" if entry.is_starwish else "Wish")
         console.print(table)
-    
-    
+
+
     @parse_app.command("disablelist")
     def parse_disablelist(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $dl response."),
@@ -234,7 +234,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         console.print(
             f"[bold cyan]Disablelist:[/bold cyan] {disablelist.slots_used}/{disablelist.slots_capacity} slots · "
             f"{disablelist.total_disabled:,} total disabled"
@@ -249,8 +249,8 @@ def build_parse_app(
         for entry in disablelist.entries:
             table.add_row(entry.name, f"{entry.disabled_count:,}")
         console.print(table)
-    
-    
+
+
     @parse_app.command("topx")
     def parse_topx(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $topx response."),
@@ -262,7 +262,7 @@ def build_parse_app(
         except MudaeParseError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
-    
+
         page_label = (
             f"TOP {page.limit:,} — Page {page.page_number}/{page.page_count}"
             if page.limit is not None and page.page_number is not None and page.page_count is not None
@@ -278,8 +278,8 @@ def build_parse_app(
                 f"#{character.claim_rank:,}", character.name, character.series, character.reason or "Disabled"
             )
         console.print(table)
-    
-    
+
+
     @parse_app.command("kakera")
     def parse_kakera(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $k response."),
@@ -298,8 +298,8 @@ def build_parse_app(
         for badge in state.badges:
             table.add_row(badge.badge_name.title(), str(badge.level), "Max" if badge.max_reached else "In progress")
         console.print(table)
-    
-    
+
+
     @parse_app.command("personalrare")
     def parse_personalrare(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $persr response."),
@@ -316,8 +316,8 @@ def build_parse_app(
             f"[bold cyan]Personal rare multiplier:[/bold cyan] {state.personal_rare_multiplier} "
             f"([dim]{source}[/dim])"
         )
-    
-    
+
+
     @parse_app.command("timers")
     def parse_timers(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $tu response."),
@@ -336,8 +336,8 @@ def build_parse_app(
             f"$dk: {'ready' if state.daily_kakera_ready else 'not ready' if state.daily_kakera_ready is False else 'hidden'} | "
             f"$rt: {'available' if state.rt_available else 'not available' if state.rt_available is False else 'hidden'}"
         )
-    
-    
+
+
     @parse_app.command("towerstate")
     def parse_towerstate(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $kt response."),
@@ -355,8 +355,8 @@ def build_parse_app(
             f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera\n"
             f"Built perks: {', '.join(str(perk) for perk in state.built_perk_ids) or 'none'}"
         )
-    
-    
+
+
     @parse_app.command("lootstate")
     def parse_lootstate(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $lk response."),
@@ -387,8 +387,8 @@ def build_parse_app(
             f"Rolls stacked: {_format_optional_number(state.rolls_stacked)}\n"
             f"Wishprotect: {wishprotect} · Permanent rolls: {permanent_rolls}"
         )
-    
-    
+
+
     @parse_app.command("infokl")
     def parse_infokl(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $infokl response."),
@@ -406,8 +406,8 @@ def build_parse_app(
             f"{settings.quantity_quality_base_cost:,} + "
             f"{settings.quantity_quality_level_increment:,} per current level"
         )
-    
-    
+
+
     @parse_app.command("settings")
     def parse_settings(
         path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $settings response."),
@@ -425,6 +425,6 @@ def build_parse_app(
             f"Claim timer: {settings.claim_reaction_expiry_seconds}s | rare multiplier: "
             f"{settings.claimed_character_rarity_multiplier} | premium: {settings.server_premium}"
         )
-    
-    
+
+
     return parse_app
