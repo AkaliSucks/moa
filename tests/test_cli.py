@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
 import moa.services.account_overview_service as account_overview_service_module
 import moa.services.action_service as action_service_module
@@ -462,6 +463,125 @@ def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
     assert "Rolls stacked: -" in result.stdout
     assert "Wishprotect: -" in result.stdout
     assert "Permanent rolls: -" in result.stdout
+
+
+def test_parse_cli_registration_and_help_are_lazy(monkeypatch) -> None:
+    expected_commands = {
+        "top",
+        "im",
+        "roll",
+        "reaction",
+        "mm",
+        "bonus",
+        "mmr",
+        "wishlist",
+        "disablelist",
+        "topx",
+        "kakera",
+        "personalrare",
+        "timers",
+        "towerstate",
+        "lootstate",
+        "infokl",
+        "settings",
+    }
+    events: list[str] = []
+
+    def unexpected_source(path, clipboard):
+        events.append("source")
+        raise AssertionError("Parse help must not read a source")
+
+    def unexpected_parser(*args, **kwargs):
+        events.append("parser")
+        raise AssertionError("Parse help must not invoke a parser")
+
+    monkeypatch.setattr(main, "_read_message_source", unexpected_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", unexpected_parser)
+    runner = CliRunner()
+
+    result = runner.invoke(main.app, ["parse", "--help"])
+
+    assert result.exit_code == 0
+    registered = {command.name for command in main.parse_app.registered_commands}
+    assert registered == expected_commands
+    assert all(command in result.stdout for command in expected_commands)
+    assert events == []
+
+    for command in ("top", "reaction", "lootstate"):
+        command_help = runner.invoke(main.app, ["parse", command, "--help"])
+        assert command_help.exit_code == 0
+        assert "--clipboard" in command_help.stdout
+        assert "-c" in command_help.stdout
+        assert "Text file containing" in command_help.stdout
+    assert events == []
+
+
+def test_parse_cli_source_schema_and_main_reader_are_late_bound(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[Path | None, bool]] = []
+    parsed: list[str] = []
+
+    def patched_source(path, clipboard):
+        calls.append((path, clipboard))
+        return "patched top response"
+
+    def parse_top_page(self, text):
+        parsed.append(text)
+        return SimpleNamespace(limit=10, page_number=1, page_count=1, characters=())
+
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_top_page", parse_top_page)
+    runner = CliRunner()
+    path = tmp_path / "response.txt"
+
+    path_result = runner.invoke(main.app, ["parse", "top", str(path)])
+    clipboard_result = runner.invoke(main.app, ["parse", "top", "-c"])
+
+    assert path_result.exit_code == 0
+    assert clipboard_result.exit_code == 0
+    assert calls == [(path, False), (None, True)]
+    assert parsed == ["patched top response", "patched top response"]
+    assert "TOP 10 - Page 1/1" in path_result.stdout
+
+
+def test_parse_cli_source_conflict_and_missing_source_fail_before_parser(monkeypatch) -> None:
+    parser_calls: list[str] = []
+
+    def unexpected_parser(self, text):
+        parser_calls.append(text)
+        raise AssertionError("Parser must not run when source selection is invalid")
+
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_top_page", unexpected_parser)
+    runner = CliRunner()
+
+    conflict = runner.invoke(main.app, ["parse", "top", "response.txt", "--clipboard"])
+    missing = runner.invoke(main.app, ["parse", "top"])
+
+    assert conflict.exit_code == 1
+    assert "either a file path or --clipboard" in conflict.stdout
+    assert missing.exit_code == 1
+    assert "Provide a text-file path or use --clipboard" in missing.stdout
+    assert parser_calls == []
+
+
+def test_parse_cli_parser_error_is_stable_and_callback_time(monkeypatch) -> None:
+    parser_calls: list[str] = []
+
+    def patched_source(path, clipboard):
+        return "malformed response"
+
+    def fail_parse(self, text):
+        parser_calls.append(text)
+        raise mudae_parser_module.MudaeParseError("malformed top response")
+
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_top_page", fail_parse)
+
+    result = CliRunner().invoke(main.app, ["parse", "top", "--clipboard"])
+
+    assert result.exit_code == 1
+    assert "malformed top response" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert parser_calls == ["malformed response"]
 
 
 def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
