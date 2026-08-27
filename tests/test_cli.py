@@ -636,6 +636,194 @@ def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(mon
     assert "Quantity 5; Quality 0" not in partial_result.stdout
 
 
+def test_roll_cli_characterization_preserves_help_resolution_and_empty_paths(monkeypatch) -> None:
+    events: list[object] = []
+    observed_at = datetime.fromisoformat("2026-07-12T23:45:00+00:00")
+    roll = SimpleNamespace(
+        observed_at=observed_at,
+        character=SimpleNamespace(name="Chisato Nishikigi", series="Lycoris Recoil"),
+        claim_rank=484,
+        kakera_value=209,
+    )
+    statistics = SimpleNamespace(
+        roll_count=2,
+        best_claim_rank=484,
+        average_claim_rank=512.5,
+        average_kakera_value=119.5,
+        highest_kakera_value=209,
+    )
+    empty = {"recent": False, "stats": False}
+
+    class RecordingConfigService:
+        def resolve_context(self, server, account):
+            events.append(("resolve", server, account))
+            return "Lake", "ernieuuu"
+
+    def recording_init(self) -> None:
+        events.append("construct")
+
+    def recent_rolls(self, server, account, limit):
+        events.append(("recent", server, account, limit))
+        return () if empty["recent"] else (roll,)
+
+    def roll_statistics(self, server, account):
+        events.append(("stats", server, account))
+        return SimpleNamespace(
+            roll_count=0,
+            best_claim_rank=None,
+            average_claim_rank=None,
+            average_kakera_value=None,
+            highest_kakera_value=None,
+        ) if empty["stats"] else statistics
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(CatalogService, "__init__", recording_init)
+    monkeypatch.setattr(CatalogService, "recent_rolls", recent_rolls)
+    monkeypatch.setattr(CatalogService, "roll_statistics", roll_statistics)
+    monkeypatch.setattr(main.console, "width", 240)
+    runner = CliRunner()
+
+    for arguments, expected in (
+        (["roll", "--help"], ("recent", "stats", "compare")),
+        (["roll", "recent", "--help"], ("--server", "-s", "--account", "-a", "--limit", "-n")),
+        (["roll", "stats", "--help"], ("--server", "-s", "--account", "-a")),
+        (
+            ["roll", "compare", "--help"],
+            ("--left-server", "--left-account", "--right-server", "--right-account"),
+        ),
+    ):
+        result = runner.invoke(main.app, arguments)
+        assert result.exit_code == 0
+        for fragment in expected:
+            assert fragment in result.stdout
+    assert events == []
+
+    recent = runner.invoke(main.app, ["roll", "recent", "--limit", "1"])
+    assert recent.exit_code == 0
+    assert "Chisato Nishikigi" in recent.stdout
+    assert "209:kakera:" in recent.stdout
+    assert "2026-07-12 23:45" in recent.stdout
+    assert events == [
+        ("resolve", None, None),
+        "construct",
+        ("recent", "Lake", "ernieuuu", 1),
+    ]
+
+    events.clear()
+    stats = runner.invoke(main.app, ["roll", "stats", "--server", "Lake", "--account", "ernieuuu"])
+    assert stats.exit_code == 0
+    assert "Imported rolls" in stats.stdout
+    assert "2" in stats.stdout
+    assert "These are descriptive results from stored rolls only" in stats.stdout
+    assert events == [
+        ("resolve", "Lake", "ernieuuu"),
+        "construct",
+        ("stats", "Lake", "ernieuuu"),
+    ]
+
+    empty["recent"] = True
+    empty["stats"] = True
+    events.clear()
+    empty_recent = runner.invoke(main.app, ["roll", "recent"])
+    empty_stats = runner.invoke(main.app, ["roll", "stats"])
+    assert empty_recent.exit_code == 0
+    assert empty_stats.exit_code == 0
+    assert "No rolls imported for this server/account yet." in empty_recent.stdout
+    assert "No rolls imported for this server/account yet." in empty_stats.stdout
+
+
+def test_roll_compare_cli_characterization_uses_one_explicit_input_service(monkeypatch) -> None:
+    events: list[object] = []
+    left = SimpleNamespace(
+        account_name="alpha",
+        server_name="Lake",
+        roll_count=2,
+        best_claim_rank=10,
+        average_claim_rank=15.5,
+        average_kakera_value=100.0,
+        highest_kakera_value=150,
+    )
+    right = SimpleNamespace(
+        account_name="beta",
+        server_name="Hill",
+        roll_count=1,
+        best_claim_rank=20,
+        average_claim_rank=None,
+        average_kakera_value=75.0,
+        highest_kakera_value=75,
+    )
+    missing = {"enabled": False}
+
+    class UnexpectedConfigService:
+        def resolve_context(self, server, account):
+            raise AssertionError("roll compare must not resolve configured account context")
+
+    def recording_init(self) -> None:
+        events.append("construct")
+
+    def roll_statistics(self, server, account):
+        events.append(("stats", server, account))
+        if missing["enabled"] and account == "alpha":
+            return SimpleNamespace(
+                account_name=account,
+                server_name=server,
+                roll_count=0,
+                best_claim_rank=None,
+                average_claim_rank=None,
+                average_kakera_value=None,
+                highest_kakera_value=None,
+            )
+        return left if account == "alpha" else right
+
+    monkeypatch.setattr(main, "ConfigService", UnexpectedConfigService)
+    monkeypatch.setattr(CatalogService, "__init__", recording_init)
+    monkeypatch.setattr(CatalogService, "roll_statistics", roll_statistics)
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main.app,
+        [
+            "roll",
+            "compare",
+            "--left-server",
+            "Lake",
+            "--left-account",
+            "alpha",
+            "--right-server",
+            "Hill",
+            "--right-account",
+            "beta",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "alpha (Lake)" in result.stdout
+    assert "beta (Hill)" in result.stdout
+    assert "Imported rolls" in result.stdout
+    assert "This compares imported observations only" in result.stdout
+    assert events == ["construct", ("stats", "Lake", "alpha"), ("stats", "Hill", "beta")]
+
+    missing["enabled"] = True
+    events.clear()
+    empty = runner.invoke(
+        main.app,
+        [
+            "roll",
+            "compare",
+            "--left-server",
+            "Lake",
+            "--left-account",
+            "alpha",
+            "--right-server",
+            "Hill",
+            "--right-account",
+            "beta",
+        ],
+    )
+    assert empty.exit_code == 0
+    assert "No rolls imported for alpha in the selected server/account context yet." in empty.stdout
+    assert events == ["construct", ("stats", "Lake", "alpha"), ("stats", "Hill", "beta")]
+
+
 def test_action_now_resolves_context_and_constructs_service_at_callback_time(monkeypatch) -> None:
     events: list[tuple[str, object]] = []
 
