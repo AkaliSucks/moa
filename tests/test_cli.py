@@ -6,6 +6,7 @@ import pytest
 from typer.testing import CliRunner
 
 import moa.services.action_service as action_service_module
+import moa.services.kakeraloot_budget_service as kakeraloot_budget_service_module
 import moa.services.keyfarm_service as keyfarm_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
@@ -127,6 +128,107 @@ def test_recommend_keyfarm_resolves_context_and_constructs_service_at_callback_t
     assert events == ["resolve"]
     assert "Import a $bonus snapshot" in missing.stdout
     assert "Power" not in missing.stdout
+
+
+def test_loot_cli_characterizes_registration_laziness_and_runtime_seams(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    runner = CliRunner()
+    real_loot_service = main.KakeralootService
+    real_budget_service = main.KakeralootBudgetService
+
+    class UnexpectedService:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Loot services must not construct during help")
+
+    class UnexpectedConfigService:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("Context resolution must not run during help")
+
+    monkeypatch.setattr(main, "KakeralootService", UnexpectedService)
+    monkeypatch.setattr(main, "KakeralootBudgetService", UnexpectedService)
+    monkeypatch.setattr(main, "ConfigService", UnexpectedConfigService)
+
+    for arguments in (
+        ["loot", "--help"],
+        ["loot", "list", "--help"],
+        ["loot", "show", "--help"],
+        ["loot", "next", "--help"],
+    ):
+        result = runner.invoke(main.app, arguments)
+        assert result.exit_code == 0
+        assert events == []
+
+    help_result = runner.invoke(main.app, ["loot", "--help"])
+    assert all(command in help_result.stdout for command in ("list", "show", "next"))
+
+    class RecordingLootService(real_loot_service):
+        def __init__(self, *args, **kwargs):
+            events.append("loot_service_construct")
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(main, "KakeralootService", RecordingLootService)
+    listed = runner.invoke(main.app, ["loot", "list"])
+    assert listed.exit_code == 0
+    assert events == ["loot_service_construct"]
+    assert "$bku Reset Chance" in listed.stdout
+    assert "complete known reward list" in listed.stdout
+
+    events.clear()
+    shown = runner.invoke(main.app, ["loot", "show", "bku_reset_chance"])
+    assert shown.exit_code == 0
+    assert events == ["loot_service_construct"]
+    assert "$bku Reset Chance" in shown.stdout
+    assert "Sapphire I" in shown.stdout
+
+    events.clear()
+    unknown = runner.invoke(main.app, ["loot", "show", "not-a-loot"])
+    assert unknown.exit_code == 1
+    assert events == ["loot_service_construct"]
+    assert "Kakeraloot reward not found." in unknown.stdout
+    assert "Traceback" not in unknown.stdout
+
+    class RecordingConfigService:
+        def resolve_context(self, requested_server, requested_account):
+            events.append("resolve")
+            return requested_server, requested_account
+
+    class IsolatedBudgetCatalog:
+        def __init__(self):
+            events.append("budget_input_construct")
+
+        def kakera_state(self, server_name, account_name):
+            events.append("kakera_read")
+
+        def kakeraloot_settings(self, server_name):
+            events.append("settings_read")
+
+        def kakeraloot_state(self, server_name, account_name):
+            events.append("loot_state_read")
+            raise AssertionError("Locked Kakeraloots must not read state")
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(main, "KakeralootBudgetService", real_budget_service)
+    monkeypatch.setattr(
+        kakeraloot_budget_service_module,
+        "CatalogService",
+        IsolatedBudgetCatalog,
+    )
+    events.clear()
+    next_result = runner.invoke(
+        main.app,
+        ["loot", "next", "-s", "Lake", "-a", "ernieuuu"],
+    )
+    assert next_result.exit_code == 0
+    assert events == [
+        "resolve",
+        "budget_input_construct",
+        "kakera_read",
+        "settings_read",
+    ]
+    assert "Import $k before planning Kakeraloot spending." in next_result.stdout
+    assert "affordable now" not in next_result.stdout
 
 
 def test_command_cli_registration_rendering_and_validation() -> None:
