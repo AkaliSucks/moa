@@ -5,8 +5,10 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
+from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.automatic_import_service import AutomaticImportService
@@ -107,6 +109,69 @@ def test_tower_cli_registration_and_rendering() -> None:
     unknown_result = runner.invoke(main.app, ["tower", "show", "13"])
     assert unknown_result.exit_code == 1
     assert "Tower floor not found." in unknown_result.stdout
+
+
+def test_server_cli_registration_rendering_and_validation(tmp_path, monkeypatch) -> None:
+    runner = CliRunner()
+    lake = (
+        "(Server not premium)\n"
+        "· Prefix: $ ($prefix)\n"
+        "· Lang: en ($lang)\n"
+        "· Claim reset: every 180 min. ($setclaim)\n"
+        "· Exact minute of the reset: xx:14 ($setinterval)\n"
+        "· Reset shifted: by +0 min. ($shifthour)\n"
+        "· Rolls per hour: 10 ($setrolls)\n"
+        "· Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "· Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "· % kakera bonus: +0 ($setkakerabonus)\n"
+        "· % sphere bonus: +0 ($setspherebonus)\n"
+        "· Game mode: 1 ($gamemode)\n"
+        "· This channel instance: 1 ($channelinstance)"
+    )
+    comparison = lake.replace("· Rolls per hour: 10", "· Rolls per hour: 12")
+    catalog = CatalogService(CatalogRepository(tmp_path / "catalog.db"))
+    parser = MudaeTextParser()
+    catalog.import_server_settings(parser.parse_server_settings(lake), "Lake", lake, "test")
+    catalog.import_server_settings(parser.parse_server_settings(comparison), "Fresh", comparison, "test")
+    constructions = 0
+
+    def isolated_catalog() -> CatalogService:
+        nonlocal constructions
+        constructions += 1
+        return catalog
+
+    monkeypatch.setattr(server_comparison_module, "CatalogService", isolated_catalog)
+
+    help_result = runner.invoke(main.app, ["server", "--help"])
+    assert help_result.exit_code == 0
+    assert "compare" in help_result.stdout
+    assert constructions == 0
+
+    compare_help_result = runner.invoke(main.app, ["server", "compare", "--help"])
+    assert compare_help_result.exit_code == 0
+    assert "--left" in compare_help_result.stdout
+    assert "--right" in compare_help_result.stdout
+    assert constructions == 0
+
+    success_result = runner.invoke(
+        main.app,
+        ["server", "compare", "--left", "Lake", "--right", "Fresh"],
+    )
+    assert success_result.exit_code == 0
+    assert "Lake vs Fresh" in success_result.stdout
+    assert "Rolls per hour" in success_result.stdout
+    assert "10" in success_result.stdout
+    assert "12" in success_result.stdout
+    assert "This compares imported server configuration only" in success_result.stdout
+    assert constructions == 1
+
+    missing_result = runner.invoke(
+        main.app,
+        ["server", "compare", "--left", "Lake", "--right", "Missing"],
+    )
+    assert missing_result.exit_code == 1
+    assert "No $settings snapshot imported for 'Missing'." in missing_result.stdout
+    assert constructions == 2
 
 
 def test_reaction_cli_registration_and_rendering() -> None:
