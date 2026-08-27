@@ -14,6 +14,7 @@ from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.key_commands import build_key_app
 from moa.cli.reaction_commands import build_reaction_app
+from moa.cli.server_commands import build_server_app
 from moa.cli.tower_commands import build_tower_app
 from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
@@ -65,7 +66,6 @@ from moa.services.player_bonus_projection_coordinator import PlayerBonusProjecti
 from moa.services.progress_service import ProgressService
 from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
-from moa.services.server_comparison_service import ServerComparisonService
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
@@ -92,7 +92,6 @@ data_health_app = typer.Typer(help="Report read-only local catalog health findin
 harem_app = typer.Typer(help="Build complete keyed-harem snapshots safely")
 adl_app = typer.Typer(help="Build complete antidisable series snapshots safely")
 recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
-server_app = typer.Typer(help="Compare imported server-wide configuration")
 discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot")
 console = Console()
 tower_app = build_tower_app(console)
@@ -101,6 +100,7 @@ badge_app = build_badge_app(console)
 key_app = build_key_app(console)
 reaction_app = build_reaction_app(console)
 command_app = build_command_app(console)
+server_app = build_server_app(console)
 
 app.add_typer(tower_app, name="tower")
 app.add_typer(command_app, name="command")
@@ -479,33 +479,6 @@ def account_activity(
     console.print(table)
     if readiness.upcoming_events:
         console.print("[dim]Upcoming: " + " · ".join(f"{name} in {minutes} min" for name, minutes in readiness.upcoming_events) + "[/dim]")
-
-
-@server_app.command("compare")
-def compare_servers(
-    left: str = typer.Option(..., "--left", help="First imported server label."),
-    right: str = typer.Option(..., "--right", help="Second imported server label."),
-) -> None:
-    """Compare the latest imported `$settings` snapshots for two servers."""
-    try:
-        comparison = ServerComparisonService().compare(left, right)
-    except ValueError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-    table = Table(title=f"{comparison.left_server_name} vs {comparison.right_server_name}")
-    table.add_column("Setting", style="green")
-    table.add_column(comparison.left_server_name)
-    table.add_column(comparison.right_server_name)
-    table.add_column("Match", justify="center")
-    for entry in comparison.entries:
-        table.add_row(
-            entry.label,
-            entry.left_value,
-            entry.right_value,
-            "Yes" if entry.matches else "No",
-        )
-    console.print(table)
-    console.print("[dim]This compares imported server configuration only; it does not compare player state.[/dim]")
 
 
 @loot_app.command("list")
