@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 import moa.services.action_service as action_service_module
 import moa.services.kakeraloot_budget_service as kakeraloot_budget_service_module
 import moa.services.keyfarm_service as keyfarm_service_module
+import moa.services.loot_service as loot_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
@@ -135,19 +136,20 @@ def test_loot_cli_characterizes_registration_laziness_and_runtime_seams(
 ) -> None:
     events: list[str] = []
     runner = CliRunner()
-    real_loot_service = main.KakeralootService
-    real_budget_service = main.KakeralootBudgetService
-
-    class UnexpectedService:
-        def __init__(self, *args, **kwargs):
-            raise AssertionError("Loot services must not construct during help")
+    real_loot_service = loot_service_module.KakeralootService
+    real_budget_service = kakeraloot_budget_service_module.KakeralootBudgetService
+    real_loot_init = real_loot_service.__init__
+    real_budget_init = real_budget_service.__init__
 
     class UnexpectedConfigService:
         def __init__(self, *args, **kwargs):
             raise AssertionError("Context resolution must not run during help")
 
-    monkeypatch.setattr(main, "KakeralootService", UnexpectedService)
-    monkeypatch.setattr(main, "KakeralootBudgetService", UnexpectedService)
+    def unexpected_service_init(self, *args, **kwargs):
+        raise AssertionError("Loot services must not construct during help")
+
+    monkeypatch.setattr(real_loot_service, "__init__", unexpected_service_init)
+    monkeypatch.setattr(real_budget_service, "__init__", unexpected_service_init)
     monkeypatch.setattr(main, "ConfigService", UnexpectedConfigService)
 
     for arguments in (
@@ -163,12 +165,11 @@ def test_loot_cli_characterizes_registration_laziness_and_runtime_seams(
     help_result = runner.invoke(main.app, ["loot", "--help"])
     assert all(command in help_result.stdout for command in ("list", "show", "next"))
 
-    class RecordingLootService(real_loot_service):
-        def __init__(self, *args, **kwargs):
-            events.append("loot_service_construct")
-            super().__init__(*args, **kwargs)
+    def recording_loot_init(self, *args, **kwargs):
+        events.append("loot_service_construct")
+        real_loot_init(self, *args, **kwargs)
 
-    monkeypatch.setattr(main, "KakeralootService", RecordingLootService)
+    monkeypatch.setattr(real_loot_service, "__init__", recording_loot_init)
     listed = runner.invoke(main.app, ["loot", "list"])
     assert listed.exit_code == 0
     assert events == ["loot_service_construct"]
@@ -209,7 +210,12 @@ def test_loot_cli_characterizes_registration_laziness_and_runtime_seams(
             raise AssertionError("Locked Kakeraloots must not read state")
 
     monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
-    monkeypatch.setattr(main, "KakeralootBudgetService", real_budget_service)
+
+    def recording_budget_init(self, *args, **kwargs):
+        events.append("budget_service_construct")
+        real_budget_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(real_budget_service, "__init__", recording_budget_init)
     monkeypatch.setattr(
         kakeraloot_budget_service_module,
         "CatalogService",
@@ -223,6 +229,7 @@ def test_loot_cli_characterizes_registration_laziness_and_runtime_seams(
     assert next_result.exit_code == 0
     assert events == [
         "resolve",
+        "budget_service_construct",
         "budget_input_construct",
         "kakera_read",
         "settings_read",
