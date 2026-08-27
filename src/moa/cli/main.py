@@ -8,6 +8,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from moa.cli.action_commands import build_action_app
 from moa.core.config import ConfigService
 from moa.cli.badge_commands import build_badge_app
 from moa.cli.command_commands import build_command_app
@@ -84,7 +85,6 @@ app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 loot_app = typer.Typer(help="Kakeraloot reference commands")
 roll_app = typer.Typer(help="Browse imported roll observations")
 account_app = typer.Typer(help="Imported account-state summary commands")
-action_app = typer.Typer(help="Use fresh imported timers to show available actions")
 parse_app = typer.Typer(help="Parse copied Mudae bot output")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
@@ -94,6 +94,27 @@ adl_app = typer.Typer(help="Build complete antidisable series snapshots safely")
 recommend_app = typer.Typer(help="Make transparent recommendations from imported Mudae state")
 discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot")
 console = Console()
+
+
+def _resolve_account_context(
+    server: str | None,
+    account: str | None,
+) -> tuple[str, str]:
+    """Resolve explicit or configured account context for read-only commands."""
+    try:
+        resolved_server, resolved_account = ConfigService().resolve_context(server, account)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    if not resolved_server or not resolved_account:
+        console.print(
+            "[red]No active server/account context. Configure one with `moa config use` "
+            "or pass --server and --account.[/red]"
+        )
+        raise typer.Exit(1)
+    return resolved_server, resolved_account
+
+
 tower_app = build_tower_app(console)
 config_app = build_config_app(console)
 badge_app = build_badge_app(console)
@@ -101,6 +122,7 @@ key_app = build_key_app(console)
 reaction_app = build_reaction_app(console)
 command_app = build_command_app(console)
 server_app = build_server_app(console)
+action_app = build_action_app(console, _resolve_account_context)
 
 app.add_typer(tower_app, name="tower")
 app.add_typer(command_app, name="command")
@@ -816,38 +838,6 @@ def account_progress(
     )
 
 
-@action_app.command("now")
-def action_now(
-    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
-    account: str | None = typer.Option(None, "--account", "-a", help="Account whose latest $tu snapshot to use."),
-) -> None:
-    """Show the action checklist supported by a recent imported `$tu` snapshot."""
-    server, account = _resolve_account_context(server, account)
-    readiness = ActionService().readiness(server, account)
-    console.print(f"[bold cyan]{readiness.account_name} - action readiness[/bold cyan]")
-    console.print(readiness.status)
-    if readiness.observed_at is not None:
-        console.print(
-            f"[dim]Snapshot age: {readiness.snapshot_age_seconds}s | observed "
-            f"{readiness.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
-        )
-    if readiness.is_stale:
-        return
-    if readiness.available_actions:
-        console.print("[green]Available when imported:[/green] " + ", ".join(readiness.available_actions))
-    else:
-        console.print("[yellow]No immediately available actions were reported.[/yellow]")
-    if readiness.upcoming_events:
-        table = Table(title="Upcoming timers from this snapshot")
-        table.add_column("Event", style="green")
-        table.add_column("In", justify="right", style="cyan")
-        for label, minutes in readiness.upcoming_events:
-            hours, remaining_minutes = divmod(minutes, 60)
-            duration = f"{hours}h {remaining_minutes} min" if hours else f"{remaining_minutes} min"
-            table.add_row(label, duration)
-        console.print(table)
-
-
 def _read_copied_message(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -888,25 +878,6 @@ def _read_message_source(path: Path | None, clipboard: bool) -> str:
         console.print("[red]Provide a text-file path or use --clipboard.[/red]")
         raise typer.Exit(1)
     return _read_copied_message(path)
-
-
-def _resolve_account_context(
-    server: str | None,
-    account: str | None,
-) -> tuple[str, str]:
-    """Resolve explicit or configured account context for read-only commands."""
-    try:
-        resolved_server, resolved_account = ConfigService().resolve_context(server, account)
-    except ValueError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-    if not resolved_server or not resolved_account:
-        console.print(
-            "[red]No active server/account context. Configure one with `moa config use` "
-            "or pass --server and --account.[/red]"
-        )
-        raise typer.Exit(1)
-    return resolved_server, resolved_account
 
 
 def _resolve_server_context(server: str | None) -> str:
