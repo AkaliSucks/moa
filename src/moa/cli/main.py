@@ -1,6 +1,4 @@
-from datetime import datetime
 import logging
-import shutil
 from pathlib import Path
 
 import typer
@@ -17,6 +15,9 @@ from moa.cli.catalog_operational_commands import build_catalog_operational_app
 from moa.cli.catalog_delete_import_commands import register_catalog_delete_import_command
 from moa.cli.catalog_relocate_database_commands import (
     register_catalog_relocate_database_command,
+)
+from moa.cli.catalog_repair_bugged_data_commands import (
+    register_catalog_repair_bugged_data_command,
 )
 from moa.cli.catalog_reset_commands import register_catalog_reset_command
 from moa.cli.catalog_search_commands import build_catalog_search_app
@@ -498,53 +499,11 @@ register_catalog_relocate_database_command(
     console,
     lambda: default_database_path(),
 )
-
-
-@catalog_app.command("repair-bugged-data")
-def catalog_repair_bugged_data(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Apply the targeted cleanup. Without this flag, only a dry-run report is shown.",
-    ),
-) -> None:
-    """Remove known timer-as-roll imports and orphaned malformed characters."""
-    service = CatalogService()
-    import_count, character_count = service.inspect_bugged_imports()
-    if not apply:
-        console.print(
-            f"Found {import_count} suspicious import event(s) and "
-            f"{character_count} suspicious character row(s)."
-        )
-        console.print(
-            "[yellow]Dry run only; no database changes were made. "
-            "Stop the Discord listener, then rerun with --apply to clean these candidates.[/yellow]"
-        )
-        return
-
-    if import_count == 0 and character_count == 0:
-        console.print("[green]No targeted bugged data was found; nothing changed.[/green]")
-        return
-
-    database_path = Path(DEFAULT_DATABASE_PATH)
-    backup_path = database_path.with_name(
-        f"{database_path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    )
-    suffix = 1
-    while backup_path.exists():
-        backup_path = database_path.with_name(
-            f"{database_path.name}.bak-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
-        )
-        suffix += 1
-    shutil.copy2(database_path, backup_path)
-
-    cleaned_imports, deleted_characters = service.repair_bugged_imports()
-    console.print(
-        f"[green]Cleaned {cleaned_imports} suspicious import event(s) "
-        "(timer misimports removed; stale character links repaired).[/green]"
-    )
-    console.print(f"[green]Deleted {deleted_characters} orphaned character row(s).[/green]")
-    console.print(f"Backup saved to: {backup_path}")
+register_catalog_repair_bugged_data_command(
+    catalog_app,
+    console,
+    lambda: DEFAULT_DATABASE_PATH,
+)
 
 
 if __name__ == "__main__":

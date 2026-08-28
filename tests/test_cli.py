@@ -12,6 +12,7 @@ import moa.cli.import_workflow_commands as import_workflow_commands_module
 import moa.cli.catalog_delete_import_commands as catalog_delete_import_commands_module
 import moa.cli.catalog_operational_commands as catalog_operational_commands_module
 import moa.cli.catalog_relocate_database_commands as catalog_relocate_database_commands_module
+import moa.cli.catalog_repair_bugged_data_commands as catalog_repair_bugged_data_commands_module
 import moa.cli.catalog_reset_commands as catalog_reset_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
@@ -4105,11 +4106,153 @@ def test_catalog_relocate_database_reports_existing_target_without_traceback(
     assert target.read_bytes() == b"target"
 
 
-def test_catalog_repair_uses_same_effective_default_for_backup(monkeypatch, tmp_path) -> None:
+def test_catalog_repair_registration_and_help_are_lazy(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def database_path_provider():
+        calls.append("database-path")
+        return Path("unused.db")
+
+    catalog_app = typer.Typer()
+    catalog_repair_bugged_data_commands_module.register_catalog_repair_bugged_data_command(
+        catalog_app,
+        Console(),
+        database_path_provider,
+    )
+
+    command = get_command(catalog_app)
+    apply_option = next(param for param in command.params if param.name == "apply")
+    assert apply_option.name == "apply"
+    assert tuple(apply_option.opts) == ("--apply",)
+    assert apply_option.default is False
+    assert not apply_option.required
+
+    result = CliRunner().invoke(catalog_app, ["repair-bugged-data", "--help"])
+
+    assert result.exit_code == 0
+    assert "Remove known timer-as-roll imports" in result.stdout
+    assert calls == []
+
+
+def test_catalog_repair_defaults_to_dry_run_and_constructs_service_before_inspection(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class RecordingCatalogService:
+        def __init__(self):
+            events.append("construct")
+
+        def inspect_bugged_imports(self):
+            events.append("inspect")
+            return 2, 3
+
+        def repair_bugged_imports(self):
+            raise AssertionError("dry run must not repair")
+
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module,
+        "CatalogService",
+        RecordingCatalogService,
+    )
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module,
+        "shutil",
+        SimpleNamespace(copy2=lambda *_args: (_ for _ in ()).throw(AssertionError("no backup"))),
+    )
+
+    result = CliRunner().invoke(main.app, ["catalog", "repair-bugged-data"])
+
+    assert result.exit_code == 0
+    assert events == ["construct", "inspect"]
+    assert "Found 2 suspicious import event(s) and 3 suspicious character row(s)." in result.stdout
+    assert "Dry run only; no database changes were made." in result.stdout
+
+
+def test_catalog_repair_zero_candidates_does_not_resolve_path_or_repair(monkeypatch) -> None:
+    events: list[str] = []
+
+    class EmptyCatalogService:
+        def inspect_bugged_imports(self):
+            events.append("inspect")
+            return 0, 0
+
+        def repair_bugged_imports(self):
+            raise AssertionError("zero candidates must not repair")
+
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module,
+        "CatalogService",
+        EmptyCatalogService,
+    )
+
+    def database_path_provider():
+        events.append("database-path")
+        raise AssertionError("zero candidates must not resolve the database path")
+
+    catalog_app = typer.Typer()
+    catalog_repair_bugged_data_commands_module.register_catalog_repair_bugged_data_command(
+        catalog_app,
+        Console(),
+        database_path_provider,
+    )
+
+    result = CliRunner().invoke(catalog_app, ["--apply"])
+
+    assert result.exit_code == 0
+    assert events == ["inspect"]
+    assert "No targeted bugged data was found; nothing changed." in result.stdout
+
+
+def test_catalog_repair_backs_up_before_repair_and_uses_collision_suffix(
+    monkeypatch, tmp_path
+) -> None:
     database_path = tmp_path / "user-data" / "moa.db"
     database_path.parent.mkdir()
-    database_path.write_bytes(b"catalog")
+    database_path.write_bytes(b"catalog-bytes")
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+    timestamp = "20260828-120000"
+    first_backup = database_path.with_name(f"moa.db.bak-{timestamp}")
+    first_backup.write_bytes(b"existing-backup")
+
+    class RecordingCatalogService:
+        def inspect_bugged_imports(self):
+            return 1, 0
+
+        def repair_bugged_imports(self):
+            assert first_backup.read_bytes() == b"existing-backup"
+            assert (database_path.parent / f"moa.db.bak-{timestamp}-1").read_bytes() == b"catalog-bytes"
+            return 1, 0
+
+    class FixedNow:
+        def strftime(self, _format):
+            return timestamp
+
+    class FixedDateTime:
+        @staticmethod
+        def now():
+            return FixedNow()
+
+    monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "datetime", FixedDateTime)
+
+    result = CliRunner().invoke(main.app, ["catalog", "repair-bugged-data", "--apply"])
+
+    assert result.exit_code == 0
+    assert database_path.read_bytes() == b"catalog-bytes"
+    collision_backup = database_path.parent / f"moa.db.bak-{timestamp}-1"
+    assert collision_backup.read_bytes() == b"catalog-bytes"
+    assert "Cleaned 1 suspicious import event(s)" in result.stdout
+    assert "Deleted 0 orphaned character row(s)." in result.stdout
+    assert f"Backup saved to: {collision_backup}" in result.stdout.replace("\n", "")
+
+
+def test_catalog_repair_uses_main_database_path_at_callback_time(monkeypatch, tmp_path) -> None:
+    first_path = tmp_path / "first.db"
+    second_path = tmp_path / "second.db"
+    second_path.write_bytes(b"callback-time")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", first_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", second_path)
 
     class RecordingCatalogService:
         def inspect_bugged_imports(self):
@@ -4118,13 +4261,68 @@ def test_catalog_repair_uses_same_effective_default_for_backup(monkeypatch, tmp_
         def repair_bugged_imports(self):
             return 1, 0
 
-    monkeypatch.setattr(main, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "CatalogService", RecordingCatalogService)
 
     result = CliRunner().invoke(main.app, ["catalog", "repair-bugged-data", "--apply"])
 
     assert result.exit_code == 0
-    assert database_path.read_bytes() == b"catalog"
-    assert len(list(database_path.parent.glob("moa.db.bak-*"))) == 1
+    assert second_path.exists()
+    assert len(list(tmp_path.glob("second.db.bak-*"))) == 1
+    assert not first_path.exists()
+
+
+def test_catalog_repair_propagates_copy_error(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    database_path.write_bytes(b"catalog")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    class RecordingCatalogService:
+        def inspect_bugged_imports(self):
+            return 1, 0
+
+    monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "CatalogService", RecordingCatalogService)
+    copy_error = OSError("forced copy failure")
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module.shutil,
+        "copy2",
+        lambda *_args: (_ for _ in ()).throw(copy_error),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "repair-bugged-data", "--apply"],
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code == 1
+    assert result.exception is copy_error
+    assert result.stdout == ""
+
+
+def test_catalog_repair_propagates_repair_error(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    database_path.write_bytes(b"catalog")
+    repair_error = RuntimeError("forced repair failure")
+
+    class RecordingCatalogService:
+        def inspect_bugged_imports(self):
+            return 1, 0
+
+        def repair_bugged_imports(self):
+            raise repair_error
+
+    monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "repair-bugged-data", "--apply"],
+        catch_exceptions=True,
+    )
+
+    assert result.exit_code == 1
+    assert result.exception is repair_error
+    assert list(tmp_path.glob("moa.db.bak-*"))
 
 
 def test_catalog_delete_import_help_is_lazy_and_constructs_service_at_callback_time(monkeypatch) -> None:
