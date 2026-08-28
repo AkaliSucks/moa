@@ -2784,6 +2784,41 @@ def test_import_direct_family_is_exact_and_flat() -> None:
     assert "direct" not in import_commands
 
 
+def test_import_workflow_family_is_exact_and_movable() -> None:
+    root_command = get_command(main.app)
+    import_commands = root_command.commands["import"].commands
+    workflow_commands = {"auto", "top", "mm", "mmr", "adl"}
+    direct_commands = {
+        "reaction",
+        "im",
+        "bonus",
+        "wishlist",
+        "disablelist",
+        "topx",
+        "kakera",
+        "personalrare",
+        "timers",
+        "towerstate",
+        "lootstate",
+        "infokl",
+        "settings",
+    }
+    assert set(import_commands) == workflow_commands | direct_commands
+    assert set(import_commands) - direct_commands == workflow_commands
+
+    expected_names = {
+        "auto": {"AutomaticImportService"},
+        "top": {"MudaeTextParser", "CatalogService", "parse_top_page", "import_top_page", "character_count"},
+        "mm": {"MudaeTextParser", "CatalogService", "parse_harem_key_page", "import_harem_key_page"},
+        "mmr": {"MudaeTextParser", "CatalogService", "parse_ranked_harem_page", "import_ranked_harem_page"},
+        "adl": {"MudaeTextParser", "CatalogService", "parse_antidisable_page", "import_antidisable_page"},
+    }
+    for command, names in expected_names.items():
+        callback_names = import_commands[command].callback.__wrapped__.__code__.co_names
+        assert names <= set(callback_names)
+        assert not any("ProjectionCoordinator" in value for value in callback_names)
+
+
 @pytest.mark.parametrize(
     ("command", "parameters", "parser_method", "catalog_method"),
     [
