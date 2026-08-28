@@ -7,6 +7,7 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 import moa.cli.import_workflow_commands as import_workflow_commands_module
+import moa.cli.catalog_delete_import_commands as catalog_delete_import_commands_module
 import moa.cli.catalog_operational_commands as catalog_operational_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
@@ -4004,14 +4005,41 @@ def test_catalog_repair_uses_same_effective_default_for_backup(monkeypatch, tmp_
     assert len(list(database_path.parent.glob("moa.db.bak-*"))) == 1
 
 
+def test_catalog_delete_import_help_is_lazy_and_constructs_service_at_callback_time(monkeypatch) -> None:
+    constructions: list[int] = []
+
+    class RecordingCatalogService:
+        def __init__(self):
+            constructions.append(1)
+
+        def delete_import_event(self, import_event_id):
+            assert import_event_id == 42
+            return True
+
+    monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", RecordingCatalogService)
+    runner = CliRunner()
+
+    help_result = runner.invoke(main.app, ["catalog", "delete-import", "--help"])
+
+    assert help_result.exit_code == 0
+    assert "Delete one mistaken import" in help_result.stdout
+    assert constructions == []
+
+    result = runner.invoke(main.app, ["catalog", "delete-import", "42"])
+
+    assert result.exit_code == 0
+    assert constructions == [1]
+    assert "Deleted import event 42." in result.stdout
+
+
 def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> None:
     class BlockingCatalogService:
         def delete_import_event(self, import_event_id):
-            raise main.ImportEventDeletionBlockedError(
+            raise catalog_delete_import_commands_module.ImportEventDeletionBlockedError(
                 f"Import event {import_event_id} belongs to durable source state"
             )
 
-    monkeypatch.setattr(main, "CatalogService", BlockingCatalogService)
+    monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", BlockingCatalogService)
 
     result = CliRunner().invoke(main.app, ["catalog", "delete-import", "42"])
 
@@ -4019,6 +4047,34 @@ def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> No
     assert "Deletion blocked" in result.stdout
     assert "durable/replayable source state" in result.stdout
     assert "FOREIGN KEY" not in result.stdout
+
+
+def test_catalog_delete_import_reports_missing_event(monkeypatch) -> None:
+    class MissingCatalogService:
+        def delete_import_event(self, import_event_id):
+            assert import_event_id == 404
+            return False
+
+    monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", MissingCatalogService)
+
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "404"])
+
+    assert result.exit_code == 1
+    assert "Import event not found." in result.stdout
+
+
+def test_catalog_delete_import_renders_successful_deletion(monkeypatch) -> None:
+    class SuccessfulCatalogService:
+        def delete_import_event(self, import_event_id):
+            assert import_event_id == 7
+            return True
+
+    monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", SuccessfulCatalogService)
+
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "7"])
+
+    assert result.exit_code == 0
+    assert "Deleted import event 7." in result.stdout
 
 
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:

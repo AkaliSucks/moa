@@ -14,6 +14,7 @@ from moa.cli.badge_commands import build_badge_app
 from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.catalog_operational_commands import build_catalog_operational_app
+from moa.cli.catalog_delete_import_commands import register_catalog_delete_import_command
 from moa.cli.catalog_search_commands import build_catalog_search_app
 from moa.cli.catalog_snapshot_commands import build_catalog_snapshot_app
 from moa.cli.data_health_commands import build_data_health_app
@@ -37,7 +38,6 @@ from moa.database.legacy_database_relocation import (
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 from moa.repositories.catalog_repository import (
     CatalogRepository,
-    ImportEventDeletionBlockedError,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.antidisable_page_projection_coordinator import AntidisablePageProjectionCoordinator
@@ -491,22 +491,7 @@ catalog_operational_app = build_catalog_operational_app(
     _format_optional_rank,
 )
 catalog_app.add_typer(catalog_operational_app)
-
-
-@catalog_app.command("delete-import")
-def catalog_delete_import(import_event_id: int) -> None:
-    """Delete one mistaken import while preserving all other catalog data."""
-    try:
-        deleted = CatalogService().delete_import_event(import_event_id)
-    except ImportEventDeletionBlockedError:
-        console.print(
-            "[red]Deletion blocked: this import belongs to durable/replayable source state.[/red]"
-        )
-        raise typer.Exit(1) from None
-    if not deleted:
-        console.print("[red]Import event not found.[/red]")
-        raise typer.Exit(1)
-    console.print(f"[green]Deleted import event {import_event_id}.[/green]")
+register_catalog_delete_import_command(catalog_app, console)
 
 
 @catalog_app.command("reset")
