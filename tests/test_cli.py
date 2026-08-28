@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 import moa.cli.import_workflow_commands as import_workflow_commands_module
 import moa.cli.catalog_delete_import_commands as catalog_delete_import_commands_module
 import moa.cli.catalog_operational_commands as catalog_operational_commands_module
+import moa.cli.catalog_relocate_database_commands as catalog_relocate_database_commands_module
 import moa.cli.catalog_reset_commands as catalog_reset_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
@@ -3994,11 +3995,34 @@ def test_catalog_reset_uses_main_database_path_at_callback_time(monkeypatch, tmp
     assert len(list(tmp_path.glob("second.db.bak-full-reset-*"))) == 1
 
 
-def test_catalog_relocate_database_requires_explicit_source() -> None:
-    result = CliRunner().invoke(main.app, ["catalog", "relocate-database", "--apply"])
+def test_catalog_relocate_database_help_is_lazy_and_requires_source_and_apply() -> None:
+    calls: list[int] = []
 
-    assert result.exit_code == 2
-    assert "SOURCE" in result.stderr
+    def target_path_provider():
+        calls.append(1)
+        return Path("unused.db")
+
+    catalog_app = typer.Typer()
+
+    @catalog_app.command("sentinel")
+    def sentinel() -> None:
+        pass
+
+    catalog_relocate_database_commands_module.register_catalog_relocate_database_command(
+        catalog_app,
+        Console(),
+        target_path_provider,
+    )
+
+    help_result = CliRunner().invoke(catalog_app, ["relocate-database", "--help"])
+    missing_source_result = CliRunner().invoke(catalog_app, ["relocate-database", "--apply"])
+
+    assert help_result.exit_code == 0
+    assert "SOURCE" in help_result.stdout
+    assert "--apply" in help_result.stdout
+    assert missing_source_result.exit_code == 2
+    assert "SOURCE" in missing_source_result.stderr
+    assert calls == []
 
 
 def test_catalog_relocate_database_warns_and_requires_apply(monkeypatch, tmp_path) -> None:

@@ -15,6 +15,9 @@ from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.catalog_operational_commands import build_catalog_operational_app
 from moa.cli.catalog_delete_import_commands import register_catalog_delete_import_command
+from moa.cli.catalog_relocate_database_commands import (
+    register_catalog_relocate_database_command,
+)
 from moa.cli.catalog_reset_commands import register_catalog_reset_command
 from moa.cli.catalog_search_commands import build_catalog_search_app
 from moa.cli.catalog_snapshot_commands import build_catalog_snapshot_app
@@ -32,10 +35,6 @@ from moa.cli.recommend_commands import build_recommend_app
 from moa.cli.roll_commands import build_roll_app
 from moa.cli.server_commands import build_server_app
 from moa.cli.tower_commands import build_tower_app
-from moa.database.legacy_database_relocation import (
-    DatabaseRelocationError,
-    relocate_database,
-)
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 from moa.repositories.catalog_repository import (
     CatalogRepository,
@@ -494,37 +493,11 @@ catalog_operational_app = build_catalog_operational_app(
 catalog_app.add_typer(catalog_operational_app)
 register_catalog_delete_import_command(catalog_app, console)
 register_catalog_reset_command(catalog_app, console, lambda: DEFAULT_DATABASE_PATH)
-
-
-@catalog_app.command("relocate-database")
-def catalog_relocate_database(
-    source: Path = typer.Argument(..., help="Explicit legacy MOA database path."),
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Create the new database and retire the explicit source path.",
-    ),
-) -> None:
-    """Move database authority to MOA's per-user application-data location."""
-    target = default_database_path().resolve(strict=False)
-    resolved_source = source.expanduser().resolve(strict=False)
-    console.print(f"Source: {resolved_source}")
-    console.print(f"Target: {target}")
-    console.print("[yellow]The Discord listener must be stopped before relocation.[/yellow]")
-    console.print(
-        "[yellow]Do not resume old MOA checkouts that write the legacy database after "
-        "relocation; no cross-version synchronization is provided.[/yellow]"
-    )
-    if not apply:
-        console.print("[yellow]No changes made. Rerun with --apply after stopping the listener.[/yellow]")
-        return
-    try:
-        result = relocate_database(resolved_source, target)
-    except DatabaseRelocationError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-    console.print(f"[green]Database relocated to: {result.target}[/green]")
-    console.print(f"Legacy source archived at: {result.source_archive}")
+register_catalog_relocate_database_command(
+    catalog_app,
+    console,
+    lambda: default_database_path(),
+)
 
 
 @catalog_app.command("repair-bugged-data")
