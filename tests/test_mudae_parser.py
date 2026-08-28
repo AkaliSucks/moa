@@ -1,6 +1,7 @@
 import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
+from moa.parser.roll import RollParser
 
 
 TOP_PAGE = """🏆 TOP 1000
@@ -301,6 +302,12 @@ def test_parse_roll_from_copied_mudae_output() -> None:
     assert roll.series == "Mob kara Hajimaru Tansaku Eiyuutan"
     assert roll.claim_rank == 55003
     assert roll.kakera_value == 27
+
+
+def test_parse_roll_facade_matches_dedicated_parser() -> None:
+    expected = RollParser(MudaeParseError).parse(ROLL)
+
+    assert MudaeTextParser().parse_roll(ROLL) == expected
 
 
 def test_parse_roll_without_claim_rank_when_rank_display_is_disabled() -> None:

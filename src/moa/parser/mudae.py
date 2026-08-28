@@ -43,6 +43,7 @@ from moa.models.character import (
     WishlistEntry,
     WishlistSnapshot,
 )
+from moa.parser.roll import RollParser, clean_series, roll_name_and_series
 
 
 class MudaeParseError(ValueError):
@@ -58,28 +59,11 @@ class MudaeTextParser:
         r"(?:\s*=>\s*(?P<owner>.+?))?\s+-\s+(?P<series>.+)$"
     )
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
-    _ROULETTE = re.compile(
-        r"^(?P<roulette>.+?)(?:\s+roulette)?(?:\s*[\u00b7\u2022]\s*|\s+)"
-        r"\*{0,2}(?P<value>[\d,]+)\*{0,2}\s*"
-        r"(?::kakera[a-z0-9_]*:|\bkakera\b)(?:\D.*)?$",
-        re.IGNORECASE,
-    )
-    _CLAIM_RANK = re.compile(r"^Claim Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _LIKE_RANK = re.compile(r"^Like Rank:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _ROLL_CLAIMS = re.compile(r"^Claims:\s*#(?P<rank>[\d,]+)$", re.IGNORECASE)
-    _KAKERA = re.compile(
-        r"^\s*\*{0,2}\+?(?P<value>[\d,]+)\*{0,2}\s*"
-        r"(?::kakera[a-z0-9_]*:|\bkakera\b)\s*$",
-        re.IGNORECASE,
-    )
-    _ROLL_KEY = re.compile(
-        r":(?P<key_type>[a-z]+)key:\s*\(\*{0,2}(?P<count>\d+)\*{0,2}\)",
-        re.IGNORECASE,
-    )
-    _GENERIC_KEY_COUNT = re.compile(
-        r"\bkeys?\s*\(\*{0,2}(?P<count>\d+)\*{0,2}\)",
-        re.IGNORECASE,
-    )
+    _ROULETTE = RollParser._ROULETTE
+    _CLAIM_RANK = RollParser._CLAIM_RANK
+    _LIKE_RANK = RollParser._LIKE_RANK
+    _ROLL_KEY = RollParser._ROLL_KEY
+    _GENERIC_KEY_COUNT = RollParser._GENERIC_KEY_COUNT
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
         r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
@@ -295,10 +279,8 @@ class MudaeTextParser:
     _TOTAL_HAREM_VALUE = re.compile(
         r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
     )
-    _GENDER = re.compile(
-        r"\s+(?P<gender>(?::(?:female|male):)+)\s*$", re.IGNORECASE
-    )
-    _STARWISH_MARKER = re.compile(r"\s*:sw:\s*", re.IGNORECASE)
+    _GENDER = RollParser._GENDER
+    _STARWISH_MARKER = RollParser._STARWISH_MARKER
     _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
     _WISHLIST_HEADER = re.compile(
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
@@ -421,7 +403,7 @@ class MudaeTextParser:
     @classmethod
     def _clean_series(cls, value: str) -> str:
         """Remove display-only gender and starwish markers from a series."""
-        return cls._STARWISH_MARKER.sub(" ", cls._GENDER.sub("", value)).strip()
+        return clean_series(value)
 
     def parse_character_details(self, text: str) -> CharacterDetails:
         """Parse the key fields from a copied `$im <character>` response."""
@@ -473,108 +455,11 @@ class MudaeTextParser:
     @classmethod
     def _roll_name_and_series(cls, lines: list[str], marker_index: int) -> tuple[str, str]:
         """Recover the name and all wrapped series lines before a roll marker."""
-        content_lines = [
-            line
-            for line in lines[:marker_index]
-            if line.casefold() not in {"mudae", "app"}
-            and not line.lstrip().startswith(("$", "/"))
-            and not line.casefold().startswith("wished by ")
-        ]
-        if len(content_lines) < 2:
-            raise MudaeParseError("Expected character name and series before the Mudae roll marker.")
-        return content_lines[0], " ".join(content_lines[1:])
-
-    @staticmethod
-    def _validate_roll_identity(name: str, series: str) -> None:
-        """Reject a likely title/series split instead of storing a false character."""
-        if len(name.strip()) >= 28 and len(series.strip()) <= 8:
-            raise MudaeParseError(
-                "Ambiguous Mudae roll identity: a long character name and short series "
-                "were returned; use `$im` to verify it before importing."
-            )
+        return roll_name_and_series(lines, marker_index, MudaeParseError)
 
     def parse_roll(self, text: str) -> RollObservation:
         """Parse the key fields from a copied standard Mudae roll card."""
-        lines = self._lines(text)
-        key = next((self._ROLL_KEY.search(line) for line in lines if self._ROLL_KEY.search(line)), None)
-        roulette_index = next(
-            (index for index, line in enumerate(lines) if self._ROULETTE.match(line)),
-            None,
-        )
-        if roulette_index is not None:
-            if roulette_index < 2:
-                raise MudaeParseError("Expected character name and series before the Mudae roulette line.")
-            roulette_line = self._ROULETTE.match(lines[roulette_index])
-            if roulette_line is None:
-                raise MudaeParseError("Could not parse the Mudae roulette line.")
-            name, series_line = self._roll_name_and_series(lines, roulette_index)
-            series = self._clean_series(series_line)
-            self._validate_roll_identity(name, series)
-            return RollObservation(
-                name=name,
-                series=series,
-                claim_rank=self._first_number(lines, self._CLAIM_RANK),
-                kakera_value=self._number(roulette_line.group("value")),
-                displayed_key_type=key.group("key_type").lower() if key else None,
-                displayed_key_count=int(key.group("count")) if key else None,
-            )
-
-        claims_index = next(
-            (index for index, line in enumerate(lines) if self._ROLL_CLAIMS.match(line)),
-            None,
-        )
-        if claims_index is None:
-            kakera_index = next(
-                (index for index, line in enumerate(lines) if self._KAKERA.match(line)),
-                None,
-            )
-            if kakera_index is None or kakera_index < 2:
-                raise MudaeParseError(
-                    "Expected a Mudae roll card with either a Claims line or a Kakera value."
-                )
-            kakera = self._KAKERA.match(lines[kakera_index])
-            if kakera is None:
-                raise MudaeParseError("Could not parse the Mudae Kakera value.")
-            key_index = next(
-                (index for index, line in enumerate(lines) if self._ROLL_KEY.search(line)),
-                None,
-            )
-            if key_index == kakera_index - 1 and key_index >= 2:
-                name, series = self._roll_name_and_series(lines, key_index)
-            else:
-                name, series = self._roll_name_and_series(lines, kakera_index)
-            series = self._clean_series(series)
-            self._validate_roll_identity(name, series)
-            return RollObservation(
-                name=name,
-                series=series,
-                claim_rank=None,
-                kakera_value=self._number(kakera.group("value")),
-                displayed_key_type=key.group("key_type").lower() if key else None,
-                displayed_key_count=int(key.group("count")) if key else None,
-            )
-        if claims_index < 2:
-            raise MudaeParseError("Expected character name and series before the Mudae Claims line.")
-
-        claims_line = self._ROLL_CLAIMS.match(lines[claims_index])
-        if claims_line is None:
-            raise MudaeParseError("Could not parse the Mudae Claims line.")
-
-        kakera = next(
-            (self._KAKERA.match(line) for line in lines[claims_index + 1 :] if self._KAKERA.match(line)),
-            None,
-        )
-        name, series = self._roll_name_and_series(lines, claims_index)
-        series = self._clean_series(series)
-        self._validate_roll_identity(name, series)
-        return RollObservation(
-            name=name,
-            series=series,
-            claim_rank=self._number(claims_line.group("rank")),
-            kakera_value=self._number(kakera.group("value")) if kakera else None,
-            displayed_key_type=key.group("key_type").lower() if key else None,
-            displayed_key_count=int(key.group("count")) if key else None,
-        )
+        return RollParser(MudaeParseError).parse(text)
 
     def parse_claim_confirmation(self, text: str) -> ClaimConfirmation:
         """Parse Mudae's short confirmation sent after a character is claimed."""
