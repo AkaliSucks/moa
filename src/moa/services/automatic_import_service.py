@@ -13,6 +13,11 @@ from moa.services.antidisable_page_projection_coordinator import (
 from moa.services.catalog_service import CatalogService
 from moa.services.claim_projection_coordinator import ClaimProjectionCoordinator
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
+from moa.services.harem_import_dispatch import (
+    HaremImportDispatcher,
+    HaremResponseProfile,
+    harem_import_from_response_kind,
+)
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import (
@@ -440,41 +445,29 @@ class AutomaticImportService:
                 replay_skipped=coordinated.replay_skipped,
                 durable_success_recorded=coordinated.durable_success_recorded,
             )
-        if kind == "ranked_harem":
+        harem_dispatch = harem_import_from_response_kind(kind)
+        if harem_dispatch is not None:
             account = self._require(account_name, "account", kind)
-            page = self._parser.parse_ranked_harem_page(raw_message)
-            result = self._catalog.import_ranked_harem_page(
-                page, server, account, raw_message, source, harem_scan_id
+            imported = HaremImportDispatcher(self._parser, self._catalog).import_page(
+                harem_dispatch, raw_message, server, account, source, harem_scan_id
             )
+            page = imported.page
+            result = imported.result
             page_label = (
                 f" page {page.page_number}/{page.page_count}"
                 if page.page_number is not None and page.page_count is not None
                 else ""
             )
-            return AutomaticImportResult(
-                kind=kind,
-                imported_count=result.entries_imported,
-                message=(
-                    f"Imported {result.entries_imported} owned harem entries{page_label}; "
-                    f"{result.entries_linked} linked to the catalog."
-                ),
-            )
-        if kind == "harem":
-            account = self._require(account_name, "account", kind)
-            page = self._parser.parse_harem_key_page(raw_message)
-            result = self._catalog.import_harem_key_page(
-                page, server, account, raw_message, source, harem_scan_id
-            )
-            page_label = (
-                f" page {page.page_number}/{page.page_count}"
-                if page.page_number is not None and page.page_count is not None
-                else ""
+            entry_label = (
+                "owned harem entries"
+                if harem_dispatch.response_profile is HaremResponseProfile.RANKED
+                else "keyed harem entries"
             )
             return AutomaticImportResult(
                 kind=kind,
                 imported_count=result.entries_imported,
                 message=(
-                    f"Imported {result.entries_imported} keyed harem entries{page_label}; "
+                    f"Imported {result.entries_imported} {entry_label}{page_label}; "
                     f"{result.entries_linked} linked to the catalog."
                 ),
             )

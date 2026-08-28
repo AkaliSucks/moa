@@ -1995,6 +1995,14 @@ def test_listener_maps_owned_harem_command_to_ranked_harem() -> None:
     assert _listener_expected_kind("$trade") == "trade"
 
 
+def test_listener_normalizes_harem_variants_through_the_canonical_dispatch() -> None:
+    ranked = DiscordListenerService._listener_command_match("$mmrkty+")
+    keyed = DiscordListenerService._listener_command_match("$mmyk")
+
+    assert DiscordListenerService._expected_response_for_command_match(ranked) == "ranked_harem"
+    assert DiscordListenerService._expected_response_for_command_match(keyed) == "harem"
+
+
 def _current_listener_expected_kind(command: str) -> str | None:
     """Independent characterization seam for listener recognition."""
     return _listener_expected_kind(command)

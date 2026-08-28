@@ -6,6 +6,7 @@ import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
 
+import moa.cli.import_workflow_commands as import_workflow_commands_module
 import moa.parser.message_router as message_router_module
 import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
@@ -2422,7 +2423,7 @@ def test_import_auto_keeps_direct_automatic_import_without_tower_coordinator(
                 message="Imported Kakera Tower state.",
             )
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -2460,7 +2461,7 @@ def test_import_auto_keeps_direct_kakeraloot_import_without_durable_coordinator(
                 message="Imported Kakeraloot state.",
             )
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -2500,7 +2501,7 @@ def test_import_auto_keeps_direct_sphere_import_without_durable_coordinator(
                 message="Imported +158 spheres. Stock: 3,655.",
             )
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -2543,7 +2544,7 @@ def test_import_auto_keeps_direct_player_bonus_import_without_durable_coordinato
                 message="Imported player bonuses.",
             )
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -2591,7 +2592,7 @@ def test_import_auto_keeps_direct_wishlist_import_without_durable_coordinator(
         def __init__(self, *args, **kwargs):
             coordinators.append((args, kwargs))
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(main, "WishlistProjectionCoordinator", RecordingWishlistProjectionCoordinator)
     monkeypatch.setattr(
         main,
@@ -2638,7 +2639,7 @@ def test_import_auto_keeps_direct_disablelist_import_without_durable_coordinator
         def __init__(self, *args, **kwargs):
             coordinators.append((args, kwargs))
 
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingImporter)
+    monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
     monkeypatch.setattr(
         main,
         "DisableListProjectionCoordinator",
@@ -2809,14 +2810,211 @@ def test_import_workflow_family_is_exact_and_movable() -> None:
     expected_names = {
         "auto": {"AutomaticImportService"},
         "top": {"MudaeTextParser", "CatalogService", "parse_top_page", "import_top_page", "character_count"},
-        "mm": {"MudaeTextParser", "CatalogService", "parse_harem_key_page", "import_harem_key_page"},
-        "mmr": {"MudaeTextParser", "CatalogService", "parse_ranked_harem_page", "import_ranked_harem_page"},
+        "mm": {"HaremImportDispatcher", "require_harem_import", "MudaeParseError"},
+        "mmr": {"HaremImportDispatcher", "require_harem_import", "MudaeParseError"},
         "adl": {"MudaeTextParser", "CatalogService", "parse_antidisable_page", "import_antidisable_page"},
     }
     for command, names in expected_names.items():
         callback_names = import_commands[command].callback.__wrapped__.__code__.co_names
         assert names <= set(callback_names)
         assert not any("ProjectionCoordinator" in value for value in callback_names)
+
+
+def test_import_mm_family_is_exact_flat_and_schema_stable() -> None:
+    import_commands = get_command(main.app).commands["import"].commands
+    family = {"mm", "mmr"}
+
+    assert family <= set(import_commands)
+    assert {"adl", "auto", "top"} <= set(import_commands) - family
+    assert "mmfamily" not in import_commands
+    assert "scan" not in import_commands
+
+    expected_parameters = [
+        ("server", ("--server", "-s"), None, True, "str"),
+        ("account", ("--account", "-a"), None, True, "str"),
+        ("scan", ("--scan",), None, False, "int"),
+        ("path", ("path",), None, False, "path"),
+        ("clipboard", ("--clipboard", "-c"), False, False, "boolean"),
+    ]
+    for command in family:
+        parameters = import_commands[command].params
+        assert [
+            (parameter.name, tuple(parameter.opts), parameter.default, parameter.required, parameter.type.name)
+            for parameter in parameters
+        ] == expected_parameters
+
+        callback_names = import_commands[command].callback.__wrapped__.__code__.co_names
+        assert {"HaremImportDispatcher", "require_harem_import", "MudaeParseError"} <= set(callback_names)
+        assert not {
+            "parse_harem_key_page",
+            "parse_ranked_harem_page",
+            "import_harem_key_page",
+            "import_ranked_harem_page",
+        } & set(callback_names)
+        assert not any(
+            forbidden in callback_names
+            for forbidden in (
+                "HaremRepository",
+                "run_write_transaction",
+                "begin_harem_scan",
+                "complete_harem_scan",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("command", "parser_method", "service_method", "rendered_label"),
+    [
+        ("mm", "parse_harem_key_page", "import_harem_key_page", "keyed harem entries"),
+        ("mmr", "parse_ranked_harem_page", "import_ranked_harem_page", "owned harem entries"),
+    ],
+)
+def test_import_mm_family_preserves_late_bound_source_orchestration_and_variant_rendering(
+    monkeypatch, command, parser_method, service_method, rendered_label
+) -> None:
+    raw_message = f"{command} raw response"
+    parsed = SimpleNamespace()
+    events: list[object] = []
+    parser_calls: list[str] = []
+    writes: list[tuple[object, ...]] = []
+
+    def patched_source(path, clipboard):
+        events.append(("source", path, clipboard))
+        return raw_message
+
+    def parser_init(_self) -> None:
+        events.append("parser-init")
+
+    def parse_page(_self, text):
+        events.append(("parse", text))
+        parser_calls.append(text)
+        return parsed
+
+    def catalog_init(_self) -> None:
+        events.append("catalog-init")
+
+    def import_page(_self, *values):
+        events.append(("write", values))
+        writes.append(values)
+        return SimpleNamespace(
+            entries_imported=2,
+            entries_linked=1,
+            account_name="ernieuuu",
+            scan_id=7 if values[-1] == 7 else None,
+            page_number=1 if values[-1] == 7 else None,
+            page_count=2 if values[-1] == 7 else None,
+        )
+
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", parser_init)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, parser_method, parse_page)
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", catalog_init)
+    monkeypatch.setattr(catalog_service_module.CatalogService, service_method, import_page)
+
+    runner = CliRunner()
+    with_scan = runner.invoke(
+        main.app,
+        ["import", command, "--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+    )
+    without_scan = runner.invoke(
+        main.app,
+        ["import", command, "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert with_scan.exit_code == 0
+    assert without_scan.exit_code == 0
+    assert parser_calls == [raw_message, raw_message]
+    assert writes == [
+        (parsed, "Lake", "ernieuuu", raw_message, "clipboard", 7),
+        (parsed, "Lake", "ernieuuu", raw_message, "clipboard", None),
+    ]
+    assert events[:5] == [
+        ("source", None, True),
+        "parser-init",
+        ("parse", raw_message),
+        "catalog-init",
+        ("write", writes[0]),
+    ]
+    assert events[5:] == [
+        ("source", None, True),
+        "parser-init",
+        ("parse", raw_message),
+        "catalog-init",
+        ("write", writes[1]),
+    ]
+    assert f"Imported 2 {rendered_label}" in with_scan.stdout
+    assert "linked to the current catalog" in with_scan.stdout
+    assert "Scan 7:" in with_scan.stdout
+    assert "Keep using" in with_scan.stdout
+    assert f"Imported 2 {rendered_label}" in without_scan.stdout
+    assert "Scan 7:" not in without_scan.stdout
+    assert "Keep using" not in without_scan.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "parser_method", "service_method"),
+    [
+        ("mm", "parse_harem_key_page", "import_harem_key_page"),
+        ("mmr", "parse_ranked_harem_page", "import_ranked_harem_page"),
+    ],
+)
+def test_import_mm_family_preserves_parser_and_service_error_boundaries(
+    monkeypatch, command, parser_method, service_method
+) -> None:
+    parser_calls: list[str] = []
+    raw_message = f"malformed {command} response"
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: raw_message)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", lambda _self: None)
+    monkeypatch.setattr(
+        mudae_parser_module.MudaeTextParser,
+        parser_method,
+        lambda _self, text: parser_calls.append(text)
+        or (_ for _ in ()).throw(mudae_parser_module.MudaeParseError(raw_message)),
+    )
+    monkeypatch.setattr(
+        catalog_service_module.CatalogService,
+        "__init__",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CatalogService must not construct after parser failure")
+        ),
+    )
+
+    parser_failure = CliRunner().invoke(
+        main.app,
+        ["import", command, "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert parser_failure.exit_code == 1
+    assert parser_calls == [raw_message]
+    assert raw_message in parser_failure.stdout
+    assert isinstance(parser_failure.exception, SystemExit)
+
+    monkeypatch.setattr(catalog_service_module.CatalogService, "__init__", lambda _self: None)
+    monkeypatch.setattr(
+        mudae_parser_module.MudaeTextParser,
+        parser_method,
+        lambda _self, _text: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        catalog_service_module.CatalogService,
+        service_method,
+        lambda _self, *_args: (_ for _ in ()).throw(ValueError("invalid scan")),
+    )
+
+    service_failure = CliRunner().invoke(
+        main.app,
+        ["import", command, "--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+    )
+
+    assert service_failure.exit_code == 1
+    assert "Imported" not in service_failure.stdout
+    if command == "mm":
+        assert "invalid scan" in service_failure.stdout
+        assert isinstance(service_failure.exception, SystemExit)
+    else:
+        assert "invalid scan" not in service_failure.stdout
+        assert isinstance(service_failure.exception, ValueError)
 
 
 @pytest.mark.parametrize(

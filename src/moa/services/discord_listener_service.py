@@ -59,6 +59,7 @@ from moa.services.automatic_import_service import (
     DurableWishlistImportContext,
 )
 from moa.services.catalog_service import CatalogService
+from moa.services.harem_import_dispatch import harem_import_from_command_match
 from moa.models.ourochest_workflow import (
     OurochestWorkflowState,
     OurochestWorkflowStatus,
@@ -981,7 +982,7 @@ class DiscordListenerService:
                 return
             self._ourochest_workflow.create_pending(guild_id, channel_id, user_id)
             return
-        expected_kind = command_match.expected_response if command_match is not None else None
+        expected_kind = self._expected_response_for_command_match(command_match)
         if expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord command %s from account %s on server %s",
@@ -1055,7 +1056,7 @@ class DiscordListenerService:
             if command
             else None
         )
-        expected_kind = command_match.expected_response if command_match is not None else None
+        expected_kind = self._expected_response_for_command_match(command_match)
         if expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord interaction /%s from account %s on server %s",
@@ -3057,7 +3058,7 @@ class DiscordListenerService:
             if command_name
             else None
         )
-        expected_kind = command_match.expected_response if command_match is not None else None
+        expected_kind = self._expected_response_for_command_match(command_match)
         if command_name and expected_kind is None:
             self._logger.info(
                 "Ignoring unsupported Discord interaction /%s from account %s on server %s",
@@ -3403,6 +3404,16 @@ class DiscordListenerService:
             source=source,
             capability=CommandCapability.LISTENER,
         )
+
+    @staticmethod
+    def _expected_response_for_command_match(
+        command_match: CommandMatch | None,
+    ) -> str | None:
+        """Resolve harem variants through canonical `$mm` profile selection."""
+        harem_dispatch = harem_import_from_command_match(command_match)
+        if harem_dispatch is not None:
+            return harem_dispatch.response_profile.import_kind
+        return command_match.expected_response if command_match is not None else None
 
     @staticmethod
     def _direct_workflow_command_match(
