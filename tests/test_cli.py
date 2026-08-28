@@ -596,6 +596,29 @@ def test_detect_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
     assert events == []
 
 
+def test_version_cli_help_is_lazy(monkeypatch) -> None:
+    events: list[object] = []
+
+    def unexpected_print(*args, **kwargs):
+        events.append((args, kwargs))
+        raise AssertionError("Version help must not render the version output")
+
+    monkeypatch.setattr(main.console, "print", unexpected_print)
+
+    result = CliRunner().invoke(main.app, ["version", "--help"])
+
+    assert result.exit_code == 0
+    assert "Usage: root version" in result.stdout
+    assert events == []
+
+
+def test_version_cli_renders_exact_output_and_exits_zero() -> None:
+    result = CliRunner().invoke(main.app, ["version"])
+
+    assert result.exit_code == 0
+    assert result.stdout == "MOA v0.1.0\n"
+
+
 def test_detect_cli_source_routing_late_bound_router_and_rendering(monkeypatch, tmp_path) -> None:
     events: list[object] = []
     original_source = main._read_message_source

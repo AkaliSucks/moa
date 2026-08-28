@@ -36,6 +36,7 @@ from moa.cli.recommend_commands import build_recommend_app
 from moa.cli.roll_commands import build_roll_app
 from moa.cli.server_commands import build_server_app
 from moa.cli.tower_commands import build_tower_app
+from moa.cli.version_commands import register_version_command
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
@@ -110,9 +111,7 @@ app.add_typer(discord_app, name="discord")
 catalog_app.add_typer(data_health_app, name="data-health")
 
 
-@app.command()
-def version():
-    console.print("[cyan]MOA[/cyan] v0.1.0")
+register_version_command(app, console)
 
 
 def _read_copied_message(path: Path) -> str:
