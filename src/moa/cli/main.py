@@ -15,6 +15,7 @@ from moa.cli.badge_commands import build_badge_app
 from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.data_health_commands import build_data_health_app
+from moa.cli.detect_commands import register_detect_command
 from moa.cli.key_commands import build_key_app
 from moa.cli.loot_commands import build_loot_app
 from moa.cli.harem_commands import build_harem_app
@@ -30,7 +31,6 @@ from moa.database.legacy_database_relocation import (
 )
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
-from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
     CatalogRepository,
     ImportEventDeletionBlockedError,
@@ -388,18 +388,6 @@ def discord_listen(
         raise typer.Exit(1) from error
 
 
-@app.command("detect")
-def detect_mudae_message(
-    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
-    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
-) -> None:
-    """Identify which supported Mudae format one raw message uses."""
-    detection = MudaeMessageRouter().detect(_read_message_source(path, clipboard))
-    style = "green" if detection.kind != "unknown" else "yellow"
-    console.print(f"[{style}]Detected: {detection.kind}[/{style}]")
-    console.print(f"[dim]{detection.reason}[/dim]")
-
-
 def _read_copied_message(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -440,6 +428,13 @@ def _read_message_source(path: Path | None, clipboard: bool) -> str:
         console.print("[red]Provide a text-file path or use --clipboard.[/red]")
         raise typer.Exit(1)
     return _read_copied_message(path)
+
+
+register_detect_command(
+    app,
+    console,
+    lambda path, clipboard: _read_message_source(path, clipboard),
+)
 
 
 def _resolve_server_context(server: str | None) -> str:
