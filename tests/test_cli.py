@@ -1093,6 +1093,32 @@ def test_catalog_snapshot_cli_boundary_and_late_bound_resolvers(monkeypatch) -> 
     assert "2026-07-12" in settings_result.stdout
 
 
+def test_catalog_towerstate_renders_middle_dot_separators(monkeypatch) -> None:
+    state = SimpleNamespace(
+        account_name="Account",
+        current_level=4,
+        completed_towers=2,
+        built_perk_ids=(3, 7),
+        next_level_cost=100_000,
+        kakera_balance=25_000,
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(tower_state=lambda *_: state),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "towerstate", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert result.exit_code == 0
+    assert "Completed towers: 2 · Built perks: 3, 7" in result.stdout
+    assert "Next floor: 100,000 Kakera · Balance: 25,000 Kakera" in result.stdout
+    assert "Balance: 25,000 Kakera · Shortfall: 75,000 Kakera" in result.stdout
+
+
 def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
     monkeypatch,
 ) -> None:

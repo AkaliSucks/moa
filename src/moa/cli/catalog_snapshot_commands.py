@@ -151,9 +151,9 @@ def build_catalog_snapshot_app(
         gap = max(0, state.next_level_cost - state.kakera_balance)
         console.print(
             f"[bold cyan]{state.account_name} - Tower level {state.current_level}[/bold cyan]\n"
-            f"Completed towers: {state.completed_towers} Â· Built perks: "
+            f"Completed towers: {state.completed_towers} · Built perks: "
             f"{', '.join(str(perk) for perk in state.built_perk_ids) or 'none'}\n"
-            f"Next floor: {state.next_level_cost:,} Kakera Â· Balance: {state.kakera_balance:,} Kakera Â· "
+            f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera · "
             f"Shortfall: {gap:,} Kakera"
         )
 
