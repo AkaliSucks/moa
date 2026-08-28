@@ -2666,6 +2666,390 @@ def test_import_auto_keeps_direct_disablelist_import_without_durable_coordinator
     ]
 
 
+def test_import_cli_characterizes_registration_laziness_and_late_bound_reader(monkeypatch) -> None:
+    root_command = get_command(main.app)
+    import_command = root_command.commands["import"]
+    assert set(import_command.commands) == {
+        "auto",
+        "reaction",
+        "top",
+        "im",
+        "mm",
+        "mmr",
+        "bonus",
+        "wishlist",
+        "adl",
+        "disablelist",
+        "topx",
+        "kakera",
+        "personalrare",
+        "timers",
+        "towerstate",
+        "lootstate",
+        "infokl",
+        "settings",
+    }
+
+    constructions: list[str] = []
+
+    def unexpected(name):
+        def constructor(*_args, **_kwargs):
+            constructions.append(name)
+            raise AssertionError(f"Import help must not construct {name}")
+
+        return constructor
+
+    with monkeypatch.context() as help_monkeypatch:
+        help_monkeypatch.setattr(MudaeTextParser, "__init__", unexpected("parser"))
+        help_monkeypatch.setattr(CatalogService, "__init__", unexpected("catalog"))
+        help_monkeypatch.setattr(
+            AutomaticImportService,
+            "__init__",
+            unexpected("automatic importer"),
+        )
+        help_result = CliRunner().invoke(main.app, ["import", "--help"])
+
+    assert help_result.exit_code == 0
+    assert constructions == []
+
+    source_calls: list[tuple[Path | None, bool]] = []
+    events: list[object] = []
+
+    def patched_source(path: Path | None, clipboard: bool) -> str:
+        source_calls.append((path, clipboard))
+        events.append("source")
+        return "player bonuses"
+
+    def parser_init(_self) -> None:
+        events.append("parser-init")
+
+    def parse_bonus(_self, raw_message: str):
+        events.append(("parse", raw_message))
+        return SimpleNamespace(metrics={"bonus": 1})
+
+    def catalog_init(_self) -> None:
+        events.append("catalog-init")
+
+    def import_bonus(_self, *args):
+        events.append(("write", args))
+        return SimpleNamespace(account_name="ernieuuu")
+
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(MudaeTextParser, "__init__", parser_init)
+    monkeypatch.setattr(MudaeTextParser, "parse_player_bonus", parse_bonus)
+    monkeypatch.setattr(CatalogService, "__init__", catalog_init)
+    monkeypatch.setattr(CatalogService, "import_player_bonus", import_bonus)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "bonus", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert source_calls == [(None, True)]
+    assert events == [
+        "source",
+        "parser-init",
+        ("parse", "player bonuses"),
+        "catalog-init",
+        (
+            "write",
+            (SimpleNamespace(metrics={"bonus": 1}), "Lake", "ernieuuu", "player bonuses", "clipboard"),
+        ),
+    ]
+
+
+def test_import_simple_direct_callbacks_use_movable_parser_catalog_seams_and_no_coordinators(
+    monkeypatch,
+) -> None:
+    root_command = get_command(main.app)
+    import_commands = root_command.commands["import"].commands
+    direct_commands = {
+        "reaction",
+        "im",
+        "bonus",
+        "wishlist",
+        "disablelist",
+        "topx",
+        "kakera",
+        "personalrare",
+        "timers",
+        "towerstate",
+        "lootstate",
+        "infokl",
+        "settings",
+    }
+    for name in direct_commands:
+        names = import_commands[name].callback.__wrapped__.__code__.co_names
+        assert not any("ProjectionCoordinator" in value for value in names)
+        assert "DiscordListenerService" not in names
+
+    events: list[str] = []
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: "bonus source")
+    monkeypatch.setattr(MudaeTextParser, "__init__", lambda _self: events.append("parser-init"))
+    monkeypatch.setattr(
+        MudaeTextParser,
+        "parse_player_bonus",
+        lambda _self, raw_message: events.append(f"parse:{raw_message}")
+        or SimpleNamespace(metrics={}),
+    )
+    monkeypatch.setattr(CatalogService, "__init__", lambda _self: events.append("catalog-init"))
+    monkeypatch.setattr(
+        CatalogService,
+        "import_player_bonus",
+        lambda _self, *_args: events.append("write") or SimpleNamespace(account_name="ernieuuu"),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "bonus", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert events == ["parser-init", "parse:bonus source", "catalog-init", "write"]
+    assert "Imported 0 player bonus metrics" in result.stdout
+
+
+def test_import_simple_direct_parser_failure_prevents_catalog_construction(monkeypatch) -> None:
+    parser_calls: list[str] = []
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: "malformed bonus")
+    monkeypatch.setattr(
+        MudaeTextParser,
+        "parse_player_bonus",
+        lambda _self, raw_message: parser_calls.append(raw_message)
+        or (_ for _ in ()).throw(mudae_parser_module.MudaeParseError("malformed bonus")),
+    )
+    monkeypatch.setattr(
+        CatalogService,
+        "__init__",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("CatalogService must not construct after parser failure")
+        ),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "bonus", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 1
+    assert parser_calls == ["malformed bonus"]
+    assert "malformed bonus" in result.stdout
+
+
+def test_import_auto_uses_automatic_service_routing_without_cli_coordinators(monkeypatch) -> None:
+    events: list[str] = []
+    auto_callback = get_command(main.app).commands["import"].commands["auto"].callback.__wrapped__
+    assert "AutomaticImportService" in auto_callback.__code__.co_names
+    assert not any("ProjectionCoordinator" in value for value in auto_callback.__code__.co_names)
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: events.append("source") or "auto source")
+    monkeypatch.setattr(
+        AutomaticImportService,
+        "__init__",
+        lambda _self: events.append("automatic-init"),
+    )
+    monkeypatch.setattr(
+        AutomaticImportService,
+        "import_message",
+        lambda _self, *args, **kwargs: events.append("automatic-import")
+        or SimpleNamespace(kind="bonus", imported_count=1, message="Imported player bonuses."),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["import", "auto", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert events == ["source", "automatic-init", "automatic-import"]
+    assert "Detected bonus and imported 1 item(s)." in result.stdout
+
+
+def test_import_top_preserves_post_write_read_and_domain_error_boundary(monkeypatch) -> None:
+    events: list[str] = []
+    page = SimpleNamespace()
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: events.append("source") or "top source")
+    monkeypatch.setattr(MudaeTextParser, "__init__", lambda _self: events.append("parser-init"))
+    monkeypatch.setattr(
+        MudaeTextParser,
+        "parse_top_page",
+        lambda _self, raw_message: events.append(f"parse:{raw_message}") or page,
+    )
+    monkeypatch.setattr(CatalogService, "__init__", lambda _self: events.append("catalog-init"))
+    monkeypatch.setattr(
+        CatalogService,
+        "import_top_page",
+        lambda _self, *_args: events.append("write") or SimpleNamespace(characters_imported=3),
+    )
+    monkeypatch.setattr(CatalogService, "character_count", lambda _self: events.append("count") or 42)
+
+    success = CliRunner().invoke(main.app, ["import", "top", "--clipboard"])
+
+    assert success.exit_code == 0
+    assert events == ["source", "parser-init", "parse:top source", "catalog-init", "write", "catalog-init", "count"]
+    assert "Imported 3 ranked characters." in success.stdout
+    assert "Catalog now contains 42 characters." in success.stdout
+
+    events.clear()
+    monkeypatch.setattr(
+        CatalogService,
+        "import_top_page",
+        lambda _self, *_args: (_ for _ in ()).throw(ValueError("invalid top context")),
+    )
+    monkeypatch.setattr(
+        CatalogService,
+        "character_count",
+        lambda _self: (_ for _ in ()).throw(AssertionError("count must not run after failed write")),
+    )
+
+    failure = CliRunner().invoke(main.app, ["import", "top", "--clipboard"])
+
+    assert failure.exit_code == 1
+    assert events == ["source", "parser-init", "parse:top source", "catalog-init"]
+    assert "invalid top context" in failure.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "parser_method", "service_method", "arguments", "parsed", "result"),
+    [
+        (
+            "mm",
+            "parse_harem_key_page",
+            "import_harem_key_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            SimpleNamespace(),
+            SimpleNamespace(
+                entries_imported=2,
+                entries_linked=1,
+                account_name="ernieuuu",
+                scan_id=7,
+                page_number=1,
+                page_count=2,
+            ),
+        ),
+        (
+            "mmr",
+            "parse_ranked_harem_page",
+            "import_ranked_harem_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            SimpleNamespace(),
+            SimpleNamespace(
+                entries_imported=2,
+                entries_linked=1,
+                account_name="ernieuuu",
+                scan_id=7,
+                page_number=1,
+                page_count=2,
+            ),
+        ),
+        (
+            "adl",
+            "parse_antidisable_page",
+            "import_antidisable_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            SimpleNamespace(antidisabled_character_count=None),
+            SimpleNamespace(
+                series_imported=2,
+                account_name="ernieuuu",
+                scan_id=7,
+                page_number=1,
+                page_count=2,
+            ),
+        ),
+    ],
+)
+def test_import_scan_linked_callbacks_preserve_parser_write_order_and_scan_forwarding(
+    monkeypatch,
+    command,
+    parser_method,
+    service_method,
+    arguments,
+    parsed,
+    result,
+) -> None:
+    events: list[object] = []
+
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: events.append("source") or f"{command} source")
+    monkeypatch.setattr(MudaeTextParser, "__init__", lambda _self: events.append("parser-init"))
+    monkeypatch.setattr(
+        MudaeTextParser,
+        parser_method,
+        lambda _self, raw_message: events.append(("parse", raw_message)) or parsed,
+    )
+    monkeypatch.setattr(CatalogService, "__init__", lambda _self: events.append("catalog-init"))
+    monkeypatch.setattr(
+        CatalogService,
+        service_method,
+        lambda _self, *values: events.append(("write", values)) or result,
+    )
+
+    invocation = CliRunner().invoke(main.app, ["import", command, *arguments])
+
+    assert invocation.exit_code == 0
+    assert events[:4] == ["source", "parser-init", ("parse", f"{command} source"), "catalog-init"]
+    assert events[4][0] == "write"
+    assert events[4][1][-1] == 7
+    assert "Scan 7:" in invocation.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "parser_method", "service_method", "arguments", "caught"),
+    [
+        (
+            "mm",
+            "parse_harem_key_page",
+            "import_harem_key_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            True,
+        ),
+        (
+            "mmr",
+            "parse_ranked_harem_page",
+            "import_ranked_harem_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            False,
+        ),
+        (
+            "adl",
+            "parse_antidisable_page",
+            "import_antidisable_page",
+            ["--server", "Lake", "--account", "ernieuuu", "--scan", "7", "--clipboard"],
+            True,
+        ),
+    ],
+)
+def test_import_scan_linked_callbacks_preserve_current_value_error_boundaries(
+    monkeypatch,
+    command,
+    parser_method,
+    service_method,
+    arguments,
+    caught,
+) -> None:
+    monkeypatch.setattr(main, "_read_message_source", lambda *_: f"{command} source")
+    monkeypatch.setattr(MudaeTextParser, parser_method, lambda _self, _raw_message: SimpleNamespace())
+    monkeypatch.setattr(CatalogService, "__init__", lambda _self: None)
+    monkeypatch.setattr(
+        CatalogService,
+        service_method,
+        lambda _self, *_args: (_ for _ in ()).throw(ValueError("invalid scan")),
+    )
+
+    result = CliRunner().invoke(main.app, ["import", command, *arguments])
+
+    assert result.exit_code == 1
+    if caught:
+        assert "invalid scan" in result.stdout
+        assert isinstance(result.exception, SystemExit)
+    else:
+        assert "invalid scan" not in result.stdout
+        assert isinstance(result.exception, ValueError)
+
+
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
     assert main._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"
