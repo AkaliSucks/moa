@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
 import moa.parser.mudae as mudae_parser_module
@@ -10,10 +11,13 @@ import moa.services.account_comparison_service as account_comparison_service_mod
 import moa.services.account_overview_service as account_overview_service_module
 import moa.services.action_service as action_service_module
 import moa.services.catalog_service as catalog_service_module
+import moa.services.data_health_service as data_health_service_module
 import moa.services.kakeraloot_budget_service as kakeraloot_budget_service_module
 import moa.services.keyfarm_service as keyfarm_service_module
 import moa.services.loot_service as loot_service_module
 import moa.services.progress_service as progress_service_module
+import moa.services.retention_eligibility_service as retention_eligibility_service_module
+import moa.services.retention_expiry_service as retention_expiry_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
@@ -40,6 +44,85 @@ from moa.services.sphere_result_projection_coordinator import SphereResultProjec
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
+
+
+def test_data_health_cli_characterizes_schema_laziness_and_late_bound_path(
+    tmp_path, monkeypatch
+) -> None:
+    root_command = get_command(main.app)
+    data_health_command = root_command.commands["catalog"].commands["data-health"]
+    assert set(data_health_command.commands) == {
+        "orphans",
+        "impossible-identities",
+        "duplicates",
+        "projection-gaps",
+        "retention",
+    }
+    assert all(
+        not data_health_command.commands[name].params
+        for name in ("orphans", "impossible-identities", "duplicates", "projection-gaps")
+    )
+    retention_params = data_health_command.commands["retention"].params
+    assert len(retention_params) == 1
+    apply_option = retention_params[0]
+    assert apply_option.name == "apply"
+    assert tuple(apply_option.opts) == ("--apply",)
+    assert apply_option.default is False
+    assert not apply_option.required
+
+    events: list[str] = []
+
+    class UnexpectedDatabasePath:
+        def __fspath__(self) -> str:
+            events.append("database-path")
+            raise AssertionError("Data Health help must not resolve a database path")
+
+    def unexpected_constructor(name):
+        def constructor(self, *args, **kwargs):
+            events.append(name)
+            raise AssertionError(f"Data Health help must not construct {name}")
+
+        return constructor
+
+    runner = CliRunner()
+    with monkeypatch.context() as help_monkeypatch:
+        help_monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", UnexpectedDatabasePath())
+        help_monkeypatch.setattr(
+            data_health_service_module.DataHealthService,
+            "__init__",
+            unexpected_constructor("data-health"),
+        )
+        help_monkeypatch.setattr(
+            retention_eligibility_service_module.RetentionEligibilityService,
+            "__init__",
+            unexpected_constructor("retention-eligibility"),
+        )
+        help_monkeypatch.setattr(
+            retention_expiry_service_module.RetentionExpiryService,
+            "__init__",
+            unexpected_constructor("retention-expiry"),
+        )
+        for arguments in (
+            ["catalog", "data-health", "--help"],
+            ["catalog", "data-health", "orphans", "--help"],
+            ["catalog", "data-health", "retention", "--help"],
+        ):
+            result = runner.invoke(main.app, arguments)
+            assert result.exit_code == 0
+    assert events == []
+
+    original_path = tmp_path / "original" / "catalog.db"
+    original_path.parent.mkdir()
+    original_path.write_text("not a catalog database", encoding="utf-8")
+    patched_path = tmp_path / "patched" / "catalog.db"
+    CatalogRepository(patched_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", original_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", patched_path)
+
+    result = runner.invoke(main.app, ["catalog", "data-health", "orphans"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No data-health findings."
 
 
 def test_recommend_keyfarm_resolves_context_and_constructs_service_at_callback_time(

@@ -437,15 +437,24 @@ def test_cli_apply_is_explicit_private_and_render_failure_does_not_reapply(
         return original_apply(self, apply_as_of)
 
     monkeypatch.setattr(RetentionExpiryService, "apply", counted_apply)
-    monkeypatch.setattr(
-        main, "_render_retention_expiry_result", lambda _result: (_ for _ in ()).throw(RuntimeError())
-    )
+    rendered_results = 0
+    original_console_print = main.console.print
+
+    def fail_committed_result_render(*objects, **kwargs):
+        nonlocal rendered_results
+        if objects and isinstance(objects[0], str) and "Retention expiry applied" in objects[0]:
+            rendered_results += 1
+            raise RuntimeError("forced retention result render failure")
+        return original_console_print(*objects, **kwargs)
+
+    monkeypatch.setattr(main.console, "print", fail_committed_result_render)
     failed_render = CliRunner().invoke(
         main.app, ["catalog", "data-health", "retention", "--apply"]
     )
     assert failed_render.exit_code == 1
     assert "committed, but presentation failed" in failed_render.stderr
     assert calls == 1
+    assert rendered_results == 1
     with sqlite3.connect(path) as connection:
         assert connection.execute(
             "SELECT raw_message_expired_at FROM import_events WHERE id = 2"
