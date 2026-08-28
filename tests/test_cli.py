@@ -16,6 +16,7 @@ import moa.cli.catalog_repair_bugged_data_commands as catalog_repair_bugged_data
 import moa.cli.catalog_reset_commands as catalog_reset_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
+import moa.cli.discord_commands as discord_commands_module
 import moa.parser.message_router as message_router_module
 import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
@@ -2258,7 +2259,9 @@ def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
     assert "Discord bot token missing" in result.stdout
 
 
-def test_discord_listener_rejects_example_bot_token() -> None:
+def test_discord_listener_rejects_example_bot_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", tmp_path / "moa.db")
+
     result = CliRunner().invoke(
         main.app,
         ["discord", "listen", "--token", "YOUR_DISCORD_BOT_TOKEN"],
@@ -2321,7 +2324,7 @@ def test_discord_capture_guild_option_requires_capture_only(monkeypatch) -> None
     def unexpected(*_args, **_kwargs):
         raise AssertionError("capture-only validation must precede service construction")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", unexpected)
     result = CliRunner().invoke(
         main.app,
         ["discord", "listen", "--token", "test-token", "--capture-guild-id", "100"],
@@ -2335,7 +2338,7 @@ def test_discord_capture_channel_option_requires_capture_only(monkeypatch) -> No
     def unexpected(*_args, **_kwargs):
         raise AssertionError("capture-only validation must precede service construction")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", unexpected)
     result = CliRunner().invoke(
         main.app,
         ["discord", "listen", "--token", "test-token", "--capture-channel-id", "200"],
@@ -2349,7 +2352,7 @@ def test_discord_capture_user_option_requires_capture_only(monkeypatch) -> None:
     def unexpected(*_args, **_kwargs):
         raise AssertionError("capture-only validation must precede service construction")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", unexpected)
     result = CliRunner().invoke(
         main.app,
         ["discord", "listen", "--token", "test-token", "--capture-user-id", "400"],
@@ -2363,7 +2366,7 @@ def test_discord_capture_user_option_requires_capture_only(monkeypatch) -> None:
     ("output_path", "expected"),
     [
         ("relative.jsonl", "must be an absolute path"),
-        (str(Path(main.__file__).resolve().parents[3] / "capture.jsonl"), "outside the repository"),
+        (str(Path(discord_commands_module.__file__).resolve().parents[3] / "capture.jsonl"), "outside the repository"),
     ],
 )
 def test_discord_capture_only_rejects_unsafe_output_paths(output_path, expected) -> None:
@@ -2382,11 +2385,11 @@ def test_discord_capture_only_rejects_existing_directory_without_construction(
     def unexpected(*_args, **_kwargs):
         raise AssertionError("invalid capture paths must not construct MOA services")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
-    monkeypatch.setattr(main, "CatalogRepository", unexpected)
-    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
-    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
-    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", unexpected)
 
     result = CliRunner().invoke(main.app, _capture_only_arguments(str(directory)))
 
@@ -2403,11 +2406,11 @@ def test_discord_capture_only_rejects_nonexistent_parent_without_construction(
     def unexpected(*_args, **_kwargs):
         raise AssertionError("invalid capture paths must not construct MOA services")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", unexpected)
-    monkeypatch.setattr(main, "CatalogRepository", unexpected)
-    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
-    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
-    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", unexpected)
 
     result = CliRunner().invoke(main.app, _capture_only_arguments(str(output_path)))
 
@@ -2516,11 +2519,11 @@ def test_discord_capture_only_bypasses_database_and_import_construction(monkeypa
     def unexpected(*_args, **_kwargs):
         raise AssertionError("capture-only must not construct normal listener dependencies")
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", FakeCaptureService)
-    monkeypatch.setattr(main, "CatalogRepository", unexpected)
-    monkeypatch.setattr(main, "DiscordMessageRepository", unexpected)
-    monkeypatch.setattr(main, "AutomaticImportService", unexpected)
-    monkeypatch.setattr(main, "DiscordListenerService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", FakeCaptureService)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "AutomaticImportService", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", unexpected)
 
     output_path = tmp_path / "capture.jsonl"
     result = CliRunner().invoke(main.app, _capture_only_arguments(str(output_path)))
@@ -2548,7 +2551,7 @@ def test_discord_capture_only_passes_explicit_text_capture_opt_in(monkeypatch, t
         def run(self, _token):
             return None
 
-    monkeypatch.setattr(main, "DiscordEventCaptureService", FakeCaptureService)
+    monkeypatch.setattr(discord_commands_module, "DiscordEventCaptureService", FakeCaptureService)
     result = CliRunner().invoke(
         main.app,
         [*_capture_only_arguments(str(tmp_path / "capture.jsonl")), "--capture-include-message-text"],
@@ -2660,48 +2663,48 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             captured["token"] = token
             captured["mudae_user_id"] = mudae_user_id
 
-    monkeypatch.setattr(main, "DiscordListenerService", FakeListener)
-    monkeypatch.setattr(main, "CatalogRepository", RecordingCatalogRepository)
-    monkeypatch.setattr(main, "DiscordMessageRepository", RecordingDiscordMessageRepository)
-    monkeypatch.setattr(main, "AutomaticImportService", RecordingAutomaticImportService)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", FakeListener)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", RecordingCatalogRepository)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", RecordingDiscordMessageRepository)
+    monkeypatch.setattr(discord_commands_module, "AutomaticImportService", RecordingAutomaticImportService)
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "KakeraStateProjectionCoordinator",
         RecordingKakeraStateProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "KakeralootStateProjectionCoordinator",
         RecordingKakeralootStateProjectionCoordinator,
     )
-    monkeypatch.setattr(main, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
+    monkeypatch.setattr(discord_commands_module, "TimerProjectionCoordinator", RecordingTimerProjectionCoordinator)
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "TowerStateProjectionCoordinator",
         RecordingTowerStateProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "SphereResultProjectionCoordinator",
         RecordingSphereResultProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "PlayerBonusProjectionCoordinator",
         RecordingPlayerBonusProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "DisableListProjectionCoordinator",
         RecordingDisableListProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "WishlistProjectionCoordinator",
         RecordingWishlistProjectionCoordinator,
     )
     monkeypatch.setattr(
-        main,
+        discord_commands_module,
         "AntidisablePageProjectionCoordinator",
         RecordingAntidisablePageProjectionCoordinator,
     )
