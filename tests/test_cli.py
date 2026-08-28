@@ -2759,6 +2759,194 @@ def test_import_cli_characterizes_registration_laziness_and_late_bound_reader(mo
     ]
 
 
+def test_import_direct_family_is_exact_and_flat() -> None:
+    root_command = get_command(main.app)
+    import_commands = root_command.commands["import"].commands
+    direct_commands = {
+        "reaction",
+        "im",
+        "bonus",
+        "wishlist",
+        "disablelist",
+        "topx",
+        "kakera",
+        "personalrare",
+        "timers",
+        "towerstate",
+        "lootstate",
+        "infokl",
+        "settings",
+    }
+    excluded_commands = {"auto", "top", "mm", "mmr", "adl"}
+
+    assert set(import_commands) == direct_commands | excluded_commands
+    assert set(import_commands) - direct_commands == excluded_commands
+    assert "direct" not in import_commands
+
+
+@pytest.mark.parametrize(
+    ("command", "parameters", "parser_method", "catalog_method"),
+    [
+        (
+            "reaction",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_kakera_reaction_receipt",
+            "import_kakera_reaction",
+        ),
+        (
+            "im",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, False),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_character_details",
+            "import_character_details",
+        ),
+        (
+            "bonus",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_player_bonus",
+            "import_player_bonus",
+        ),
+        (
+            "wishlist",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_wishlist",
+            "import_wishlist",
+        ),
+        (
+            "disablelist",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_disablelist",
+            "import_disablelist",
+        ),
+        (
+            "topx",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_unavailable_characters",
+            "import_unavailable_characters",
+        ),
+        (
+            "kakera",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_kakera_state",
+            "import_kakera_state",
+        ),
+        (
+            "personalrare",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_personal_rare",
+            "import_personal_rare",
+        ),
+        (
+            "timers",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_timer_state",
+            "import_timer_state",
+        ),
+        (
+            "towerstate",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_tower_state",
+            "import_tower_state",
+        ),
+        (
+            "lootstate",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("account", ("--account", "-a"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_kakeraloot_state",
+            "import_kakeraloot_state",
+        ),
+        (
+            "infokl",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_kakeraloot_settings",
+            "import_kakeraloot_settings",
+        ),
+        (
+            "settings",
+            (
+                ("server", ("--server", "-s"), None, True),
+                ("path", ("path",), None, False),
+                ("clipboard", ("--clipboard", "-c"), False, False),
+            ),
+            "parse_server_settings",
+            "import_server_settings",
+        ),
+    ],
+)
+def test_import_direct_family_schema_and_movable_ownership(
+    command, parameters, parser_method, catalog_method
+) -> None:
+    import_command = get_command(main.app).commands["import"].commands[command]
+
+    assert [
+        (parameter.name, tuple(parameter.opts), parameter.default, parameter.required)
+        for parameter in import_command.params
+    ] == list(parameters)
+
+    callback_names = import_command.callback.__wrapped__.__code__.co_names
+    assert parser_method in callback_names
+    assert catalog_method in callback_names
+    assert not any("ProjectionCoordinator" in value for value in callback_names)
+    assert "AutomaticImportService" not in callback_names
+    assert "DiscordListenerService" not in callback_names
+
+
 def test_import_simple_direct_callbacks_use_movable_parser_catalog_seams_and_no_coordinators(
     monkeypatch,
 ) -> None:
