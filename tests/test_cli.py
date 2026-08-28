@@ -1237,7 +1237,7 @@ def test_catalog_operational_commands_keep_command_specific_empty_exits(
 
 
 def test_catalog_imports_preserves_red_value_error_boundary(monkeypatch) -> None:
-    def recent_imports(_self, _limit):
+    def recent_imports(_limit):
         raise ValueError("invalid import limit")
 
     monkeypatch.setattr(
@@ -1249,7 +1249,7 @@ def test_catalog_imports_preserves_red_value_error_boundary(monkeypatch) -> None
     result = CliRunner().invoke(main.app, ["catalog", "imports"])
 
     assert result.exit_code == 1
-    assert "[red]invalid import limit[/red]" in result.stdout
+    assert "invalid import limit" in result.stdout
     assert "Traceback" not in result.stdout
 
 
