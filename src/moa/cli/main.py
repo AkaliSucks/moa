@@ -15,6 +15,7 @@ from moa.cli.badge_commands import build_badge_app
 from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.data_health_commands import build_data_health_app
+from moa.cli.analyze_roll_commands import register_analyze_roll_command
 from moa.cli.detect_commands import register_detect_command
 from moa.cli.key_commands import build_key_app
 from moa.cli.loot_commands import build_loot_app
@@ -58,7 +59,6 @@ from moa.services.key_progress_service import KeyProgressService
 from moa.services.harem_search_service import HaremSearchService
 from moa.services.profile_projection_coordinator import ProfileProjectionCoordinator
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
-from moa.services.roll_analysis_service import RollAnalysisService
 from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
@@ -435,6 +435,12 @@ register_detect_command(
     console,
     lambda path, clipboard: _read_message_source(path, clipboard),
 )
+register_analyze_roll_command(
+    app,
+    console,
+    lambda path, clipboard: _read_message_source(path, clipboard),
+    lambda server, account: _resolve_account_context(server, account),
+)
 
 
 def _resolve_server_context(server: str | None) -> str:
@@ -512,45 +518,6 @@ def _format_catalog_keys(
 
 def _format_optional_rank(value: int | None) -> str:
     return "-" if value is None else f"#{value:,}"
-
-
-@app.command("analyze-roll")
-def analyze_roll(
-    server: str | None = typer.Option(None, "--server", "-s", help="Your label for the Mudae server."),
-    account: str | None = typer.Option(None, "--account", "-a", help="Account deciding what to do with this roll."),
-    path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae roll card."),
-    clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
-) -> None:
-    """Explain a copied roll using directly imported account context."""
-    server, account = _resolve_account_context(server, account)
-    try:
-        roll = MudaeTextParser().parse_roll(_read_message_source(path, clipboard))
-    except MudaeParseError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-    analysis = RollAnalysisService().analyze(roll, server, account)
-    table = Table(title=f"{analysis.character_name} - roll context")
-    table.add_column("Signal", style="green")
-    table.add_column("Imported/direct value")
-    table.add_row("Series", analysis.series)
-    table.add_row("Claim rank", _format_optional_rank(analysis.claim_rank))
-    table.add_row("This roll's Kakera", format_mudae_kakera(analysis.kakera_value))
-    if analysis.displayed_key_count is not None:
-        table.add_row(
-            "Displayed keys",
-            format_mudae_key_marker(
-                analysis.displayed_key_type, analysis.displayed_key_count
-            ),
-        )
-    table.add_row("Wishlist", analysis.wishlist_state)
-    table.add_row("Saved key state", analysis.keyed_harem_state)
-    table.add_row("Rollability", analysis.rollability_state)
-    table.add_row("Claim window", analysis.claim_window_state)
-    console.print(table)
-    console.print(
-        "[dim]This is factual roll context, not a claim/skip recommendation. "
-        "A missing keyed entry does not prove the character is unowned, and $tu state is not live.[/dim]"
-    )
 
 
 @import_app.command("auto")
