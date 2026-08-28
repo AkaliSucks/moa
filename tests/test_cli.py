@@ -7,6 +7,7 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 import moa.cli.import_workflow_commands as import_workflow_commands_module
+import moa.cli.catalog_operational_commands as catalog_operational_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
 import moa.parser.message_router as message_router_module
@@ -1091,6 +1092,165 @@ def test_catalog_snapshot_cli_boundary_and_late_bound_resolvers(monkeypatch) -> 
     ]
     assert "2026-07-12 23:45 UTC" in bonus_result.stdout
     assert "2026-07-12" in settings_result.stdout
+
+
+def test_catalog_operational_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    child_command = get_command(main.catalog_operational_app)
+    assert set(child_command.commands) == {
+        "imports",
+        "reactions",
+        "spheres",
+        "reaction-summary",
+        "rank-history",
+    }
+    expected_parameters = {
+        "imports": ("limit",),
+        "reactions": ("server", "account"),
+        "spheres": ("server", "account"),
+        "reaction-summary": ("server", "account"),
+        "rank-history": ("name", "series", "limit"),
+    }
+    for command, parameters in expected_parameters.items():
+        assert [parameter.name for parameter in child_command.commands[command].params] == list(parameters)
+
+    constructions: list[str] = []
+
+    def unexpected_constructor(_self, *args, **kwargs):
+        constructions.append("service")
+        raise AssertionError("catalog operational help must not construct services")
+
+    monkeypatch.setattr(
+        catalog_operational_commands_module.CatalogService,
+        "__init__",
+        unexpected_constructor,
+    )
+    runner = CliRunner()
+    for command in expected_parameters:
+        result = runner.invoke(main.app, ["catalog", command, "--help"])
+        assert result.exit_code == 0
+    assert constructions == []
+
+
+def test_catalog_operational_commands_preserve_resolution_order_and_rendering(monkeypatch) -> None:
+    events: list[object] = []
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+
+    def resolve_account(server, account):
+        events.append(("resolve", server, account))
+        return "Lake", "ernieuuu"
+
+    class RecordingCatalogService:
+        def __init__(self):
+            events.append("construct")
+
+        def kakera_reactions(self, server, account):
+            events.append(("reactions", server, account))
+            return (SimpleNamespace(observed_at=observed_at, reaction_label=":kakeraY:", kakera_earned=350),)
+
+        def sphere_result(self, server, account):
+            events.append(("spheres", server, account))
+            return SimpleNamespace(
+                snapshot=SimpleNamespace(
+                    gains=(
+                        SimpleNamespace(sphere_type="white", amount=12, is_free=True),
+                        SimpleNamespace(sphere_type="black", amount=3, is_free=False),
+                    ),
+                    total_gained=15,
+                    stock=None,
+                ),
+                observed_at=observed_at,
+            )
+
+        def kakera_reaction_summary(self, server, account):
+            events.append(("summary", server, account))
+            return SimpleNamespace(
+                receipt_count=2,
+                total_kakera_earned=600,
+                average_kakera_earned=300.0,
+                highest_kakera_earned=350,
+                by_reaction=((":kakeraY:", 2, 600),),
+            )
+
+        def rank_history(self, name, series, limit):
+            events.append(("history", name, series, limit))
+            return (
+                SimpleNamespace(observed_at=observed_at, claim_rank=1200, like_rank=None),
+            )
+
+    monkeypatch.setattr(main, "_resolve_account_context", resolve_account)
+    monkeypatch.setattr(catalog_operational_commands_module, "CatalogService", RecordingCatalogService)
+    runner = CliRunner()
+
+    reactions = runner.invoke(main.app, ["catalog", "reactions", "--server", "ignored", "--account", "ignored"])
+    spheres = runner.invoke(main.app, ["catalog", "spheres", "--server", "ignored", "--account", "ignored"])
+    summary = runner.invoke(main.app, ["catalog", "reaction-summary", "--server", "ignored", "--account", "ignored"])
+    history = runner.invoke(main.app, ["catalog", "rank-history", "Power", "--series", "Chainsaw Man", "--limit", "3"])
+
+    assert reactions.exit_code == spheres.exit_code == summary.exit_code == history.exit_code == 0
+    assert events == [
+        ("resolve", "ignored", "ignored"),
+        "construct",
+        ("reactions", "Lake", "ernieuuu"),
+        ("resolve", "ignored", "ignored"),
+        "construct",
+        ("spheres", "Lake", "ernieuuu"),
+        ("resolve", "ignored", "ignored"),
+        "construct",
+        ("summary", "Lake", "ernieuuu"),
+        "construct",
+        ("history", "Power", "Chainsaw Man", 3),
+    ]
+    assert "2026-07-12 23:45" in reactions.stdout
+    assert "Yes" in spheres.stdout and "No" in spheres.stdout
+    assert "Stock: unknown" in spheres.stdout
+    assert "2026-07-12 23:45 UTC" in spheres.stdout
+    assert "Receipts: 2" in summary.stdout
+    assert "#1,200" in history.stdout
+    assert "-" in history.stdout
+    assert "2026-07-12 23:45" in history.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments", "method", "value", "message"),
+    [
+        ("imports", (), "recent_imports", (), "No imports recorded yet."),
+        ("reactions", ("--server", "Lake", "--account", "ernieuuu"), "kakera_reactions", (), "No reaction receipts imported for this server/account yet."),
+        ("spheres", ("--server", "Lake", "--account", "ernieuuu"), "sphere_result", None, "No $oq sphere result imported for this server/account yet."),
+        ("reaction-summary", ("--server", "Lake", "--account", "ernieuuu"), "kakera_reaction_summary", SimpleNamespace(receipt_count=0), "No reaction receipts imported for this server/account yet."),
+        ("rank-history", ("Power", "--series", "Chainsaw Man"), "rank_history", (), "No rank observations imported for that character/series yet."),
+    ],
+)
+def test_catalog_operational_commands_keep_command_specific_empty_exits(
+    monkeypatch, command, arguments, method, value, message
+) -> None:
+    monkeypatch.setattr(main, "_resolve_account_context", lambda _server, _account: ("Lake", "ernieuuu"))
+    monkeypatch.setattr(
+        catalog_operational_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(**{method: lambda *_args: value}),
+    )
+
+    result = CliRunner().invoke(main.app, ["catalog", command, *arguments])
+
+    assert result.exit_code == 0
+    assert message in result.stdout
+
+
+def test_catalog_imports_preserves_red_value_error_boundary(monkeypatch) -> None:
+    def recent_imports(_self, _limit):
+        raise ValueError("invalid import limit")
+
+    monkeypatch.setattr(
+        catalog_operational_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(recent_imports=recent_imports),
+    )
+
+    result = CliRunner().invoke(main.app, ["catalog", "imports"])
+
+    assert result.exit_code == 1
+    assert "[red]invalid import limit[/red]" in result.stdout
+    assert "Traceback" not in result.stdout
 
 
 def test_catalog_towerstate_renders_middle_dot_separators(monkeypatch) -> None:
