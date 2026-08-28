@@ -7,6 +7,7 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 import moa.cli.import_workflow_commands as import_workflow_commands_module
+import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.parser.message_router as message_router_module
 import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
@@ -1743,6 +1744,145 @@ def test_account_overview_does_not_render_partial_kakeraloot_state_as_factual(
     assert "Quantity 5" not in result.stdout
 
 
+def test_catalog_search_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    root_command = get_command(main.app)
+    catalog_command = root_command.commands["catalog"]
+    expected_commands = {"top", "show", "harem", "keyfarm", "keyprogress", "key-gains"}
+    assert expected_commands <= set(catalog_command.commands)
+
+    expected_parameters = {
+        "top": ("limit", "server", "account", "series", "exact_series", "owned_only", "unowned_only", "keyed_only", "unavailable_only", "sort_by"),
+        "show": ("name", "series"),
+        "harem": ("server", "account", "series", "exact_series", "key_type", "min_keys", "max_keys", "min_kakera", "unresolved_only", "sort_by", "limit"),
+        "keyfarm": ("server", "account", "limit"),
+        "keyprogress": ("server", "account", "limit"),
+        "key-gains": ("server", "account", "limit"),
+    }
+    for command, parameters in expected_parameters.items():
+        assert [parameter.name for parameter in catalog_command.commands[command].params] == list(parameters)
+
+    constructions: list[str] = []
+
+    def unexpected_constructor(_self, *args, **kwargs):
+        constructions.append("service")
+        raise AssertionError("catalog search help must not construct services")
+
+    for service_class in (
+        catalog_search_commands_module.CatalogService,
+        catalog_search_commands_module.HaremSearchService,
+        catalog_search_commands_module.KeyProgressService,
+        catalog_search_commands_module.TopSearchService,
+    ):
+        monkeypatch.setattr(service_class, "__init__", unexpected_constructor)
+
+    runner = CliRunner()
+    for command in ("top", "show", "harem", "keyfarm", "keyprogress", "key-gains"):
+        result = runner.invoke(main.app, ["catalog", command, "--help"])
+        assert result.exit_code == 0
+    assert constructions == []
+
+
+def test_catalog_top_preserves_config_sequence_and_search_output(monkeypatch) -> None:
+    events: list[object] = []
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    entry = SimpleNamespace(
+        character=CatalogCharacter(id=1, name="Power", series="Chainsaw Man", gender=None, roulette=None),
+        claim_rank=7,
+        observed_at=observed_at,
+        owned=None,
+        owner_name=None,
+        owner_is_self=None,
+        topo_observed=None,
+        keyed=True,
+        key_type="gold",
+        key_count=7,
+        unavailable=False,
+        unavailable_reason=None,
+        rollability_status=None,
+        kakera_value=1448,
+        roulette_types=(),
+    )
+
+    class RecordingConfigService:
+        def __init__(self):
+            events.append("config")
+
+        def resolve_context(self, server, account):
+            events.append(("resolve", server, account))
+            return "Lake", "ernieuuu"
+
+        def owned_account_names(self, server):
+            events.append(("owned-accounts", server))
+            return ("ernieuuu",)
+
+    class RecordingTopSearchService:
+        def __init__(self):
+            events.append("top-service")
+
+        def search(self, **kwargs):
+            events.append(("search", kwargs["server_name"], kwargs["account_name"], kwargs["owned_account_names"]))
+            return (entry,)
+
+    monkeypatch.setattr(main, "ConfigService", RecordingConfigService)
+    monkeypatch.setattr(catalog_search_commands_module, "TopSearchService", RecordingTopSearchService)
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(main.app, ["catalog", "top", "--server", "ignored", "--account", "ignored"])
+
+    assert result.exit_code == 0
+    assert events == [
+        "config",
+        ("resolve", "ignored", "ignored"),
+        ("owned-accounts", "Lake"),
+        "top-service",
+        ("search", "Lake", "ernieuuu", ("ernieuuu",)),
+    ]
+    assert "Imported Character Catalog Search" in result.stdout
+    assert "Power" in result.stdout
+    assert ":goldkey: (7)" in result.stdout
+
+
+def test_catalog_account_search_commands_use_late_bound_resolver(monkeypatch) -> None:
+    events: list[object] = []
+
+    def patched_resolver(server, account):
+        events.append(("resolve", server, account))
+        return "Lake", "ernieuuu"
+
+    monkeypatch.setattr(main, "_resolve_account_context", patched_resolver)
+    monkeypatch.setattr(catalog_search_commands_module.CatalogService, "__init__", lambda _self: None)
+    monkeypatch.setattr(catalog_search_commands_module.HaremSearchService, "__init__", lambda _self: None)
+    monkeypatch.setattr(catalog_search_commands_module.KeyProgressService, "__init__", lambda _self: None)
+    monkeypatch.setattr(
+        catalog_search_commands_module.HaremSearchService,
+        "search",
+        lambda _self, *_args, **_kwargs: events.append("harem-search") or (),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module.KeyProgressService,
+        "progress",
+        lambda _self, *_args: events.append("key-progress") or (),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module.CatalogService,
+        "recent_key_gains",
+        lambda _self, *_args: events.append("key-gains") or (),
+    )
+
+    runner = CliRunner()
+    for command in ("harem", "keyprogress", "key-gains"):
+        result = runner.invoke(main.app, ["catalog", command, "--server", "ignored", "--account", "ignored"])
+        assert result.exit_code == 0
+    assert events == [
+        ("resolve", "ignored", "ignored"),
+        "harem-search",
+        ("resolve", "ignored", "ignored"),
+        "key-progress",
+        ("resolve", "ignored", "ignored"),
+        "key-gains",
+    ]
+
+
 def test_catalog_top_displays_unavailable_reasons() -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     entries = (
@@ -1774,15 +1914,15 @@ def test_catalog_top_displays_unavailable_reasons() -> None:
         ),
     )
 
-    assert main._format_rollability(entries[0].unavailable, entries[0].unavailable_reason) == (
+    assert catalog_search_commands_module._format_rollability(entries[0].unavailable, entries[0].unavailable_reason) == (
         "Unavailable ($togglewestern)"
     )
-    assert main._format_rollability(entries[1].unavailable, entries[1].unavailable_reason) == (
+    assert catalog_search_commands_module._format_rollability(entries[1].unavailable, entries[1].unavailable_reason) == (
         "Unavailable (disabled)"
     )
-    assert main._format_rollability(False, None, "ernieuuu", True) == "Claimed"
-    assert main._format_rollability(False, None, status="Wishlist") == "Wishlist"
-    assert main._format_rollability(False, None) == "Not observed unavailable"
+    assert catalog_search_commands_module._format_rollability(False, None, "ernieuuu", True) == "Claimed"
+    assert catalog_search_commands_module._format_rollability(False, None, status="Wishlist") == "Wishlist"
+    assert catalog_search_commands_module._format_rollability(False, None) == "Not observed unavailable"
 
 
 def test_catalog_top_renders_unknown_roulette_distinct_from_observed_empty(
@@ -1826,7 +1966,7 @@ def test_catalog_top_renders_unknown_roulette_distinct_from_observed_empty(
         ),
     )
     monkeypatch.setattr(
-        main,
+        catalog_search_commands_module,
         "TopSearchService",
         lambda: SimpleNamespace(search=lambda **_kwargs: entries),
     )
@@ -1838,8 +1978,8 @@ def test_catalog_top_renders_unknown_roulette_distinct_from_observed_empty(
     assert "Unknown Roulette" in result.stdout
     assert "Unknown" in result.stdout
     assert "Observed Empty" in result.stdout
-    assert main.format_mudae_roulette_types(None) == "Unknown"
-    assert main.format_mudae_roulette_types(()) == "-"
+    assert catalog_search_commands_module.format_mudae_roulette_types(None) == "Unknown"
+    assert catalog_search_commands_module.format_mudae_roulette_types(()) == "-"
 
 
 def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
@@ -3472,10 +3612,10 @@ def test_import_scan_linked_callbacks_preserve_current_value_error_boundaries(
 
 
 def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
-    assert main._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
-    assert main._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"
-    assert main._format_catalog_keys(False, None, None) == "-"
-    assert main._format_catalog_keys(None, None, None) == "Not requested"
+    assert catalog_search_commands_module._format_catalog_keys(True, "gold", 7) == ":goldkey: (7)"
+    assert catalog_search_commands_module._format_catalog_keys(True, "Gold Key", 7) == ":goldkey: (7)"
+    assert catalog_search_commands_module._format_catalog_keys(False, None, None) == "-"
+    assert catalog_search_commands_module._format_catalog_keys(None, None, None) == "Not requested"
 
 
 def test_catalog_reset_requires_confirmation_and_backs_up_database(monkeypatch, tmp_path) -> None:
@@ -3621,15 +3761,15 @@ def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> No
 
 
 def test_catalog_ownership_display_distinguishes_topo_claims_from_harem_evidence() -> None:
-    assert main._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
+    assert catalog_search_commands_module._format_catalog_ownership(None, "cute_beagle_91130", True, True) == (
         "Claimed 💞 => cute_beagle_91130"
     )
-    assert main._format_catalog_ownership(None, "xuppii", False, True) == (
+    assert catalog_search_commands_module._format_catalog_ownership(None, "xuppii", False, True) == (
         "Claimed 💞 => xuppii"
     )
-    assert main._format_catalog_ownership(True, None, None, False) == "Claimed"
-    assert main._format_catalog_ownership(False, None, None, True) == "Unclaimed"
-    assert main._format_catalog_ownership(None, None, None, False) == "(no data)"
+    assert catalog_search_commands_module._format_catalog_ownership(True, None, None, False) == "Claimed"
+    assert catalog_search_commands_module._format_catalog_ownership(False, None, None, True) == "Unclaimed"
+    assert catalog_search_commands_module._format_catalog_ownership(None, None, None, False) == "(no data)"
 
 
 def test_config_commands_manage_active_server_account_context(monkeypatch, tmp_path) -> None:
