@@ -9,6 +9,14 @@ from moa.services.automatic_import_service import AutomaticImportService
 from moa.services.catalog_service import CatalogService
 from moa.services.harem_import_dispatch import HaremImportDispatcher, require_harem_import
 
+_AUTO_PATH_ARGUMENT = typer.Argument(None, help="Text file containing one copied Mudae response.")
+_TOP_PATH_ARGUMENT = typer.Argument(None, help="Text file containing one copied Mudae $top page.")
+_MM_PATH_ARGUMENT = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page.")
+_MMR_PATH_ARGUMENT = typer.Argument(
+    None, help="Text file containing one copied Mudae $mmr/$mmrk/$mmrt page."
+)
+_ADL_PATH_ARGUMENT = typer.Argument(None, help="Text file containing one copied Mudae $adl page.")
+
 
 def register_import_workflow_commands(
     import_app: typer.Typer,
@@ -26,7 +34,7 @@ def register_import_workflow_commands(
         scan: int | None = typer.Option(
             None, "--scan", help="Optional harem or antidisable scan ID for a multi-page import."
         ),
-        path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae response."),
+        path: Path | None = _AUTO_PATH_ARGUMENT,
         clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
     ) -> None:
         """Detect and import one supported Mudae response using the existing import rules."""
@@ -52,7 +60,7 @@ def register_import_workflow_commands(
             "-s",
             help="Server where `$topo` owner claims were observed.",
         ),
-        path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $top page."),
+        path: Path | None = _TOP_PATH_ARGUMENT,
         clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
     ) -> None:
         """Parse and persist a `$top` or `$topo` page as a timestamped local rank snapshot."""
@@ -82,7 +90,7 @@ def register_import_workflow_commands(
         scan: int | None = typer.Option(
             None, "--scan", help="Optional active harem scan ID created by `moa harem begin`."
         ),
-        path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmy= page."),
+        path: Path | None = _MM_PATH_ARGUMENT,
         clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
     ) -> None:
         """Parse and persist one `$mmy=` or `$mmyk=` page for a server/account harem."""
@@ -114,7 +122,7 @@ def register_import_workflow_commands(
         scan: int | None = typer.Option(
             None, "--scan", help="Optional owned-harem scan ID created by `moa harem begin --kind owned`."
         ),
-        path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $mmr/$mmrk/$mmrt page."),
+        path: Path | None = _MMR_PATH_ARGUMENT,
         clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
     ) -> None:
         """Parse and persist one ranked `$mmr`/`$mmrk`/`$mmrt` owned-harem page."""
@@ -150,7 +158,7 @@ def register_import_workflow_commands(
         scan: int | None = typer.Option(
             None, "--scan", help="Optional complete ADL scan ID created by `moa adl begin`."
         ),
-        path: Path | None = typer.Argument(None, help="Text file containing one copied Mudae $adl page."),
+        path: Path | None = _ADL_PATH_ARGUMENT,
         clipboard: bool = typer.Option(False, "--clipboard", "-c", help="Read copied Discord text."),
     ) -> None:
         """Parse and persist one `$adl` series-list page."""
