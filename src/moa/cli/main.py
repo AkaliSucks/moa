@@ -1,7 +1,6 @@
 from datetime import datetime
 import logging
 import shutil
-import sqlite3
 from pathlib import Path
 
 import typer
@@ -15,6 +14,7 @@ from moa.core.config import ConfigService
 from moa.cli.badge_commands import build_badge_app
 from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
+from moa.cli.data_health_commands import build_data_health_app
 from moa.cli.key_commands import build_key_app
 from moa.cli.loot_commands import build_loot_app
 from moa.cli.harem_commands import build_harem_app
@@ -29,10 +29,6 @@ from moa.database.legacy_database_relocation import (
     relocate_database,
 )
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
-from moa.models.retention import RetentionExpiryResult
-from moa.repositories.data_health_repository import DataHealthSchemaError
-from moa.repositories.retention_eligibility_repository import RetentionEligibilityDataError
-from moa.repositories.retention_expiry_repository import RetentionExpiryError
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.repositories.catalog_repository import (
@@ -51,9 +47,6 @@ from moa.services.discord_listener_service import (
     DiscordListenerService,
 )
 from moa.services.disablelist_projection_coordinator import DisableListProjectionCoordinator
-from moa.services.data_health_service import DataHealthService
-from moa.services.retention_eligibility_service import RetentionEligibilityService
-from moa.services.retention_expiry_service import RetentionExpiryService
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
 from moa.services.kakeraloot_state_projection_coordinator import KakeralootStateProjectionCoordinator
@@ -83,7 +76,6 @@ from moa.utils.display import (
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
-data_health_app = typer.Typer(help="Report read-only local catalog health findings")
 discord_app = typer.Typer(help="Listen for Mudae messages through a Discord bot")
 console = Console()
 
@@ -124,6 +116,10 @@ adl_app = build_adl_app(console)
 parse_app = build_parse_app(
     console,
     lambda path, clipboard: _read_message_source(path, clipboard),
+)
+data_health_app = build_data_health_app(
+    console,
+    lambda: DEFAULT_DATABASE_PATH,
 )
 
 app.add_typer(tower_app, name="tower")
@@ -1032,244 +1028,6 @@ def import_settings(
         f"[green]Imported {len(settings.metrics)} server settings for {result.server_name}.[/green] "
         f"Gamemode [cyan]{settings.game_mode}[/cyan] | rolls/hour [cyan]{settings.rolls_per_hour}[/cyan]."
     )
-
-
-@data_health_app.command("orphans")
-def catalog_data_health_orphans() -> None:
-    """Report physical and audited logical orphan findings without repairs."""
-    try:
-        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_orphans()
-    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-
-    if not findings:
-        console.print("No data-health findings.")
-        return
-
-    table = Table(title="Data-health orphan findings")
-    table.add_column("Check ID", style="cyan")
-    table.add_column("Category")
-    table.add_column("Entity", style="green")
-    table.add_column("Local identifier")
-    table.add_column("Reason")
-    for finding in findings:
-        table.add_row(
-            finding.check_id,
-            finding.category,
-            finding.entity,
-            str(finding.local_identifier),
-            finding.reason,
-        )
-    console.print(table)
-    console.print(f"Total findings: {len(findings)}")
-
-
-@data_health_app.command("impossible-identities")
-def catalog_data_health_impossible_identities() -> None:
-    """Report impossible identity findings without repairs."""
-    try:
-        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_impossible_identities()
-    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-
-    if not findings:
-        console.print("No data-health findings.")
-        return
-
-    table = Table(title="Data-health impossible identity findings")
-    table.add_column("Check ID", style="cyan")
-    table.add_column("Category")
-    table.add_column("Entity", style="green")
-    table.add_column("Local identifier")
-    table.add_column("Reason")
-    for finding in findings:
-        table.add_row(
-            finding.check_id,
-            finding.category,
-            finding.entity,
-            str(finding.local_identifier),
-            finding.reason,
-        )
-    console.print(table)
-    console.print(f"Total findings: {len(findings)}")
-
-
-@data_health_app.command("duplicates")
-def catalog_data_health_duplicates() -> None:
-    """Report duplicate durable business identities without repairs."""
-    try:
-        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_duplicates()
-    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-
-    if not findings:
-        console.print("No data-health findings.")
-        return
-
-    table = Table(title="Data-health duplicate findings")
-    table.add_column("Check ID", style="cyan")
-    table.add_column("Category")
-    table.add_column("Entity", style="green")
-    table.add_column("Local identifier")
-    table.add_column("Reason")
-    for finding in findings:
-        table.add_row(
-            finding.check_id,
-            finding.category,
-            finding.entity,
-            str(finding.local_identifier),
-            finding.reason,
-        )
-    console.print(table)
-    console.print(f"Total findings: {len(findings)}")
-
-
-@data_health_app.command("projection-gaps")
-def catalog_data_health_projection_gaps() -> None:
-    """Report completed projection links owned by non-succeeded source events."""
-    try:
-        findings = DataHealthService(Path(DEFAULT_DATABASE_PATH)).find_projection_gaps()
-    except (DataHealthSchemaError, OSError, ValueError, sqlite3.Error) as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
-
-    if not findings:
-        console.print("No data-health findings.")
-        return
-
-    table = Table(title="Data-health projection-gap findings")
-    table.add_column("Check ID", style="cyan")
-    table.add_column("Category")
-    table.add_column("Entity", style="green")
-    table.add_column("Local identifier")
-    table.add_column("Reason")
-    for finding in findings:
-        table.add_row(
-            finding.check_id,
-            finding.category,
-            finding.entity,
-            str(finding.local_identifier),
-            finding.reason,
-        )
-    console.print(table)
-    console.print(f"Total findings: {len(findings)}")
-
-
-@data_health_app.command("retention")
-def catalog_data_health_retention(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help=(
-            "Intentionally remove eligible raw evidence. Historical raw repair/reparse may "
-            "become unavailable; this does not guarantee forensic secure erasure."
-        ),
-    ),
-) -> None:
-    """Report retention eligibility, or explicitly apply logical evidence expiry."""
-    if apply:
-        try:
-            result = RetentionExpiryService(Path(DEFAULT_DATABASE_PATH)).apply()
-        except (
-            DataHealthSchemaError,
-            RetentionEligibilityDataError,
-            RetentionExpiryError,
-            OSError,
-            ValueError,
-            TypeError,
-            sqlite3.Error,
-        ):
-            console.print(
-                "[red]Unable to apply raw-evidence retention expiry; "
-                "no success is claimed.[/red]"
-            )
-            raise typer.Exit(1) from None
-
-        try:
-            _render_retention_expiry_result(result)
-        except Exception:
-            typer.echo(
-                "Retention expiry committed, but presentation failed; do not re-run automatically.",
-                err=True,
-            )
-            raise typer.Exit(1) from None
-        return
-
-    try:
-        report = RetentionEligibilityService(Path(DEFAULT_DATABASE_PATH)).report()
-    except (
-        DataHealthSchemaError,
-        RetentionEligibilityDataError,
-        OSError,
-        ValueError,
-        TypeError,
-        sqlite3.Error,
-    ):
-        console.print("[red]Unable to generate the retention eligibility report.[/red]")
-        raise typer.Exit(1) from None
-
-    console.print(
-        f"[bold cyan]Retention eligibility[/bold cyan] — as of {report.as_of.isoformat()} "
-        f"(cutoff {report.cutoff.isoformat()})"
-    )
-    table = Table()
-    table.add_column("Category", style="cyan")
-    table.add_column("Eligible", justify="right")
-    table.add_column("Retained/blocked", justify="right")
-    table.add_column("Already expired", justify="right")
-    table.add_column("Absent", justify="right")
-    table.add_column("Oldest eligible anchor")
-    table.add_column("Newest eligible anchor")
-    table.add_column("Blocked reasons")
-    for category in report.categories:
-        reasons = ", ".join(f"{reason}={count}" for reason, count in category.blocked_reason_counts)
-        table.add_row(
-            category.category,
-            str(category.eligible_count),
-            str(category.retained_blocked_count),
-            str(category.already_expired_count),
-            str(category.absent_count),
-            category.oldest_eligible_anchor.isoformat()
-            if category.oldest_eligible_anchor is not None
-            else "-",
-            category.newest_eligible_anchor.isoformat()
-            if category.newest_eligible_anchor is not None
-            else "-",
-            reasons or "-",
-        )
-    console.print(table)
-
-
-def _render_retention_expiry_result(result: RetentionExpiryResult) -> None:
-    console.print(
-        f"[bold cyan]Retention expiry applied[/bold cyan] — committed at "
-        f"{result.apply_as_of.isoformat()} (cutoff {result.cutoff.isoformat()})"
-    )
-    table = Table()
-    table.add_column("Category", style="cyan")
-    table.add_column("Recomputed eligible", justify="right")
-    table.add_column("Expired", justify="right")
-    table.add_column("Retained/blocked", justify="right")
-    table.add_column("Already expired", justify="right")
-    table.add_column("Absent", justify="right")
-    table.add_column("Blocked reasons")
-    for category in result.categories:
-        reasons = ", ".join(
-            f"{reason}={count}" for reason, count in category.blocked_reason_counts
-        )
-        table.add_row(
-            category.category,
-            str(category.recomputed_eligible_count),
-            str(category.expired_count),
-            str(category.retained_blocked_count),
-            str(category.already_expired_count),
-            str(category.absent_count),
-            reasons or "-",
-        )
-    console.print(table)
 
 
 @catalog_app.command("top")
