@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 import moa.cli.import_workflow_commands as import_workflow_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
+import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
 import moa.parser.message_router as message_router_module
 import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
@@ -1018,6 +1019,80 @@ def test_parse_cli_parser_error_is_stable_and_callback_time(monkeypatch) -> None
     assert parser_calls == ["malformed response"]
 
 
+def test_catalog_snapshot_cli_boundary_and_late_bound_resolvers(monkeypatch) -> None:
+    root_command = get_command(main.app)
+    catalog_commands = root_command.commands["catalog"].commands
+    assert {
+        "bonus",
+        "wishlist",
+        "disablelist",
+        "unavailable",
+        "kakera",
+        "towerstate",
+        "timers",
+        "lootstate",
+        "infokl",
+        "settings",
+    } <= set(catalog_commands)
+
+    events: list[object] = []
+
+    def resolve_account(server, account):
+        events.append(("account-resolve", server, account))
+        return "Lake", "ernieuuu"
+
+    def resolve_server(server):
+        events.append(("server-resolve", server))
+        return "Lake"
+
+    class RecordingCatalogService:
+        def __init__(self):
+            events.append("catalog-construct")
+
+        def player_bonus(self, server, account):
+            events.append(("bonus-read", server, account))
+            return SimpleNamespace(
+                account_name=account,
+                metrics=(),
+                observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+            )
+
+        def server_settings(self, server):
+            events.append(("settings-read", server))
+            return SimpleNamespace(
+                server_name=server,
+                metrics=(),
+                game_mode=1,
+                rolls_per_hour=10,
+                claim_reset_minutes=45,
+                observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+            )
+
+    monkeypatch.setattr(main, "_resolve_account_context", resolve_account)
+    monkeypatch.setattr(main, "_resolve_server_context", resolve_server)
+    monkeypatch.setattr(catalog_snapshot_commands_module, "CatalogService", RecordingCatalogService)
+
+    runner = CliRunner()
+    bonus_result = runner.invoke(
+        main.app,
+        ["catalog", "bonus", "--server", "ignored", "--account", "ignored"],
+    )
+    settings_result = runner.invoke(main.app, ["catalog", "settings", "--server", "ignored"])
+
+    assert bonus_result.exit_code == 0
+    assert settings_result.exit_code == 0
+    assert events == [
+        ("account-resolve", "ignored", "ignored"),
+        "catalog-construct",
+        ("bonus-read", "Lake", "ernieuuu"),
+        ("server-resolve", "ignored"),
+        "catalog-construct",
+        ("settings-read", "Lake"),
+    ]
+    assert "2026-07-12 23:45 UTC" in bonus_result.stdout
+    assert "2026-07-12" in settings_result.stdout
+
+
 def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
     monkeypatch,
 ) -> None:
@@ -1042,7 +1117,7 @@ def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
         observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
     )
     monkeypatch.setattr(
-        main,
+        catalog_snapshot_commands_module,
         "CatalogService",
         lambda: SimpleNamespace(kakeraloot_state=lambda *_: state),
     )
@@ -1080,7 +1155,7 @@ def test_catalog_disablelist_renders_toggle_presence_without_inventing_false(
         entries=(),
     )
     monkeypatch.setattr(
-        main,
+        catalog_snapshot_commands_module,
         "CatalogService",
         lambda: SimpleNamespace(disablelist=lambda *_: disablelist),
     )
@@ -1093,7 +1168,7 @@ def test_catalog_disablelist_renders_toggle_presence_without_inventing_false(
     assert result.exit_code == 0
     assert f"Western disabled: {rendered}" in result.stdout
     assert f"IRL disabled: {rendered}" in result.stdout
-    assert main._format_observed_toggle(value) == rendered
+    assert catalog_snapshot_commands_module._format_observed_toggle(value) == rendered
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
