@@ -6,6 +6,7 @@ import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
 
+import moa.parser.message_router as message_router_module
 import moa.parser.mudae as mudae_parser_module
 import moa.services.account_comparison_service as account_comparison_service_module
 import moa.services.account_overview_service as account_overview_service_module
@@ -546,6 +547,94 @@ def test_parse_lootstate_renders_missing_optional_values_without_zero_or_crash(
     assert "Rolls stacked: -" in result.stdout
     assert "Wishprotect: -" in result.stdout
     assert "Permanent rolls: -" in result.stdout
+
+
+def test_detect_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    root_command = get_command(main.app)
+    detect_command = root_command.commands["detect"]
+
+    assert [parameter.name for parameter in detect_command.params] == ["path", "clipboard"]
+    path_parameter, clipboard_parameter = detect_command.params
+    assert path_parameter.required is False
+    assert path_parameter.default is None
+    assert path_parameter.type.name == "path"
+    assert tuple(clipboard_parameter.opts) == ("--clipboard", "-c")
+    assert clipboard_parameter.default is False
+    assert clipboard_parameter.required is False
+
+    events: list[str] = []
+
+    def unexpected_source(path, clipboard):
+        events.append("source")
+        raise AssertionError("Detect help must not read a source")
+
+    def unexpected_router_init(self, *args, **kwargs):
+        events.append("router")
+        raise AssertionError("Detect help must not construct a router")
+
+    monkeypatch.setattr(main, "_read_message_source", unexpected_source)
+    monkeypatch.setattr(message_router_module.MudaeMessageRouter, "__init__", unexpected_router_init)
+
+    result = CliRunner().invoke(main.app, ["detect", "--help"])
+
+    assert result.exit_code == 0
+    assert "Text file containing one copied Mudae response." in result.stdout
+    assert "--clipboard" in result.stdout
+    assert "-c" in result.stdout
+    assert events == []
+
+
+def test_detect_cli_source_routing_late_bound_router_and_rendering(monkeypatch, tmp_path) -> None:
+    events: list[object] = []
+    original_source = main._read_message_source
+
+    def patched_source(path, clipboard):
+        events.append(("source", path, clipboard))
+        return "unknown message" if clipboard else "known message"
+
+    def recording_router_init(self, *args, **kwargs):
+        events.append("router")
+
+    def recording_detect(self, text):
+        events.append(("detect", text))
+        if text == "known message":
+            return SimpleNamespace(kind="timers", reason="timer reason")
+        return SimpleNamespace(kind="unknown", reason="unknown reason")
+
+    # main.app already exists before this post-construction patch.
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(message_router_module.MudaeMessageRouter, "__init__", recording_router_init)
+    monkeypatch.setattr(message_router_module.MudaeMessageRouter, "detect", recording_detect)
+
+    path = tmp_path / "response.txt"
+    file_result = CliRunner().invoke(main.app, ["detect", str(path)])
+    clipboard_result = CliRunner().invoke(main.app, ["detect", "-c"])
+
+    assert file_result.exit_code == 0
+    assert clipboard_result.exit_code == 0
+    assert events == [
+        "router",
+        ("source", path, False),
+        ("detect", "known message"),
+        "router",
+        ("source", None, True),
+        ("detect", "unknown message"),
+    ]
+    assert "Detected: timers" in file_result.stdout
+    assert "timer reason" in file_result.stdout
+    assert "Detected: unknown" in clipboard_result.stdout
+    assert "unknown reason" in clipboard_result.stdout
+
+    events.clear()
+    monkeypatch.setattr(main, "_read_message_source", original_source)
+    conflict = CliRunner().invoke(main.app, ["detect", str(path), "--clipboard"])
+    missing = CliRunner().invoke(main.app, ["detect"])
+
+    assert conflict.exit_code == 1
+    assert "either a file path or --clipboard" in conflict.stdout
+    assert missing.exit_code == 1
+    assert "Provide a text-file path or use --clipboard" in missing.stdout
+    assert events == ["router", "router"]
 
 
 def test_parse_cli_registration_and_help_are_lazy(monkeypatch) -> None:
