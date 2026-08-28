@@ -19,6 +19,7 @@ import moa.services.loot_service as loot_service_module
 import moa.services.progress_service as progress_service_module
 import moa.services.retention_eligibility_service as retention_eligibility_service_module
 import moa.services.retention_expiry_service as retention_expiry_service_module
+import moa.services.roll_analysis_service as roll_analysis_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
@@ -635,6 +636,265 @@ def test_detect_cli_source_routing_late_bound_router_and_rendering(monkeypatch, 
     assert missing.exit_code == 1
     assert "Provide a text-file path or use --clipboard" in missing.stdout
     assert events == ["router", "router"]
+
+
+def test_analyze_roll_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
+    root_command = get_command(main.app)
+    analyze_roll_command = root_command.commands["analyze-roll"]
+
+    assert [parameter.name for parameter in analyze_roll_command.params] == [
+        "server",
+        "account",
+        "path",
+        "clipboard",
+    ]
+    server_parameter, account_parameter, path_parameter, clipboard_parameter = (
+        analyze_roll_command.params
+    )
+    for parameter, options in (
+        (server_parameter, ("--server", "-s")),
+        (account_parameter, ("--account", "-a")),
+    ):
+        assert parameter.type.name == "str"
+        assert parameter.default is None
+        assert parameter.required is False
+        assert tuple(parameter.opts) == options
+    assert path_parameter.type.name == "path"
+    assert path_parameter.default is None
+    assert path_parameter.required is False
+    assert tuple(path_parameter.opts) == ("path",)
+    assert clipboard_parameter.type.name == "boolean"
+    assert clipboard_parameter.default is False
+    assert clipboard_parameter.required is False
+    assert tuple(clipboard_parameter.opts) == ("--clipboard", "-c")
+    assert clipboard_parameter.is_flag is True
+
+    events: list[str] = []
+
+    def unexpected_resolver(server, account):
+        events.append("resolver")
+        raise AssertionError("Analyze-roll help must not resolve account context")
+
+    def unexpected_source(path, clipboard):
+        events.append("source")
+        raise AssertionError("Analyze-roll help must not read a source")
+
+    def unexpected_parser_init(self, *args, **kwargs):
+        events.append("parser")
+        raise AssertionError("Analyze-roll help must not construct a parser")
+
+    def unexpected_parse(self, text):
+        events.append("parse")
+        raise AssertionError("Analyze-roll help must not parse a roll")
+
+    def unexpected_service_init(self, *args, **kwargs):
+        events.append("service")
+        raise AssertionError("Analyze-roll help must not construct an analysis service")
+
+    def unexpected_analyze(self, *args, **kwargs):
+        events.append("analyze")
+        raise AssertionError("Analyze-roll help must not analyze a roll")
+
+    monkeypatch.setattr(main, "_resolve_account_context", unexpected_resolver)
+    monkeypatch.setattr(main, "_read_message_source", unexpected_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", unexpected_parser_init)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_roll", unexpected_parse)
+    monkeypatch.setattr(
+        roll_analysis_service_module.RollAnalysisService,
+        "__init__",
+        unexpected_service_init,
+    )
+    monkeypatch.setattr(
+        roll_analysis_service_module.RollAnalysisService,
+        "analyze",
+        unexpected_analyze,
+    )
+
+    result = CliRunner().invoke(main.app, ["analyze-roll", "--help"])
+
+    assert result.exit_code == 0
+    assert "analyze-roll" in result.stdout
+    assert "Text file containing one copied Mudae roll card." in result.stdout
+    assert "--server" in result.stdout
+    assert "-s" in result.stdout
+    assert "--account" in result.stdout
+    assert "-a" in result.stdout
+    assert "--clipboard" in result.stdout
+    assert "-c" in result.stdout
+    assert events == []
+
+
+def test_analyze_roll_cli_success_preserves_late_bound_seams_and_order(monkeypatch) -> None:
+    events: list[object] = []
+    parsed_roll = SimpleNamespace(name="Power", series="Chainsaw Man")
+    analysis = SimpleNamespace(
+        character_name="Power",
+        series="Chainsaw Man",
+        claim_rank=7,
+        kakera_value=1448,
+        displayed_key_type=None,
+        displayed_key_count=None,
+        wishlist_state="Not wished",
+        keyed_harem_state="No saved key record imported",
+        rollability_state="Observed rolling now (available at import time)",
+        claim_window_state="No imported claim-window state",
+    )
+
+    def patched_resolver(server, account):
+        events.append(("resolver", server, account))
+        return "Lake", "ernieuuu"
+
+    def patched_source(path, clipboard):
+        events.append(("source", path, clipboard))
+        return "copied roll"
+
+    def recording_parser_init(self, *args, **kwargs):
+        events.append("parser")
+
+    def recording_parse(self, text):
+        events.append(("parse", text))
+        return parsed_roll
+
+    def recording_service_init(self, *args, **kwargs):
+        events.append("service")
+
+    def recording_analyze(self, roll, server, account):
+        events.append(("analyze", roll, server, account))
+        return analysis
+
+    # main.app already exists before these post-construction patches.
+    monkeypatch.setattr(main, "_resolve_account_context", patched_resolver)
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", recording_parser_init)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_roll", recording_parse)
+    monkeypatch.setattr(
+        roll_analysis_service_module.RollAnalysisService,
+        "__init__",
+        recording_service_init,
+    )
+    monkeypatch.setattr(
+        roll_analysis_service_module.RollAnalysisService,
+        "analyze",
+        recording_analyze,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["analyze-roll", "--server", "ignored", "--account", "ignored", "--clipboard"],
+    )
+
+    assert result.exit_code == 0
+    assert events == [
+        ("resolver", "ignored", "ignored"),
+        "parser",
+        ("source", None, True),
+        ("parse", "copied roll"),
+        "service",
+        ("analyze", parsed_roll, "Lake", "ernieuuu"),
+    ]
+    assert "Power - roll context" in result.stdout
+    assert "Series" in result.stdout
+    assert "Chainsaw Man" in result.stdout
+    assert "Wishlist" in result.stdout
+    assert "Not wished" in result.stdout
+    assert "Saved key state" in result.stdout
+    assert "No saved key record imported" in result.stdout
+    assert "Claim window" in result.stdout
+    assert "No imported claim-window state" in result.stdout
+    assert "This is factual roll context, not a claim/skip recommendation." in result.stdout
+    assert result.stdout.lower().count("recommendation") == 1
+
+
+def test_analyze_roll_cli_failures_preserve_sequencing_and_errors(monkeypatch) -> None:
+    events: list[object] = []
+
+    def failing_resolver(self, server, account):
+        events.append(("resolver", server, account))
+        raise ValueError("invalid account context")
+
+    def recording_resolver(server, account):
+        events.append(("resolver", server, account))
+        return "Lake", "ernieuuu"
+
+    def recording_parser_init(self, *args, **kwargs):
+        events.append("parser")
+
+    def unexpected_parse(self, text):
+        events.append(("parse", text))
+        raise AssertionError("parse_roll must not run after source selection failure")
+
+    def unexpected_service_init(self, *args, **kwargs):
+        events.append("service")
+        raise AssertionError("RollAnalysisService must not construct after an earlier failure")
+
+    original_resolve_context = main.ConfigService.resolve_context
+    monkeypatch.setattr(main.ConfigService, "resolve_context", failing_resolver)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "__init__", recording_parser_init)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_roll", unexpected_parse)
+    monkeypatch.setattr(
+        roll_analysis_service_module.RollAnalysisService,
+        "__init__",
+        unexpected_service_init,
+    )
+
+    resolver_failure = CliRunner().invoke(
+        main.app,
+        ["analyze-roll", "--server", "Lake", "--account", "ernieuuu", "--clipboard"],
+    )
+
+    assert resolver_failure.exit_code == 1
+    assert "invalid account context" in resolver_failure.stdout
+    assert "Traceback" not in resolver_failure.stdout
+    assert events == [("resolver", "Lake", "ernieuuu")]
+
+    monkeypatch.setattr(main.ConfigService, "resolve_context", original_resolve_context)
+    monkeypatch.setattr(main, "_resolve_account_context", recording_resolver)
+
+    events.clear()
+    conflict = CliRunner().invoke(
+        main.app,
+        ["analyze-roll", "response.txt", "--clipboard"],
+    )
+    missing = CliRunner().invoke(main.app, ["analyze-roll"])
+
+    assert conflict.exit_code == 1
+    assert "Use either a file path or --clipboard, not both." in conflict.stdout
+    assert "Traceback" not in conflict.stdout
+    assert missing.exit_code == 1
+    assert "Provide a text-file path or use --clipboard." in missing.stdout
+    assert "Traceback" not in missing.stdout
+    assert events == [
+        ("resolver", None, None),
+        "parser",
+        ("resolver", None, None),
+        "parser",
+    ]
+
+    events.clear()
+
+    def patched_source(path, clipboard):
+        events.append(("source", path, clipboard))
+        return "malformed roll"
+
+    def failing_parse(self, text):
+        events.append(("parse", text))
+        raise mudae_parser_module.MudaeParseError("malformed roll")
+
+    monkeypatch.setattr(main, "_read_message_source", patched_source)
+    monkeypatch.setattr(mudae_parser_module.MudaeTextParser, "parse_roll", failing_parse)
+
+    parse_failure = CliRunner().invoke(main.app, ["analyze-roll", "--clipboard"])
+
+    assert parse_failure.exit_code == 1
+    assert parse_failure.stdout.count("malformed roll") == 1
+    assert "Traceback" not in parse_failure.stdout
+    assert "roll context" not in parse_failure.stdout
+    assert events == [
+        ("resolver", None, None),
+        "parser",
+        ("source", None, True),
+        ("parse", "malformed roll"),
+    ]
 
 
 def test_parse_cli_registration_and_help_are_lazy(monkeypatch) -> None:
