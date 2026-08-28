@@ -3,12 +3,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import typer
+from rich.console import Console
 from typer.main import get_command
 from typer.testing import CliRunner
 
 import moa.cli.import_workflow_commands as import_workflow_commands_module
 import moa.cli.catalog_delete_import_commands as catalog_delete_import_commands_module
 import moa.cli.catalog_operational_commands as catalog_operational_commands_module
+import moa.cli.catalog_reset_commands as catalog_reset_commands_module
 import moa.cli.catalog_search_commands as catalog_search_commands_module
 import moa.cli.catalog_snapshot_commands as catalog_snapshot_commands_module
 import moa.parser.message_router as message_router_module
@@ -3880,20 +3883,115 @@ def test_catalog_keys_display_uses_mudae_key_marker_and_count() -> None:
     assert catalog_search_commands_module._format_catalog_keys(None, None, None) == "Not requested"
 
 
-def test_catalog_reset_requires_confirmation_and_backs_up_database(monkeypatch, tmp_path) -> None:
+def test_catalog_reset_registration_and_help_are_lazy(monkeypatch) -> None:
+    calls: list[int] = []
+
+    def database_path_provider():
+        calls.append(1)
+        return Path("unused.db")
+
+    catalog_app = typer.Typer()
+    console = Console()
+    catalog_reset_commands_module.register_catalog_reset_command(
+        catalog_app,
+        console,
+        database_path_provider,
+    )
+
+    result = CliRunner().invoke(catalog_app, ["reset", "--help"])
+
+    assert result.exit_code == 0
+    assert "Reset imported catalog data" in result.stdout
+    assert calls == []
+
+
+def test_catalog_reset_defaults_to_dry_run_without_mutation(monkeypatch, tmp_path) -> None:
     database_path = tmp_path / "moa.db"
-    database_path.write_text("catalog", encoding="utf-8")
+    database_path.write_bytes(b"catalog\x00bytes")
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
-    runner = CliRunner()
 
-    dry_run = runner.invoke(main.app, ["catalog", "reset"])
-    applied = runner.invoke(main.app, ["catalog", "reset", "--confirm"])
+    result = CliRunner().invoke(main.app, ["catalog", "reset"])
 
-    assert dry_run.exit_code == 0
-    assert "No changes made" in dry_run.stdout
-    assert applied.exit_code == 0
+    assert result.exit_code == 0
+    assert "No changes made" in result.stdout
+    assert database_path.read_bytes() == b"catalog\x00bytes"
+    assert list(tmp_path.glob("moa.db.bak-full-reset-*")) == []
+
+
+def test_catalog_reset_confirmed_missing_path_does_not_create_or_backup(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "missing.db"
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(main.app, ["catalog", "reset", "--confirm"])
+
+    assert result.exit_code == 0
+    assert "No catalog database exists" in result.stdout
     assert not database_path.exists()
-    assert len(list(tmp_path.glob("moa.db.bak-full-reset-*"))) == 1
+    assert list(tmp_path.glob("missing.db.bak-full-reset-*")) == []
+
+
+def test_catalog_reset_backs_up_bytes_before_unlink_and_uses_collision_suffix(
+    monkeypatch, tmp_path
+) -> None:
+    database_path = tmp_path / "moa.db"
+    database_path.write_bytes(b"catalog\x00bytes")
+    timestamp = "20260828-120000"
+    first_backup = tmp_path / f"moa.db.bak-full-reset-{timestamp}"
+    first_backup.write_bytes(b"existing-backup")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    class FixedNow:
+        def strftime(self, _format):
+            return timestamp
+
+    class FixedDateTime:
+        @staticmethod
+        def now():
+            return FixedNow()
+
+    monkeypatch.setattr(catalog_reset_commands_module, "datetime", FixedDateTime)
+    operations: list[str] = []
+    original_copy2 = catalog_reset_commands_module.shutil.copy2
+
+    def copy2(source, destination):
+        operations.append("backup")
+        result = original_copy2(source, destination)
+        assert source.read_bytes() == b"catalog\x00bytes"
+        return result
+
+    original_unlink = Path.unlink
+
+    def unlink(path, *args, **kwargs):
+        if path == database_path:
+            operations.append("unlink")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(catalog_reset_commands_module.shutil, "copy2", copy2)
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    result = CliRunner().invoke(main.app, ["catalog", "reset", "--confirm"])
+
+    second_backup = tmp_path / f"moa.db.bak-full-reset-{timestamp}-1"
+    assert result.exit_code == 0
+    assert operations == ["backup", "unlink"]
+    assert not database_path.exists()
+    assert first_backup.read_bytes() == b"existing-backup"
+    assert second_backup.read_bytes() == b"catalog\x00bytes"
+
+
+def test_catalog_reset_uses_main_database_path_at_callback_time(monkeypatch, tmp_path) -> None:
+    first_path = tmp_path / "first.db"
+    second_path = tmp_path / "second.db"
+    second_path.write_bytes(b"callback-time")
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", first_path)
+
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", second_path)
+    result = CliRunner().invoke(main.app, ["catalog", "reset", "--confirm"])
+
+    assert result.exit_code == 0
+    assert not second_path.exists()
+    assert first_path.exists() is False
+    assert len(list(tmp_path.glob("second.db.bak-full-reset-*"))) == 1
 
 
 def test_catalog_relocate_database_requires_explicit_source() -> None:

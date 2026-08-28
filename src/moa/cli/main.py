@@ -15,6 +15,7 @@ from moa.cli.command_commands import build_command_app
 from moa.cli.config_commands import build_config_app
 from moa.cli.catalog_operational_commands import build_catalog_operational_app
 from moa.cli.catalog_delete_import_commands import register_catalog_delete_import_command
+from moa.cli.catalog_reset_commands import register_catalog_reset_command
 from moa.cli.catalog_search_commands import build_catalog_search_app
 from moa.cli.catalog_snapshot_commands import build_catalog_snapshot_app
 from moa.cli.data_health_commands import build_data_health_app
@@ -492,44 +493,7 @@ catalog_operational_app = build_catalog_operational_app(
 )
 catalog_app.add_typer(catalog_operational_app)
 register_catalog_delete_import_command(catalog_app, console)
-
-
-@catalog_app.command("reset")
-def catalog_reset(
-    confirm: bool = typer.Option(
-        False,
-        "--confirm",
-        help="Delete the current catalog after making a timestamped backup.",
-    ),
-) -> None:
-    """Reset imported catalog data while preserving the MOA configuration."""
-    database_path = Path(DEFAULT_DATABASE_PATH)
-    if not confirm:
-        console.print(
-            "[yellow]No changes made. This removes all imported catalog data but keeps your "
-            "MOA config.[/yellow]"
-        )
-        console.print("Run `uv run moa catalog reset --confirm` after stopping the listener.")
-        return
-
-    if not database_path.exists():
-        console.print("[green]No catalog database exists; it will be created on the next import.[/green]")
-        return
-
-    backup_path = database_path.with_name(
-        f"{database_path.name}.bak-full-reset-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    )
-    suffix = 1
-    while backup_path.exists():
-        backup_path = database_path.with_name(
-            f"{database_path.name}.bak-full-reset-"
-            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
-        )
-        suffix += 1
-    shutil.copy2(database_path, backup_path)
-    database_path.unlink()
-    console.print("[green]Catalog database reset. MOA config was preserved.[/green]")
-    console.print(f"Backup saved to: {backup_path}")
+register_catalog_reset_command(catalog_app, console, lambda: DEFAULT_DATABASE_PATH)
 
 
 @catalog_app.command("relocate-database")
