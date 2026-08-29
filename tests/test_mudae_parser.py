@@ -3,6 +3,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from moa.models.character import DisableListEntry
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.antidisable import AntidisablePageParser
 from moa.parser.character_details import CharacterDetailsParser
@@ -10,6 +11,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.disablelist import DisableListParser
 from moa.parser.harem_key import HaremKeyParser
 from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
@@ -1630,6 +1632,89 @@ def test_parse_disablelist_accepts_totals_split_across_embed_lines() -> None:
     assert disablelist.disabled_hg == 14789
     assert disablelist.western_disabled is None
     assert disablelist.irl_disabled is None
+
+
+def test_disablelist_parser_preserves_seams_zero_evidence_repeated_limits_and_order() -> None:
+    lines = Mock(
+        return_value=[
+            "user's Disablelist (0/0)",
+            "0 disabled (0 $wa, 0 $ha, 0 $wg, 0 $hg)",
+            "Pool limit reached: 0 $wa",
+            "Pool limit reached: 4 $wa",
+            "Pool limit reached: 0 $ha",
+            "Western animanga series are completely disabled ($togglewestern)",
+            "IRL series are completely disabled ($toggleirl)",
+            "First bundle (0)",
+            "malformed bundle (not-a-number)",
+            "Second bundle (0)",
+        ]
+    )
+    number = Mock(side_effect=lambda value: int(value.replace(",", "")))
+
+    state = DisableListParser(MudaeParseError, lines, number).parse("raw disablelist")
+
+    lines.assert_called_once_with("raw disablelist")
+    assert state.slots_used == 0
+    assert state.slots_capacity == 0
+    assert state.total_disabled == 0
+    assert state.disabled_wa == 0
+    assert state.disabled_ha == 0
+    assert state.disabled_wg == 0
+    assert state.disabled_hg == 0
+    assert state.wa_pool_limit == 4
+    assert state.ha_pool_limit == 0
+    assert state.western_disabled is True
+    assert state.irl_disabled is True
+    assert state.entries == (
+        DisableListEntry(name="First bundle", disabled_count=0),
+        DisableListEntry(name="Second bundle", disabled_count=0),
+    )
+
+
+def test_disablelist_parser_normalizes_custom_emojis_and_preserves_unobserved_toggles() -> None:
+    state = DisableListParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "\u200b<:warning:123> user's Disablelist (1/5)\n"
+        "1 disabled\n"
+        "(0 $wa, 1 $ha, 0 $wg, 0 $hg)\n"
+        "<:warning:123> Pool limit reached: 0 $wa\n"
+        "<:bundle:456> (0)\n"
+    )
+
+    assert state.total_disabled == 1
+    assert state.disabled_wa == 0
+    assert state.disabled_ha == 1
+    assert state.wa_pool_limit == 0
+    assert state.ha_pool_limit is None
+    assert state.western_disabled is None
+    assert state.irl_disabled is None
+    assert state.entries == (DisableListEntry(name=":bundle:", disabled_count=0),)
+
+
+def test_disablelist_parser_facade_matches_dedicated_parser() -> None:
+    text = (
+        "user's Disablelist (1/5)\n"
+        "1 disabled (1 $wa, 0 $ha, 0 $wg, 0 $hg)\n"
+        "Bundle (1)\n"
+    )
+
+    expected = DisableListParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert MudaeTextParser().parse_disablelist(text) == expected
+
+
+def test_disablelist_parser_rejects_missing_header_or_totals_with_exact_error() -> None:
+    parser = DisableListParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    )
+
+    with pytest.raises(MudaeParseError) as error:
+        parser.parse("Disablelist (0/0)")
+
+    assert str(error.value) == "Expected a Mudae $dl header and disabled-pool totals."
 
 
 def test_parse_topx_reads_direct_unavailable_character_evidence() -> None:

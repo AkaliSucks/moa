@@ -28,7 +28,6 @@ from moa.models.character import (
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     TowerStateSnapshot,
-    DisableListEntry,
     DisableListSnapshot,
     HaremKeyPage,
     PlayerBonusSnapshot,
@@ -44,6 +43,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.disablelist import DisableListParser
 from moa.parser.harem_key import HaremKeyParser
 from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
@@ -211,20 +211,6 @@ class MudaeTextParser:
 
     _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
-    _DISABLELIST_HEADER = re.compile(
-        r"Disablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)", re.IGNORECASE
-    )
-    _DISABLELIST_TOTALS = re.compile(
-        r"(?P<total>[\d,]+)\s+disabled.*?(?P<wa>[\d,]+)\s*\$wa.*?"
-        r"(?P<ha>[\d,]+)\s*\$ha.*?(?P<wg>[\d,]+)\s*\$wg.*?"
-        r"(?P<hg>[\d,]+)\s*\$hg",
-        re.IGNORECASE,
-    )
-    _POOL_LIMIT = re.compile(
-        r"Pool limit reached:\s*(?P<limit>[\d,]+)\s+\$(?P<roulette>wa|ha|wg|hg)",
-        re.IGNORECASE,
-    )
-    _DISABLELIST_ENTRY = re.compile(r"^(?P<name>.+?)\s*\((?P<count>[\d,]+)\)$")
     _TOPX_ENTRY = re.compile(
         r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+?)"
         r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
@@ -366,65 +352,7 @@ class MudaeTextParser:
 
     def parse_disablelist(self, text: str) -> DisableListSnapshot:
         """Parse account-specific disable-list settings from a copied `$dl` reply."""
-        lines = self._lines(text)
-        header = next(
-            (
-                self._DISABLELIST_HEADER.search(line)
-                for line in lines
-                if self._DISABLELIST_HEADER.search(line)
-            ),
-            None,
-        )
-        totals = self._DISABLELIST_TOTALS.search(" ".join(lines))
-        if header is None or totals is None:
-            raise MudaeParseError("Expected a Mudae $dl header and disabled-pool totals.")
-
-        limits: dict[str, int] = {}
-        entries: list[DisableListEntry] = []
-        for line in lines:
-            pool_limit = self._POOL_LIMIT.search(line)
-            if pool_limit is not None:
-                limits[pool_limit.group("roulette").lower()] = self._number(pool_limit.group("limit"))
-                continue
-            entry = self._DISABLELIST_ENTRY.match(line)
-            if entry is None:
-                continue
-            entries.append(
-                DisableListEntry(
-                    name=entry.group("name").strip(),
-                    disabled_count=self._number(entry.group("count")),
-                )
-            )
-
-        return DisableListSnapshot(
-            slots_used=int(header.group("used")),
-            slots_capacity=int(header.group("capacity")),
-            total_disabled=self._number(totals.group("total")),
-            disabled_wa=self._number(totals.group("wa")),
-            disabled_ha=self._number(totals.group("ha")),
-            disabled_wg=self._number(totals.group("wg")),
-            disabled_hg=self._number(totals.group("hg")),
-            wa_pool_limit=limits.get("wa"),
-            ha_pool_limit=limits.get("ha"),
-            western_disabled=(
-                True
-                if any(
-                    "western animanga series are completely disabled"
-                    in line.casefold()
-                    for line in lines
-                )
-                else None
-            ),
-            irl_disabled=(
-                True
-                if any(
-                    "irl series are completely disabled" in line.casefold()
-                    for line in lines
-                )
-                else None
-            ),
-            entries=tuple(entries),
-        )
+        return DisableListParser(MudaeParseError, self._lines, self._number).parse(text)
 
     def parse_unavailable_characters(self, text: str) -> UnavailableCharacterPage:
         """Parse the currently unrollable characters listed by Mudae `$topx`."""
