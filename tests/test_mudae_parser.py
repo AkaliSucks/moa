@@ -6,6 +6,7 @@ import pytest
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
+from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -284,6 +285,30 @@ def test_parse_divorce_prompt_from_copied_mudae_output() -> None:
     assert prompt.kakera_refund == 1234
     assert MudaeTextParser().parse_divorce_prompt(response) == prompt
     MudaeTextParser().parse_divorce_declined("Divorce declined.")
+
+
+def test_divorce_declined_validator_accepts_normalized_line_and_returns_none() -> None:
+    response = "\n\u200b unrelated line\n \u200bdIVORCE DECLINED. \n"
+
+    assert DivorceDeclinedValidator(MudaeParseError).parse(response) is None
+    assert MudaeTextParser().parse_divorce_declined(response) is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "**Divorce declined.**",
+        "Divorce declined",
+        "Divorce declined!",
+        "Divorce declined. extra text",
+        "before Divorce declined. after",
+    ],
+)
+def test_divorce_declined_validator_rejects_non_exact_decline_lines(response: str) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        DivorceDeclinedValidator(MudaeParseError).parse(response)
+
+    assert str(error.value) == "Expected Mudae's divorce-declined response."
 
 
 @pytest.mark.parametrize(

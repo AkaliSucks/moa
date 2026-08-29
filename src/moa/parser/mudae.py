@@ -44,6 +44,7 @@ from moa.models.character import (
 )
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
+from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -78,8 +79,6 @@ class MudaeTextParser:
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
         re.IGNORECASE,
     )
-
-    _DIVORCE_DECLINED = re.compile(r"^Divorce declined\.$", re.IGNORECASE)
 
     _DIVORCE_COMPLETE = re.compile(
         r"^(?P<character>.+?)\s+and\s+(?P<account>.+?)\s+are now divorced\."
@@ -372,9 +371,7 @@ class MudaeTextParser:
 
     def parse_divorce_declined(self, text: str) -> None:
         """Validate Mudae's response when a pending divorce is declined."""
-        if any(self._DIVORCE_DECLINED.match(line) for line in self._lines(text)):
-            return
-        raise MudaeParseError("Expected Mudae's divorce-declined response.")
+        return DivorceDeclinedValidator(MudaeParseError).parse(text)
 
     def parse_divorce_confirmation(
         self, text: str, expected_account: str | None = None
