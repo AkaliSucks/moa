@@ -44,6 +44,7 @@ from moa.models.character import (
 )
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
+from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -77,12 +78,6 @@ class MudaeTextParser:
     _KAKERA_REACTION_BLOCKED = re.compile(
         r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
-        re.IGNORECASE,
-    )
-
-    _DIVORCE_COMPLETE = re.compile(
-        r"^(?P<character>.+?)\s+and\s+(?P<account>.+?)\s+are now divorced\."
-        r"(?:\s*\W*\s*\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\))?\s*$",
         re.IGNORECASE,
     )
 
@@ -377,28 +372,9 @@ class MudaeTextParser:
         self, text: str, expected_account: str | None = None
     ) -> DivorceConfirmation:
         """Parse Mudae's completion message after a confirmed `$divorce`."""
-        for raw_line in self._lines(text):
-            line = re.sub(r"\*+", "", raw_line).strip()
-            match = self._DIVORCE_COMPLETE.match(line)
-            if match is None:
-                continue
-            account_name = re.sub(r"^[^\w]+|[^\w]+$", "", match.group("account")).strip()
-            character_name = re.sub(
-                r"^[^\w]+|[^\w]+$", "", match.group("character")
-            ).strip()
-            if expected_account is not None and account_name.casefold() != expected_account.casefold():
-                continue
-            if character_name and account_name:
-                return DivorceConfirmation(
-                    account_name=account_name,
-                    character_name=character_name,
-                    kakera_refund=(
-                        self._number(match.group("value"))
-                        if match.group("value")
-                        else None
-                    ),
-                )
-        raise MudaeParseError("Expected a Mudae completed-divorce response.")
+        return DivorceConfirmationParser(MudaeParseError).parse(
+            text, expected_account=expected_account
+        )
 
     def parse_kakera_reaction_receipt(self, text: str) -> KakeraReactionReceipt:
         """Parse the standalone Mudae message shown after a Kakera reaction."""
