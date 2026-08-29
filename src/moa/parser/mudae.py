@@ -44,6 +44,7 @@ from moa.models.character import (
 )
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
+from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -75,17 +76,6 @@ class MudaeTextParser:
     _KAKERA_REACTION_BLOCKED = re.compile(
         r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
-        re.IGNORECASE,
-    )
-
-    _DIVORCE_PROMPT = re.compile(
-        r"^(?P<character>.+?):\s*Do you confirm the divorce\?\s*\(y/n/yes/no\)\s*$",
-        re.IGNORECASE,
-    )
-
-    _DIVORCE_REFUND = re.compile(
-        r"Characters divorced by \$divorce are also removed from the \$restorelist\s*"
-        r"\(\+(?P<value>[\d,]+)(?::kakera:|\s+kakera)?\s*if you confirm\)",
         re.IGNORECASE,
     )
 
@@ -378,31 +368,7 @@ class MudaeTextParser:
 
     def parse_divorce_prompt(self, text: str) -> DivorcePrompt:
         """Parse the first response from Mudae's two-step `$divorce` flow."""
-        lines = self._lines(text)
-        prompt = next(
-            (
-                match
-                for line in lines
-                for match in [self._DIVORCE_PROMPT.match(re.sub(r"\*+", "", line).strip())]
-                if match is not None
-            ),
-            None,
-        )
-        if prompt is None:
-            raise MudaeParseError("Expected a Mudae divorce confirmation prompt.")
-        refund = next(
-            (
-                match
-                for line in lines
-                for match in [self._DIVORCE_REFUND.match(re.sub(r"\*+", "", line).strip())]
-                if match is not None
-            ),
-            None,
-        )
-        return DivorcePrompt(
-            character_name=prompt.group("character").strip(),
-            kakera_refund=self._number(refund.group("value")) if refund else None,
-        )
+        return DivorcePromptParser(MudaeParseError).parse(text)
 
     def parse_divorce_declined(self, text: str) -> None:
         """Validate Mudae's response when a pending divorce is declined."""

@@ -6,6 +6,7 @@ import pytest
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
+from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -272,15 +273,43 @@ def test_parse_claim_confirmation_rejects_invalid_confirmation(text: str) -> Non
 
 
 def test_parse_divorce_prompt_from_copied_mudae_output() -> None:
-    prompt = MudaeTextParser().parse_divorce_prompt(
-        "Professor Layton: Do you confirm the divorce? (y/n/yes/no)\n"
-        "Characters divorced by $divorce are also removed from the $restorelist "
-        "(+54:kakera:if you confirm)"
+    response = (
+        "\u200b**Professor Layton**:\tDO YOU CONFIRM THE DIVORCE?\t(y/n/yes/no)\n"
+        "CHARACTERS divorced by $DIVORCE are also removed from the $RESTORELIST "
+        "(+**1,234**<:kakera:123>IF YOU CONFIRM)"
     )
+    prompt = DivorcePromptParser(MudaeParseError).parse(response)
 
     assert prompt.character_name == "Professor Layton"
-    assert prompt.kakera_refund == 54
+    assert prompt.kakera_refund == 1234
+    assert MudaeTextParser().parse_divorce_prompt(response) == prompt
     MudaeTextParser().parse_divorce_declined("Divorce declined.")
+
+
+@pytest.mark.parametrize(
+    ("response", "refund"),
+    [
+        ("Professor Layton: Do you confirm the divorce? (y/n/yes/no)", None),
+        (
+            "Professor Layton: Do you confirm the divorce? (y/n/yes/no)\n"
+            "Characters divorced by $divorce are also removed from the $restorelist (+0 if you confirm)",
+            0,
+        ),
+    ],
+)
+def test_divorce_prompt_parser_preserves_missing_and_zero_refunds(
+    response: str, refund: int | None
+) -> None:
+    prompt = DivorcePromptParser(MudaeParseError).parse(response)
+
+    assert prompt.kakera_refund == refund
+
+
+def test_divorce_prompt_parser_preserves_exact_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        DivorcePromptParser(MudaeParseError).parse("not a divorce prompt")
+
+    assert str(error.value) == "Expected a Mudae divorce confirmation prompt."
 
 
 def test_parse_completed_divorce_from_copied_mudae_output() -> None:
@@ -351,6 +380,22 @@ def test_router_probes_transaction_kinds_in_declared_order() -> None:
         call("transaction response", "gift_character"),
         call("transaction response", "trade"),
     ]
+
+
+def test_router_consumes_divorce_prompt_as_its_separate_detected_kind() -> None:
+    parser = Mock()
+    parser.parse_kakera_reaction_receipt.side_effect = MudaeParseError("not receipt")
+    parser.parse_kakera_reaction_blocked.side_effect = MudaeParseError("not blocked")
+    parser.parse_transaction.side_effect = [MudaeParseError("not transaction")] * 4
+    parser.parse_mudapins.side_effect = MudaeParseError("not mudapins")
+    parser.parse_claim_confirmation.side_effect = MudaeParseError("not claim")
+
+    detection = MudaeMessageRouter(parser).detect("divorce prompt response")
+
+    assert detection.kind == "divorce_prompt"
+    parser.parse_divorce_prompt.assert_called_once_with("divorce prompt response")
+    parser.parse_divorce_declined.assert_not_called()
+    parser.parse_divorce_confirmation.assert_not_called()
 
 
 @pytest.mark.parametrize(
