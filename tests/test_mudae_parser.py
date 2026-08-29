@@ -14,6 +14,7 @@ from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -1300,6 +1301,73 @@ def test_parse_player_bonus_preserves_metrics_and_extracts_key_modifiers() -> No
     assert bonus.additional_wish_key_chance_percent == 10
     assert bonus.light_kakera_minimum == 4
     assert bonus.light_kakera_maximum == 5
+
+
+def test_player_bonus_parser_preserves_partial_zero_unknown_repeated_and_unsupported_metrics() -> None:
+    lines = Mock(
+        return_value=[
+            "Player Bonuses",
+            ":addroll: · Rolls per hour: +0",
+            "Wishlist slots: unknown",
+            "Rolls per hour: malformed",
+            "Starwish slots: +0",
+            "Starwish slots: +4",
+            "Kakera max power: 0",
+            "Power cost per kakera button: malformed",
+            "Random kakera per light kakera: 0-0",
+            "Unsupported modifier: retained",
+        ]
+    )
+
+    bonus = PlayerBonusParser(MudaeParseError, lines).parse("raw bonus response")
+
+    lines.assert_called_once_with("raw bonus response")
+    assert [metric.label for metric in bonus.metrics] == [
+        "Rolls per hour",
+        "Wishlist slots",
+        "Rolls per hour",
+        "Starwish slots",
+        "Starwish slots",
+        "Kakera max power",
+        "Power cost per kakera button",
+        "Random kakera per light kakera",
+        "Unsupported modifier",
+    ]
+    assert bonus.rolls_per_hour_bonus is None
+    assert bonus.wishlist_slot_bonus is None
+    assert bonus.starwish_slot_bonus == 4
+    assert bonus.kakera_max_power_percent == 0
+    assert bonus.kakera_button_power_cost_percent is None
+    assert bonus.light_kakera_minimum == 0
+    assert bonus.light_kakera_maximum == 0
+
+
+def test_player_bonus_parser_accepts_metrics_without_header_and_facade_matches() -> None:
+    text = (
+        "\u200b\n"
+        "<:addroll:123> · Rolls per hour: +9\n"
+        "\n"
+        "Unsupported modifier: retained\n"
+    )
+    expected = PlayerBonusParser(
+        MudaeParseError, MudaeTextParser._lines
+    ).parse(text)
+
+    assert MudaeTextParser().parse_player_bonus(text) == expected
+    assert [metric.label for metric in expected.metrics] == [
+        "Rolls per hour",
+        "Unsupported modifier",
+    ]
+    assert expected.rolls_per_hour_bonus == 9
+
+
+def test_player_bonus_parser_rejects_missing_metrics_with_exact_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        PlayerBonusParser(MudaeParseError, MudaeTextParser._lines).parse(
+            "Player Bonuses\nRolls per hour:\nnot a metric"
+        )
+
+    assert str(error.value) == "No player bonus metrics found in the Mudae $bonus output."
 
 
 def test_parse_wishlist_reads_starwish_markers_from_wl_output() -> None:
