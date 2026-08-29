@@ -23,6 +23,7 @@ from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
+from moa.parser.server_settings import ServerSettingsParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
 from moa.parser.timer_state import TimerStateParser
@@ -2215,10 +2216,213 @@ def test_parse_server_settings_reads_core_rules_and_visible_options() -> None:
 
     assert not settings.server_premium
     assert settings.prefix == "$"
+    assert settings.language == "en"
     assert settings.claim_reset_minutes == 180
+    assert settings.reset_minute == "xx:14"
+    assert settings.reset_shift_minutes == 0
     assert settings.rolls_per_hour == 10
+    assert settings.claim_reaction_expiry_seconds == 45
+    assert settings.claimed_character_rarity_multiplier == 4
+    assert settings.kakera_bonus_percent == 0
+    assert settings.sphere_bonus_percent == 0
     assert settings.game_mode == 1
+    assert settings.channel_instance == 1
     assert len(settings.metrics) == 13
+
+
+def test_parse_server_settings_uses_facade_line_normalization() -> None:
+    settings = MudaeTextParser().parse_server_settings(
+        "\u200b<a:settings:123>\n\n"
+        "\u200bServer premium\n"
+        "\u200bPrefix: $ ($prefix)\n"
+        "\u200bLang: en ($lang)\n"
+        "\u200bClaim reset: every 1 min. ($setclaim)\n"
+        "\u200bExact minute of the reset: 00:00 ($setinterval)\n"
+        "\u200bReset shifted: by +1 min. ($shifthour)\n"
+        "\u200bRolls per hour: 1 ($setrolls)\n"
+        "\u200bTime before the claim reaction expires: 1 sec. ($settimer)\n"
+        "\u200bSpawn rarity multiplier for already claimed characters: 1 ($setrare)\n"
+        "\u200b% kakera bonus: +1 ($setkakerabonus)\n"
+        "\u200b% sphere bonus: +1 ($setspherebonus)\n"
+        "\u200bGame mode: 1 ($gamemode)\n"
+        "\u200bThis channel instance: 1 ($channelinstance)"
+    )
+
+    assert settings.prefix == "$"
+    assert settings.language == "en"
+    assert settings.reset_shift_minutes == 1
+    assert settings.metrics[0].label == "Prefix"
+
+
+def test_server_settings_parser_uses_injected_lines_and_matches_facade() -> None:
+    response = (
+        "Server premium\n"
+        "Prefix: $ ($prefix)\n"
+        "Lang: en ($lang)\n"
+        "Claim reset: every 180 min. ($setclaim)\n"
+        "Exact minute of the reset: xx:14 ($setinterval)\n"
+        "Reset shifted: by -2 min. ($shifthour)\n"
+        "Rolls per hour: 10 ($setrolls)\n"
+        "Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "% kakera bonus: +0 ($setkakerabonus)\n"
+        "% sphere bonus: +0 ($setspherebonus)\n"
+        "Game mode: 1 ($gamemode)\n"
+        "This channel instance: 1 ($channelinstance)"
+    )
+    lines = Mock(wraps=MudaeTextParser._lines)
+
+    expected = MudaeTextParser().parse_server_settings(response)
+    actual = ServerSettingsParser(MudaeParseError, lines).parse(response)
+
+    assert actual == expected
+    lines.assert_called_once_with(response)
+
+
+@pytest.mark.parametrize(
+    ("status", "premium"),
+    (("premium", True), ("not premium", False)),
+)
+def test_parse_server_settings_preserves_observed_premium_status(status: str, premium: bool) -> None:
+    response = (
+        f"Server {status}\n"
+        "Prefix: $ ($prefix)\n"
+        "Lang: en ($lang)\n"
+        "Claim reset: every 0 min. ($setclaim)\n"
+        "Exact minute of the reset: 00:00 ($setinterval)\n"
+        "Reset shifted: by +0 min. ($shifthour)\n"
+        "Rolls per hour: 0 ($setrolls)\n"
+        "Time before the claim reaction expires: 0 sec. ($settimer)\n"
+        "Spawn rarity multiplier for already claimed characters: 0 ($setrare)\n"
+        "% kakera bonus: +0 ($setkakerabonus)\n"
+        "% sphere bonus: +0 ($setspherebonus)\n"
+        "Game mode: 0 ($gamemode)\n"
+        "This channel instance: 0 ($channelinstance)"
+    )
+
+    settings = MudaeTextParser().parse_server_settings(response)
+
+    assert settings.server_premium is premium
+    assert settings.claim_reset_minutes == 0
+    assert settings.reset_shift_minutes == 0
+    assert settings.rolls_per_hour == 0
+    assert settings.claim_reaction_expiry_seconds == 0
+    assert settings.claimed_character_rarity_multiplier == 0
+    assert settings.kakera_bonus_percent == 0
+    assert settings.sphere_bonus_percent == 0
+    assert settings.game_mode == 0
+    assert settings.channel_instance == 0
+
+
+def test_parse_server_settings_uses_first_core_matches_and_preserves_metric_order() -> None:
+    response = (
+        "Server not premium\n"
+        "Server premium\n"
+        "Prefix: first ($prefix)\n"
+        "Prefix: second ($prefix)\n"
+        "Lang: first ($lang)\n"
+        "Lang: second ($lang)\n"
+        "Claim reset: every 0 min. ($setclaim)\n"
+        "Claim reset: every 180 min. ($setclaim)\n"
+        "Exact minute of the reset: first-minute ($setinterval)\n"
+        "Exact minute of the reset: second-minute ($setinterval)\n"
+        "Reset shifted: by -7 min. ($shifthour)\n"
+        "Reset shifted: by +8 min. ($shifthour)\n"
+        "Rolls per hour: 0 ($setrolls)\n"
+        "Rolls per hour: 12 ($setrolls)\n"
+        "Time before the claim reaction expires: 0 sec. ($settimer)\n"
+        "Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "Spawn rarity multiplier for already claimed characters: 0 ($setrare)\n"
+        "Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "% kakera bonus: +0 ($setkakerabonus)\n"
+        "% kakera bonus: +9 ($setkakerabonus)\n"
+        "% sphere bonus: +0 ($setspherebonus)\n"
+        "% sphere bonus: +11 ($setspherebonus)\n"
+        "Game mode: 0 ($gamemode)\n"
+        "Game mode: 2 ($gamemode)\n"
+        "This channel instance: 0 ($channelinstance)\n"
+        "This channel instance: 3 ($channelinstance)\n"
+        "Malformed metric: missing command marker\n"
+        "noise without a setting"
+    )
+
+    settings = MudaeTextParser().parse_server_settings(response)
+
+    assert settings.server_premium is False
+    assert settings.prefix == "first"
+    assert settings.language == "first"
+    assert settings.claim_reset_minutes == 0
+    assert settings.reset_minute == "first-minute"
+    assert settings.reset_shift_minutes == -7
+    assert settings.rolls_per_hour == 0
+    assert settings.claim_reaction_expiry_seconds == 0
+    assert settings.claimed_character_rarity_multiplier == 0
+    assert settings.kakera_bonus_percent == 0
+    assert settings.sphere_bonus_percent == 0
+    assert settings.game_mode == 0
+    assert settings.channel_instance == 0
+    assert [(metric.label, metric.value) for metric in settings.metrics] == [
+        ("Prefix", "first"),
+        ("Prefix", "second"),
+        ("Lang", "first"),
+        ("Lang", "second"),
+        ("Claim reset", "every 0 min."),
+        ("Claim reset", "every 180 min."),
+        ("Exact minute of the reset", "first-minute"),
+        ("Exact minute of the reset", "second-minute"),
+        ("Reset shifted", "by -7 min."),
+        ("Reset shifted", "by +8 min."),
+        ("Rolls per hour", "0"),
+        ("Rolls per hour", "12"),
+        ("Time before the claim reaction expires", "0 sec."),
+        ("Time before the claim reaction expires", "45 sec."),
+        ("Spawn rarity multiplier for already claimed characters", "0"),
+        ("Spawn rarity multiplier for already claimed characters", "4"),
+        ("kakera bonus", "+0"),
+        ("kakera bonus", "+9"),
+        ("sphere bonus", "+0"),
+        ("sphere bonus", "+11"),
+        ("Game mode", "0"),
+        ("Game mode", "2"),
+        ("This channel instance", "0"),
+        ("This channel instance", "3"),
+    ]
+
+
+def test_parse_server_settings_reports_ordered_missing_core_rules() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_server_settings(
+            "Prefix: $ ($prefix)\n"
+            "Lang: en ($lang)"
+        )
+
+    assert str(error.value) == (
+        "Expected a complete Mudae $settings response with core server rules; missing: "
+        "premium, claim reset, reset minute, reset shift, rolls per hour, "
+        "claim reaction timer, rarity multiplier, Kakera bonus, sphere bonus, "
+        "game mode, channel instance."
+    )
+
+
+def test_parse_server_settings_reports_missing_prefix_or_language() -> None:
+    response = (
+        "Server premium\n"
+        "Claim reset: every 180 min. ($setclaim)\n"
+        "Exact minute of the reset: xx:14 ($setinterval)\n"
+        "Reset shifted: by +0 min. ($shifthour)\n"
+        "Rolls per hour: 10 ($setrolls)\n"
+        "Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "% kakera bonus: +0 ($setkakerabonus)\n"
+        "% sphere bonus: +0 ($setspherebonus)\n"
+        "Game mode: 1 ($gamemode)\n"
+        "This channel instance: 1 ($channelinstance)"
+    )
+
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_server_settings(response)
+
+    assert str(error.value) == "Expected Prefix and Lang in the Mudae $settings response."
 
 
 def test_parse_personal_rare_reads_the_account_override() -> None:
