@@ -27,6 +27,7 @@ from moa.parser.server_settings import ServerSettingsParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
 from moa.parser.timer_state import TimerStateParser
+from moa.parser.tower_state import TowerStateParser
 from moa.parser.unavailable_characters import UnavailableCharacterPageParser
 from moa.parser.wishlist import WishlistParser
 
@@ -2006,6 +2007,64 @@ def test_parse_tower_state_preserves_textual_zero_completed_tower_count() -> Non
     )
 
     assert state.completed_towers == 0
+
+
+def test_tower_state_parser_preserves_first_matches_and_checked_perk_order() -> None:
+    text = (
+        "Your current level is:tow0: (+ 0 tower)\n"
+        "Your current level is:tow2: (+ 4 towers)\n"
+        "The next level costs 0:kakera:\n"
+        "The next level costs 75,000:kakera:\n"
+        "You have 0:kakera:\n"
+        "You have 7,673:kakera:\n"
+        "☑️ [5] built\n"
+        "[6] unchecked\n"
+        "☑️ malformed perk\n"
+        "☑️ [5] duplicate\n"
+        "☑️ [11] built"
+    )
+    lines = Mock(wraps=MudaeTextParser._lines)
+
+    state = TowerStateParser(
+        MudaeParseError,
+        lines,
+        MudaeTextParser._number,
+        MudaeTextParser._KAKERA_BALANCE,
+    ).parse(text)
+
+    assert state.current_level == 0
+    assert state.completed_towers == 0
+    assert state.next_level_cost == 0
+    assert state.kakera_balance == 0
+    assert state.built_perk_ids == (5, 5, 11)
+    lines.assert_called_once_with(text)
+
+
+def test_tower_state_facade_matches_dedicated_parser_and_normalizes_lines() -> None:
+    text = (
+        "\u200b<a:tower:123>\n\n"
+        "\u200bYour current level is:<:tow:456>tow3:\u200b (+ 1 tower)\n"
+        "The next level costs 1,234:kakera:\n"
+        "You have 5,678:kakera:\n"
+        "☑️ [2] +1 roll"
+    )
+    expected = TowerStateParser(
+        MudaeParseError,
+        MudaeTextParser._lines,
+        MudaeTextParser._number,
+        MudaeTextParser._KAKERA_BALANCE,
+    ).parse(text)
+
+    assert MudaeTextParser().parse_tower_state(text) == expected
+
+
+def test_parse_tower_state_reports_exact_error_for_incomplete_response() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_tower_state("Your current level is:tow2:")
+
+    assert str(error.value) == (
+        "Expected a Mudae $kt response with current level, next cost, and balance."
+    )
 
 
 def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:

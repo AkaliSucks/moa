@@ -54,6 +54,7 @@ from moa.parser.server_settings import ServerSettingsParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
 from moa.parser.timer_state import TimerStateParser
+from moa.parser.tower_state import TowerStateParser
 from moa.parser.unavailable_characters import UnavailableCharacterPageParser
 from moa.parser.wishlist import WishlistParser
 
@@ -101,14 +102,6 @@ class MudaeTextParser:
     _KAKERA_BALANCE = re.compile(
         r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
     )
-    _TOWER_LEVEL = re.compile(
-        r"current level is.*?tow(?P<level>\d+):?(?:.*?\(\+\s*(?P<towers>\d+)\s+towers?)?",
-        re.IGNORECASE,
-    )
-    _TOWER_NEXT_COST = re.compile(
-        r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
-    )
-    _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
     _LOOT_ROLLS = re.compile(r"Rolls stacked:\s*(?P<value>\d+)", re.IGNORECASE)
     _LOOT_DISABLE = re.compile(
         r"\$disable limits:\s*-(?P<wa_ha>\d+)\s+\$wa/\$ha,\s*-(?P<wg_hg>\d+)\s+\$wg/\$hg",
@@ -259,28 +252,9 @@ class MudaeTextParser:
 
     def parse_tower_state(self, text: str) -> TowerStateSnapshot:
         """Parse current level, cost, balance, and owned floors from a copied `$kt` response."""
-        lines = self._lines(text)
-        level = next((self._TOWER_LEVEL.search(line) for line in lines if self._TOWER_LEVEL.search(line)), None)
-        next_cost = next(
-            (self._TOWER_NEXT_COST.search(line) for line in lines if self._TOWER_NEXT_COST.search(line)),
-            None,
-        )
-        balance = next((self._KAKERA_BALANCE.match(line) for line in lines if self._KAKERA_BALANCE.match(line)), None)
-        if level is None or next_cost is None or balance is None:
-            raise MudaeParseError("Expected a Mudae $kt response with current level, next cost, and balance.")
-
-        built_perks: list[int] = []
-        for line in lines:
-            perk = self._TOWER_PERK.match(line)
-            if perk is not None and "☑" in line:
-                built_perks.append(int(perk.group("id")))
-        return TowerStateSnapshot(
-            current_level=int(level.group("level")),
-            completed_towers=(int(level.group("towers")) if level.group("towers") else None),
-            next_level_cost=self._number(next_cost.group("value")),
-            kakera_balance=self._number(balance.group("value")),
-            built_perk_ids=tuple(built_perks),
-        )
+        return TowerStateParser(
+            MudaeParseError, self._lines, self._number, self._KAKERA_BALANCE
+        ).parse(text)
 
     def parse_kakeraloot_state(self, text: str) -> KakeralootStateSnapshot:
         """Parse current Kakeraloot progress and balance from a copied `$lk` response."""
