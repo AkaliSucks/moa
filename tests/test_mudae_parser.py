@@ -4,6 +4,7 @@ from unittest.mock import Mock, call
 import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
+from moa.parser.antidisable import AntidisablePageParser
 from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
@@ -207,6 +208,91 @@ def test_parse_antidisable_continuation_page_without_character_count() -> None:
     assert page.page_number == 2
     assert page.page_count == 6
     assert page.series_names == ("Chainsaw Man",)
+
+
+def test_antidisable_parser_preserves_zero_evidence_order_duplicates_and_converter_seams() -> None:
+    lines = Mock(
+        return_value=[
+            "prefix Antidisablelist (0/0) suffix",
+            "0 antidisabled characters",
+            "**【First】**",
+            "**First**",
+            "Page 0 / 0",
+        ]
+    )
+    number = Mock(return_value=0)
+
+    page = AntidisablePageParser(MudaeParseError, lines, number).parse("raw antidisable")
+
+    lines.assert_called_once_with("raw antidisable")
+    number.assert_called_once_with("0")
+    assert page.model_dump() == {
+        "page_number": 0,
+        "page_count": 0,
+        "slots_used": 0,
+        "slots_capacity": 0,
+        "antidisabled_character_count": 0,
+        "series_names": ("First", "First"),
+    }
+
+
+def test_antidisable_parser_preserves_line_normalization_and_optional_absence() -> None:
+    text = (
+        "\u200b**ernieuuu's Antidisablelist (1/5)**\n"
+        "\n"
+        "**<:series:123>**\n"
+        "**【Series Name】**\n"
+        "Page 2 / 3\n"
+    )
+
+    page = AntidisablePageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert page.page_number == 2
+    assert page.page_count == 3
+    assert page.antidisabled_character_count is None
+    assert page.series_names == (":series:", "Series Name")
+
+
+def test_antidisable_parser_facade_matches_dedicated_parser() -> None:
+    text = (
+        "ernieuuu's Antidisablelist (83/500)\n"
+        "2,614 antidisabled characters\n"
+        "【OSHI NO KO】\n"
+        "Chainsaw Man\n"
+        "Page 1 / 6"
+    )
+
+    expected = AntidisablePageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert MudaeTextParser().parse_antidisable_page(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "2 antidisabled characters\nSeries",
+            "Expected a Mudae `$adl` header with antidisable slot counts.",
+        ),
+        (
+            "Antidisablelist (1/5)\n0 antidisabled characters\nPage 1 / 1",
+            "No antidisable series found in the Mudae `$adl` page.",
+        ),
+    ],
+)
+def test_antidisable_parser_rejects_invalid_pages_with_exact_errors(
+    text: str, message: str
+) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        AntidisablePageParser(
+            MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+        ).parse(text)
+
+    assert str(error.value) == message
 
 
 def test_parse_character_details_from_copied_im_output() -> None:
