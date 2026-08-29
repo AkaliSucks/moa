@@ -16,6 +16,7 @@ from moa.parser.harem_key import HaremKeyParser
 from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
+from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -1880,6 +1881,83 @@ def test_parse_kakera_state_accepts_discord_emphasis_and_emoji_spacing() -> None
     assert state.kakera_balance == 23523
     assert len(state.badges) == 7
     assert all(badge.max_reached for badge in state.badges)
+
+
+def test_kakera_state_parser_preserves_zero_duplicates_malformed_rows_and_status() -> None:
+    text = (
+        "\u200b\n"
+        "prefix You have 99:kakera:!\n"
+        "You have **0** <:kakera:123> !\n"
+        "\u200b**bRoNzE II** · max ReAcHeD!\u200b\n"
+        "Silver III · still progressing\n"
+        "Gold V · malformed level\n"
+        "Ruby IV · MAX REACHED\n"
+        "Ruby IV · max reached again"
+    )
+
+    state = KakeraStateParser(
+        MudaeParseError,
+        MudaeTextParser._lines,
+        MudaeTextParser._number,
+        MudaeTextParser._KAKERA_BALANCE,
+    ).parse(text)
+
+    assert state.kakera_balance == 0
+    assert [(badge.badge_name, badge.level, badge.max_reached) for badge in state.badges] == [
+        ("bronze", 2, True),
+        ("silver", 3, False),
+        ("ruby", 4, True),
+        ("ruby", 4, True),
+    ]
+
+
+def test_kakera_state_facade_matches_dedicated_parser() -> None:
+    text = (
+        "How to collect kakera in your server\n"
+        "You have **1,234** :kakera: !\n"
+        ":DiamondIV: **Diamond IV** · Max reached!"
+    )
+
+    expected = KakeraStateParser(
+        MudaeParseError,
+        MudaeTextParser._lines,
+        MudaeTextParser._number,
+        MudaeTextParser._KAKERA_BALANCE,
+    ).parse(text)
+
+    assert MudaeTextParser().parse_kakera_state(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    (
+        (
+            "Silver IV · Max reached!",
+            "Expected a Mudae $k response with a Kakera balance.",
+        ),
+        (
+            "You have 0:kakera:!\nNot a badge row",
+            "No Kakera badge levels found in the Mudae $k output.",
+        ),
+    ),
+)
+def test_kakera_state_parser_preserves_exact_errors(text: str, message: str) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_kakera_state(text)
+
+    assert str(error.value) == message
+
+
+def test_kakera_router_keeps_kakera_and_cooldown_timer_profiles_separate() -> None:
+    kakera = MudaeMessageRouter().detect(
+        "How to collect kakera in your server\nMelt your kakera into badges."
+    )
+    timers = MudaeMessageRouter().detect(
+        "You can't react to kakera for 2h 30 min."
+    )
+
+    assert kakera.kind == "kakera"
+    assert timers.kind == "timers"
 
 
 def test_parse_tower_state_reads_current_level_cost_balance_and_built_perks() -> None:

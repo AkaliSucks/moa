@@ -24,7 +24,6 @@ from moa.models.character import (
     SphereResultSnapshot,
     TimerStateSnapshot,
     RankedHaremPage,
-    BadgeLevel,
     KakeraStateSnapshot,
     KakeralootStateSnapshot,
     TowerStateSnapshot,
@@ -47,6 +46,7 @@ from moa.parser.harem_key import HaremKeyParser
 from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
+from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -212,11 +212,6 @@ class MudaeTextParser:
     _KAKERA_BALANCE = re.compile(
         r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
     )
-    _BADGE_LEVEL = re.compile(
-        r"(?P<name>Bronze|Silver|Gold|Sapphire|Ruby|Emerald|Diamond)\s+"
-        r"(?P<level>I|II|III|IV)\s*[·\u00b7]\s*(?P<status>.+)$",
-        re.IGNORECASE,
-    )
     _TOWER_LEVEL = re.compile(
         r"current level is.*?tow(?P<level>\d+):?(?:.*?\(\+\s*(?P<towers>\d+)\s+towers?)?",
         re.IGNORECASE,
@@ -356,28 +351,9 @@ class MudaeTextParser:
 
     def parse_kakera_state(self, text: str) -> KakeraStateSnapshot:
         """Parse current Kakera balance and badge levels from a copied `$k` response."""
-        lines = [re.sub(r"\*", "", line) for line in self._lines(text)]
-        balance = next((self._KAKERA_BALANCE.match(line) for line in lines if self._KAKERA_BALANCE.match(line)), None)
-        if balance is None:
-            raise MudaeParseError("Expected a Mudae $k response with a Kakera balance.")
-        roman_levels = {"I": 1, "II": 2, "III": 3, "IV": 4}
-        badges: list[BadgeLevel] = []
-        for line in lines:
-            match = self._BADGE_LEVEL.search(line)
-            if match is None:
-                continue
-            badges.append(
-                BadgeLevel(
-                    badge_name=match.group("name").lower(),
-                    level=roman_levels[match.group("level").upper()],
-                    max_reached="max reached" in match.group("status").casefold(),
-                )
-            )
-        if not badges:
-            raise MudaeParseError("No Kakera badge levels found in the Mudae $k output.")
-        return KakeraStateSnapshot(
-            kakera_balance=self._number(balance.group("value")), badges=tuple(badges)
-        )
+        return KakeraStateParser(
+            MudaeParseError, self._lines, self._number, self._KAKERA_BALANCE
+        ).parse(text)
 
     def parse_personal_rare(self, text: str) -> PersonalRareSnapshot:
         """Parse the account-scoped `$personalrare` value from `$persr` output."""
