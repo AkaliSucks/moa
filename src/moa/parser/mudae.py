@@ -43,6 +43,7 @@ from moa.models.character import (
     WishlistSnapshot,
 )
 from moa.parser.character_details import CharacterDetailsParser
+from moa.parser.claim import ClaimParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -73,11 +74,6 @@ class MudaeTextParser:
     _KAKERA_REACTION_BLOCKED = re.compile(
         r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
-        re.IGNORECASE,
-    )
-
-    _CLAIM_CONFIRMATION = re.compile(
-        r"^(?P<account>.+?)\s+and\s+(?P<character>.+?)\s+are now married!",
         re.IGNORECASE,
     )
 
@@ -373,18 +369,7 @@ class MudaeTextParser:
 
     def parse_claim_confirmation(self, text: str) -> ClaimConfirmation:
         """Parse Mudae's short confirmation sent after a character is claimed."""
-        for line in self._lines(text):
-            match = self._CLAIM_CONFIRMATION.match(line)
-            if match is None:
-                continue
-            account_name = re.sub(r"^[^\w]+", "", match.group("account").replace("*", "")).strip()
-            character_name = match.group("character").replace("*", "").strip()
-            if account_name and character_name:
-                return ClaimConfirmation(
-                    account_name=account_name,
-                    character_name=character_name,
-                )
-        raise MudaeParseError("Expected a Mudae claim confirmation.")
+        return ClaimParser(MudaeParseError).parse(text)
 
     def parse_transaction(self, text: str, kind: str) -> None:
         """Validate one response in a Mudae gift or trade flow."""

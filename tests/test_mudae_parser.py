@@ -4,6 +4,8 @@ import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.character_details import CharacterDetailsParser
+from moa.parser.claim import ClaimParser
+from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -222,6 +224,49 @@ def test_parse_claim_confirmation_from_copied_mudae_output() -> None:
 
     assert claim.account_name == "ernieuuu"
     assert claim.character_name == "Pakunoda"
+
+
+def test_parse_claim_confirmation_facade_matches_dedicated_parser() -> None:
+    expected = ClaimParser(MudaeParseError).parse(
+        "💖 **ernieuuu** and **Pakunoda** are now married! 💖"
+    )
+
+    assert MudaeTextParser().parse_claim_confirmation(
+        "💖 **ernieuuu** and **Pakunoda** are now married! 💖"
+    ) == expected
+
+
+def test_claim_parser_normalizes_lines_and_cleans_claim_fields() -> None:
+    claim = ClaimParser(MudaeParseError).parse(
+        "\n\u200b\n💖 **<@123>** and **Pa\u200bkuno*da** are NOW married! trailing text\n\n"
+    )
+
+    assert claim.account_name == "123>"
+    assert claim.character_name == "Pakunoda"
+
+
+def test_claim_confirmation_remains_claim_router_kind() -> None:
+    result = MudaeMessageRouter().detect(
+        "💖 **ernieuuu** and **Pakunoda** are now married! 💖"
+    )
+
+    assert result.kind == "claim"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ernieuuu and Pakunoda are now married",
+        "*** and Pakunoda are now married!",
+        "ernieuuu and *** are now married!",
+        "not a claim confirmation",
+    ],
+)
+def test_parse_claim_confirmation_rejects_invalid_confirmation(text: str) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_claim_confirmation(text)
+
+    assert str(error.value) == "Expected a Mudae claim confirmation."
 
 
 def test_parse_divorce_prompt_from_copied_mudae_output() -> None:
