@@ -18,6 +18,7 @@ from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
+from moa.parser.kakeraloot_state import KakeralootStateParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
@@ -2090,6 +2091,37 @@ def test_parse_kakeraloot_state_reads_progress_and_balance() -> None:
     assert state.protected_wish_denominator == 4642
 
 
+def test_kakeraloot_state_facade_matches_dedicated_parser() -> None:
+    text = (
+        "\u200b\n"
+        "sample-account - Kakeraloots\u200b\n"
+        "<a:disablemore:100001> $disable limits: -0 $wa/$ha, -0 $wg/$hg\n"
+        "<a:wishprotect:100002> Protected wish: LVL 0 (spawn probability: 1/0)\n"
+        "<a:mudapin:100003> Mudapins: 0 ($mp)\n"
+        "<a:rtcd:100004> $rt: -0h cooldown\n"
+        "<a:addroll:100005> +0 permanent roll\n"
+        "<a:sw:100006> 0 star branches (+0 $sw)\n"
+        "Quantity LVL 0\n"
+        "Quality LVL 0\n"
+        "$kl usage: 0\n"
+        "0:kakera:"
+    )
+
+    expected = KakeralootStateParser(
+        MudaeParseError,
+        MudaeTextParser._lines,
+        MudaeTextParser._number,
+    ).parse(text)
+
+    assert MudaeTextParser().parse_kakeraloot_state(text) == expected
+    assert expected.disable_wa_ha_reduction == 0
+    assert expected.quality_level == 0
+    assert expected.usage_count == 0
+    assert expected.kakera_balance == 0
+    assert expected.star_branches == 0
+    assert expected.starwish_slots_from_branches == 0
+
+
 def test_parse_kakeraloot_state_accepts_the_no_loots_message() -> None:
     state = MudaeTextParser().parse_kakeraloot_state(
         "No kakeraloots bought! ($kl)\n"
@@ -2117,6 +2149,54 @@ def test_parse_kakeraloot_state_accepts_prerequisite_guard_message() -> None:
     )
 
     assert not state.has_kakeraloots
+
+
+def test_parse_kakeraloot_state_keeps_first_match_and_optional_pairs() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "sample-account - Kakeraloots\n"
+        "Quantity LVL 2\n"
+        "Quantity LVL 9\n"
+        "Quality LVL 4\n"
+        "$kl usage: 1,000\n"
+        "1,234:kakera:\n"
+        "Rolls stacked: 2 ($us)\n"
+        "3 star branches (+2 $sw)\n"
+        "4 star branch (+1 $sw)"
+    )
+
+    assert state.quantity_level == 2
+    assert state.star_branches == 3
+    assert state.starwish_slots_from_branches == 2
+
+
+def test_parse_kakeraloot_state_guard_clears_all_progress_facts() -> None:
+    state = MudaeTextParser().parse_kakeraloot_state(
+        "No kakeraloots bought! ($kl)\n"
+        "Quantity LVL 99\n"
+        "0:kakera:"
+    )
+
+    assert not state.has_kakeraloots
+    assert state.status_note == "No Kakeraloots bought; Mudae did not report loot statistics."
+    assert tuple(
+        getattr(state, field)
+        for field in (
+            "rolls_stacked",
+            "disable_wa_ha_reduction",
+            "disable_wg_hg_reduction",
+            "protected_wish_level",
+            "protected_wish_denominator",
+            "mudapins",
+            "rt_cooldown_reduction_hours",
+            "permanent_roll_bonus",
+            "star_branches",
+            "starwish_slots_from_branches",
+            "quantity_level",
+            "quality_level",
+            "usage_count",
+            "kakera_balance",
+        )
+    ) == (None,) * 14
 
 
 def test_parse_kakeraloot_state_accepts_layout_without_rolls_stacked() -> None:
