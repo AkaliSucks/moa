@@ -23,7 +23,6 @@ from moa.models.character import (
     SphereGain,
     SphereResultSnapshot,
     TimerStateSnapshot,
-    RankedHaremEntry,
     RankedHaremPage,
     BadgeLevel,
     KakeraStateSnapshot,
@@ -47,6 +46,7 @@ from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.harem_key import HaremKeyParser
+from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -68,15 +68,6 @@ class MudaeTextParser:
 
     _NO_MUDAPINS = re.compile(
         r"No mudapins found!.*kakeraloots", re.IGNORECASE
-    )
-
-    _RANKED_HAREM_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
-        r"(?:\s*[\u00b7\u2022]\s*\((?P<roulette_types>\$?[a-z]+(?:\s*,\s*\$?[a-z]+)*)\))?"
-        r"(?:\s*(?:[-\u00b7\u2022]\s*)?:(?P<key_type>[a-z]+)key:\s*"
-        r"\(\*{0,2}(?P<key_count>\d+)\*{0,2}\))?"
-        r"(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
-        re.IGNORECASE,
     )
 
     _ANTIDISABLE_HEADER = re.compile(
@@ -369,49 +360,9 @@ class MudaeTextParser:
 
     def parse_ranked_harem_page(self, text: str) -> RankedHaremPage:
         """Parse direct owned-character evidence from `$mmr` or `$mmrk`."""
-        lines = self._lines(text)
-        if not any("harem" in line.casefold() for line in lines):
-            raise MudaeParseError("Expected a Mudae ranked harem header.")
-        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
-        entries: list[RankedHaremEntry] = []
-        for line in lines:
-            # Mudae may wrap the rank, name, and/or value in Discord markdown
-            # emphasis. The markdown is presentation-only and should not make
-            # otherwise valid $mmr/$mmrk entries fail the structured parser.
-            match = self._RANKED_HAREM_ENTRY.match(re.sub(r"\*+", "", line))
-            if match is None:
-                continue
-            entries.append(
-                RankedHaremEntry(
-                    name=match.group("name").strip(),
-                    claim_rank=self._number(match.group("rank")),
-                    kakera_value=(
-                        self._number(match.group("kakera_value"))
-                        if match.group("kakera_value")
-                        else None
-                    ),
-                    roulette_types=(
-                        tuple(
-                            token.strip().removeprefix("$").lower()
-                            for token in match.group("roulette_types").split(",")
-                            if token.strip()
-                        )
-                        if match.group("roulette_types") is not None
-                        else None
-                    ),
-                    key_type=(match.group("key_type") or "").lower() or None,
-                    key_count=(
-                        int(match.group("key_count")) if match.group("key_count") else None
-                    ),
-                )
-            )
-        if not entries:
-            raise MudaeParseError("No ranked harem entries found in the Mudae `$mmr` output.")
-        return RankedHaremPage(
-            page_number=int(page.group("page")) if page else None,
-            page_count=int(page.group("pages")) if page else None,
-            entries=tuple(entries),
-        )
+        return RankedHaremParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_player_bonus(self, text: str) -> PlayerBonusSnapshot:
         """Parse stable player modifiers from a copied Mudae `$bonus` message."""

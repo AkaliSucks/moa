@@ -10,6 +10,7 @@ from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
 from moa.parser.harem_key import HaremKeyParser
+from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.message_router import MudaeMessageRouter
@@ -1116,6 +1117,99 @@ def test_parse_ranked_harem_page_from_mmrk_output() -> None:
         ("Saber", 4, 1478),
     ]
     assert all(entry.roulette_types is None for entry in page.entries)
+
+
+def test_ranked_harem_parser_preserves_full_partial_zero_and_empty_evidence() -> None:
+    page = RankedHaremParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "ERNIEUUU'S HAREM\n"
+        "#0 - Zero · ($HA, $wg) - :GoldKey: (**0**) 0 ka\n"
+        "#2 - Partial\n"
+        "#3 - Current empty -\n"
+    )
+
+    assert [(entry.name, entry.claim_rank) for entry in page.entries] == [
+        ("Zero", 0),
+        ("Partial", 2),
+        ("Current empty -", 3),
+    ]
+    assert page.entries[0].kakera_value == 0
+    assert page.entries[0].roulette_types == ("ha", "wg")
+    assert page.entries[0].key_type == "gold"
+    assert page.entries[0].key_count == 0
+    assert page.entries[1].kakera_value is None
+    assert page.entries[1].roulette_types is None
+    assert page.entries[1].key_type is None
+    assert page.entries[1].key_count is None
+    assert page.page_number is None
+    assert page.page_count is None
+
+
+def test_ranked_harem_parser_normalizes_custom_emojis_and_markdown() -> None:
+    page = RankedHaremParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "**Mudae's harem**\n"
+        "**#4 - <:Saber:123> \u00b7 ($HA, $WG) - <a:GoldKey:789> (**7**) **1,234** ka**\n"
+        "Page 2 / 6"
+    )
+
+    assert page.page_number == 2
+    assert page.page_count == 6
+    assert page.entries[0].name == ":Saber:"
+    assert page.entries[0].roulette_types == ("ha", "wg")
+    assert page.entries[0].key_type == "gold"
+    assert page.entries[0].key_count == 7
+    assert page.entries[0].kakera_value == 1234
+
+
+def test_ranked_harem_parser_facade_matches_dedicated_parser() -> None:
+    ranked_page_text = "ernieuuu's harem\n#2 - Zero Two 1,440 ka\nPage 1 / 38"
+    expected = RankedHaremParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(ranked_page_text)
+
+    assert MudaeTextParser().parse_ranked_harem_page(ranked_page_text) == expected
+
+
+def test_ranked_harem_parser_uses_injected_line_and_number_seams() -> None:
+    lines = Mock(
+        return_value=[
+            "Alpha's harem",
+            "#7 - Alpha \u00b7 ($ha) - :goldkey: (7) 1,234 ka",
+        ]
+    )
+    number = Mock(side_effect=comma_int)
+
+    page = RankedHaremParser(MudaeParseError, lines, number).parse("raw response")
+
+    lines.assert_called_once_with("raw response")
+    assert number.call_args_list == [call("7"), call("1,234")]
+    assert page.entries[0].claim_rank == 7
+    assert page.entries[0].kakera_value == 1234
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        (
+            "not a valid response",
+            "Expected a Mudae ranked harem header.",
+        ),
+        (
+            "ernieuuu's harem\nPage 1 / 6",
+            "No ranked harem entries found in the Mudae `$mmr` output.",
+        ),
+    ],
+)
+def test_ranked_harem_parser_rejects_invalid_pages_with_exact_errors(text, message) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        RankedHaremParser(
+            MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+        ).parse(text)
+
+    assert str(error.value) == message
 
 
 def test_parse_ranked_harem_page_from_mmr_and_mmrk_compact_output() -> None:
