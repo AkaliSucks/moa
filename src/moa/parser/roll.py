@@ -3,6 +3,7 @@
 import re
 
 from moa.models.character import RollObservation
+from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 
 
 def clean_series(value: str) -> str:
@@ -61,12 +62,12 @@ class RollParser:
 
     @staticmethod
     def _lines(text: str) -> list[str]:
-        normalized = re.sub(r"<a?:(?P<name>[A-Za-z0-9_]+):\d+>", r":\g<name>:", text)
+        normalized = normalize_custom_emojis(text)
         return [line.strip().replace("\u200b", "") for line in normalized.splitlines() if line.strip()]
 
     @staticmethod
     def _number(value: str) -> int:
-        return int(value.replace(",", ""))
+        return comma_int(value)
 
     def _identity_error(self, message: str) -> ValueError:
         return self._error_type(message)
@@ -170,5 +171,4 @@ class RollParser:
         )
 
     def _first_number(self, lines: list[str], pattern: re.Pattern[str]) -> int | None:
-        match = next((pattern.match(line) for line in lines if pattern.match(line)), None)
-        return self._number(match.group("rank")) if match else None
+        return first_named_rank(lines, pattern)

@@ -42,6 +42,7 @@ from moa.models.character import (
     WishlistEntry,
     WishlistSnapshot,
 )
+from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser, clean_series, roll_name_and_series
 from moa.parser.top import TopParser
 
@@ -345,12 +346,12 @@ class MudaeTextParser:
 
     @staticmethod
     def _lines(text: str) -> list[str]:
-        normalized = re.sub(r"<a?:(?P<name>[A-Za-z0-9_]+):\d+>", r":\g<name>:", text)
+        normalized = normalize_custom_emojis(text)
         return [line.strip().replace("\u200b", "") for line in normalized.splitlines() if line.strip()]
 
     @staticmethod
     def _number(value: str) -> int:
-        return int(value.replace(",", ""))
+        return comma_int(value)
 
     def parse_top_page(self, text: str) -> TopPage:
         """Parse one copied `$top` page into ranked character observations."""
@@ -1467,5 +1468,4 @@ class MudaeTextParser:
         return int(match.group(("minimum", "maximum")[index]))
 
     def _first_number(self, lines: list[str], pattern: re.Pattern[str]) -> int | None:
-        match = next((pattern.match(line) for line in lines if pattern.match(line)), None)
-        return self._number(match.group("rank")) if match else None
+        return first_named_rank(lines, pattern)

@@ -3,6 +3,7 @@
 import re
 
 from moa.models.character import RankedCharacter, TopPage
+from moa.parser.primitives import comma_int, normalize_custom_emojis
 
 
 class TopParser:
@@ -21,16 +22,16 @@ class TopParser:
 
     @staticmethod
     def _lines(text: str) -> list[str]:
-        normalized = re.sub(r"<a?:(?P<name>[A-Za-z0-9_]+):\d+>", r":\g<name>:", text)
+        normalized = normalize_custom_emojis(text)
         return [
             line
             for raw_line in normalized.splitlines()
-            if (line := raw_line.replace("\u200b", "").strip())
+            if (line := raw_line.replace("\u200b", " ").strip())
         ]
 
     @staticmethod
     def _number(value: str) -> int:
-        return int(value.replace(",", ""))
+        return comma_int(value)
 
     def parse(self, text: str) -> TopPage:
         """Parse one copied ``$top`` or ``$topo`` page."""

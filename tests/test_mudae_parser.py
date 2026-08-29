@@ -1,6 +1,9 @@
+import re
+
 import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
+from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 
@@ -121,7 +124,7 @@ def test_parse_top_page_facade_matches_dedicated_parser() -> None:
 def test_top_parser_normalizes_emoji_zero_width_blanks_and_comma_numbers() -> None:
     page = TopParser(MudaeParseError).parse(
         "\u200b<:trophy:123> TOP 1,000\n\n"
-        "#1,002 - Character Name <:heart:456> - Series Name\n"
+        "#1,002 - Character\u200bName <:heart:456> - Series Name\n"
         "#1,003 - Claimed Character <:heart:456> => owner - Claimed Series\n"
         "\u200bPage 2 / 10\u200b"
     )
@@ -133,6 +136,33 @@ def test_top_parser_normalizes_emoji_zero_width_blanks_and_comma_numbers() -> No
     assert page.characters[0].claim_rank == 1002
     assert page.characters[0].owner_name is None
     assert page.characters[1].owner_name == "owner"
+
+
+def test_shared_parser_primitives_preserve_custom_emoji_boundaries() -> None:
+    assert normalize_custom_emojis("<:heart:123> <a:star:456>") == ":heart: :star:"
+    assert normalize_custom_emojis("<:heart:123 <a:star:456x>") == "<:heart:123 <a:star:456x>"
+
+
+def test_shared_parser_primitives_convert_comma_ints_and_preserve_value_errors() -> None:
+    assert comma_int("1,234,567") == 1234567
+
+    with pytest.raises(ValueError):
+        comma_int("not-a-number")
+
+
+def test_shared_parser_primitives_find_optional_anchored_named_rank() -> None:
+    pattern = re.compile(r"^Rank: #(?P<rank>[\d,]+)$")
+
+    assert first_named_rank(["prefix Rank: #9", "Rank: #1,234"], pattern) == 1234
+    assert first_named_rank(["No rank here"], pattern) is None
+
+
+def test_parser_line_helpers_preserve_zero_width_policies() -> None:
+    text = "\u200b\nCharacter\u200bName"
+
+    assert MudaeTextParser._lines(text) == ["", "CharacterName"]
+    assert RollParser._lines(text) == ["", "CharacterName"]
+    assert TopParser._lines(text) == ["Character Name"]
 
 
 def test_parse_antidisable_page_reads_series_slots_count_and_pages() -> None:
