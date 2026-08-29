@@ -47,6 +47,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -63,12 +64,6 @@ class MudaeTextParser:
 
     _TOP_HEADER = TopParser._TOP_HEADER
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
-    _KAKERA_REACTION_BLOCKED = re.compile(
-        r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
-        r"(?P<duration>.+?)\.\s*\(\$ku\)$",
-        re.IGNORECASE,
-    )
-
     _MUDAPIN_MARKER = re.compile(r":(?:pin|logopin)\d+:", re.IGNORECASE)
 
     _NO_MUDAPINS = re.compile(
@@ -370,20 +365,9 @@ class MudaeTextParser:
 
     def parse_kakera_reaction_blocked(self, text: str) -> KakeraReactionBlocked:
         """Parse the one-line response shown after an unaffordable Kakera click."""
-        for line in self._lines(text):
-            normalized = re.sub(r"\*+", "", line).strip()
-            match = self._KAKERA_REACTION_BLOCKED.match(normalized)
-            if match is None:
-                continue
-            account_name = match.group("account").strip()
-            if account_name:
-                return KakeraReactionBlocked(
-                    account_name=account_name,
-                    cooldown_minutes=self._duration_minutes(match.group("duration")),
-                )
-        raise MudaeParseError(
-            "Expected a compact Mudae Kakera reaction-blocked response."
-        )
+        return KakeraReactionBlockedParser(
+            MudaeParseError, self._duration_minutes
+        ).parse(text)
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:
         """Parse one copied keyed-harem page, with optional current Kakera values."""

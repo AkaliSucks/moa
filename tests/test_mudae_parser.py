@@ -9,6 +9,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -856,6 +857,67 @@ def test_parse_kakera_reaction_blocked_is_not_a_timer_snapshot() -> None:
         parser.parse_timer_state(
             "**cute_beagle_91130**, You can't react to kakera for **34** min. ($ku)"
         )
+
+
+@pytest.mark.parametrize(
+    ("response", "account_name", "cooldown_minutes"),
+    [
+        (
+            "\u200b unrelated line\n"
+            "\u200b<a:wave:123> **cute_beagle_91130**, You can't react to kakera for **2h 32 min**. ($KU)",
+            ":wave: cute_beagle_91130",
+            152,
+        ),
+        ("ernieuuu, You can't react to kakera for 7 min. ($ku)", "ernieuuu", 7),
+    ],
+)
+def test_kakera_reaction_blocked_parser_scans_normalized_lines_and_durations(
+    response: str, account_name: str, cooldown_minutes: int
+) -> None:
+    blocked = KakeraReactionBlockedParser(
+        MudaeParseError, MudaeTextParser._duration_minutes
+    ).parse(response)
+
+    assert blocked.account_name == account_name
+    assert blocked.cooldown_minutes == cooldown_minutes
+
+
+def test_kakera_reaction_blocked_parser_facade_matches_dedicated_parser() -> None:
+    response = "\u200b**cute_beagle_91130**, You can't react to kakera for **34** min. ($ku)"
+
+    expected = KakeraReactionBlockedParser(
+        MudaeParseError, MudaeTextParser._duration_minutes
+    ).parse(response)
+
+    assert MudaeTextParser().parse_kakera_reaction_blocked(response) == expected
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        ", You can't react to kakera for 34 min. ($ku)",
+        "prefix ernieuuu, You can't react to kakera for 34 min. ($ku) trailing",
+        "***, You can't react to kakera for 34 min. ($ku)",
+    ],
+)
+def test_kakera_reaction_blocked_parser_rejects_empty_or_unanchored_accounts(
+    response: str,
+) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        KakeraReactionBlockedParser(
+            MudaeParseError, MudaeTextParser._duration_minutes
+        ).parse(response)
+
+    assert str(error.value) == "Expected a compact Mudae Kakera reaction-blocked response."
+
+
+def test_kakera_reaction_blocked_parser_preserves_unsupported_duration_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        KakeraReactionBlockedParser(
+            MudaeParseError, MudaeTextParser._duration_minutes
+        ).parse("ernieuuu, You can't react to kakera for soon. ($ku)")
+
+    assert str(error.value) == "Unsupported Mudae timer duration: 'soon'"
 
 
 def test_parse_kakera_reaction_receipt() -> None:
