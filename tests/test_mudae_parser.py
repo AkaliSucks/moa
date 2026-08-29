@@ -3,6 +3,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+from moa.commands.registry import ArgumentPolicy, COMMAND_REGISTRY
 from moa.models.character import DisableListEntry
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.antidisable import AntidisablePageParser
@@ -18,6 +19,7 @@ from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -2227,6 +2229,15 @@ def test_parse_personal_rare_reads_the_account_override() -> None:
     assert state.personal_rare_multiplier == 1
 
 
+def test_personal_rare_parser_facade_matches_dedicated_parser() -> None:
+    response = "**cUrReNt $PeRsOnAlRaRe:\n_*0*_"
+
+    expected = PersonalRareParser(MudaeParseError, MudaeTextParser._lines).parse(response)
+
+    assert MudaeTextParser().parse_personal_rare(response) == expected
+    assert expected.personal_rare_multiplier == 0
+
+
 def test_parse_personal_rare_accepts_discord_emphasis_and_help_text() -> None:
     state = MudaeTextParser().parse_personal_rare(
         "Syntax: $personalrare <Number between 1 and the current $setrare value for your server>\n"
@@ -2236,6 +2247,46 @@ def test_parse_personal_rare_accepts_discord_emphasis_and_help_text() -> None:
     )
 
     assert state.personal_rare_multiplier == 1
+
+
+def test_personal_rare_parser_normalizes_custom_emojis_zero_width_and_blank_lines() -> None:
+    state = PersonalRareParser(MudaeParseError, MudaeTextParser._lines).parse(
+        "\u200b<a:info:123>\n\n\u200b**Your current $personalrare: 2**\u200b"
+    )
+
+    assert state.personal_rare_multiplier == 2
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "Current $personalrare: nope",
+        "Personal rare is not configured.",
+        "",
+    ],
+)
+def test_personal_rare_parser_rejects_malformed_or_missing_responses(response: str) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        PersonalRareParser(MudaeParseError, MudaeTextParser._lines).parse(response)
+
+    assert str(error.value) == (
+        "Expected a Mudae $persr response with a current $personalrare value."
+    )
+
+
+def test_personal_rare_registry_preserves_delegate_and_acknowledgement_workflow() -> None:
+    for token in ("$persr", "$personalrare"):
+        match = COMMAND_REGISTRY.lookup(token)
+        assert match is not None
+        assert match.canonical_name == "personalrare"
+        assert match.spec.argument_policy is ArgumentPolicy.PERSONAL_RARE_DELEGATE
+        assert match.spec.workflow_key == "personal_rare_acknowledgement"
+
+
+def test_personal_rare_response_is_router_detected() -> None:
+    detection = MudaeMessageRouter().detect("Current $personalrare: 0")
+
+    assert detection.kind == "personalrare"
 
 
 def test_parse_kakeraloot_settings_reads_server_costs() -> None:

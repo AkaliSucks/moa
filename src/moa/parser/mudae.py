@@ -47,6 +47,7 @@ from moa.parser.harem_ranked import RankedHaremParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
+from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -67,10 +68,6 @@ class MudaeTextParser:
 
     _NO_MUDAPINS = re.compile(
         r"No mudapins found!.*kakeraloots", re.IGNORECASE
-    )
-
-    _PERSONAL_RARE = re.compile(
-        r"(?:Your\s+)?current\s+\$personalrare:\s*(?P<value>\d+)", re.IGNORECASE
     )
 
     _SPHERE_CLICKS = re.compile(
@@ -357,13 +354,7 @@ class MudaeTextParser:
 
     def parse_personal_rare(self, text: str) -> PersonalRareSnapshot:
         """Parse the account-scoped `$personalrare` value from `$persr` output."""
-        normalized_text = "\n".join(
-            re.sub(r"[*_]", "", line) for line in self._lines(text)
-        )
-        match = self._PERSONAL_RARE.search(normalized_text)
-        if match is None:
-            raise MudaeParseError("Expected a Mudae $persr response with a current $personalrare value.")
-        return PersonalRareSnapshot(personal_rare_multiplier=int(match.group("value")))
+        return PersonalRareParser(MudaeParseError, self._lines).parse(text)
 
     def parse_timer_state(self, text: str) -> TimerStateSnapshot:
         """Parse whichever action categories are currently visible in `$tu`."""
