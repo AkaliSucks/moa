@@ -33,7 +33,6 @@ from moa.models.character import (
     PlayerBonusSnapshot,
     RollObservation,
     TopPage,
-    UnavailableCharacter,
     UnavailableCharacterPage,
     WishlistSnapshot,
 )
@@ -53,6 +52,7 @@ from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
+from moa.parser.unavailable_characters import UnavailableCharacterPageParser
 from moa.parser.wishlist import WishlistParser
 
 
@@ -63,8 +63,6 @@ class MudaeParseError(ValueError):
 class MudaeTextParser:
     """Parse stable, high-value fields from common Mudae message formats."""
 
-    _TOP_HEADER = TopParser._TOP_HEADER
-    _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _MUDAPIN_MARKER = re.compile(r":(?:pin|logopin)\d+:", re.IGNORECASE)
 
     _NO_MUDAPINS = re.compile(
@@ -211,10 +209,6 @@ class MudaeTextParser:
 
     _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
-    _TOPX_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)\s+-\s+(?P<series>.+?)"
-        r"\s*🚫(?:\s*\((?P<reason>[^)]+)\))?$"
-    )
     _KAKERA_BALANCE = re.compile(
         r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
     )
@@ -356,30 +350,9 @@ class MudaeTextParser:
 
     def parse_unavailable_characters(self, text: str) -> UnavailableCharacterPage:
         """Parse the currently unrollable characters listed by Mudae `$topx`."""
-        lines = self._lines(text)
-        header = next((self._TOP_HEADER.search(line) for line in lines if self._TOP_HEADER.search(line)), None)
-        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
-        characters: list[UnavailableCharacter] = []
-        for line in lines:
-            entry = self._TOPX_ENTRY.match(line)
-            if entry is None:
-                continue
-            characters.append(
-                UnavailableCharacter(
-                    name=entry.group("name").removesuffix(" 💞").strip(),
-                    series=entry.group("series").strip(),
-                    claim_rank=self._number(entry.group("rank")),
-                    reason=entry.group("reason"),
-                )
-            )
-        if not characters:
-            raise MudaeParseError("No unavailable characters found in the Mudae $topx output.")
-        return UnavailableCharacterPage(
-            limit=self._number(header.group("limit")) if header else None,
-            page_number=int(page.group("page")) if page else None,
-            page_count=int(page.group("pages")) if page else None,
-            characters=tuple(characters),
-        )
+        return UnavailableCharacterPageParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_kakera_state(self, text: str) -> KakeraStateSnapshot:
         """Parse current Kakera balance and badge levels from a copied `$k` response."""

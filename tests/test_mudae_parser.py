@@ -22,6 +22,7 @@ from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
+from moa.parser.unavailable_characters import UnavailableCharacterPageParser
 from moa.parser.wishlist import WishlistParser
 
 
@@ -1748,6 +1749,94 @@ def test_parse_topx_accepts_the_actual_discord_unavailable_marker() -> None:
         ("2B", None),
         ("Venom", "$togglewestern"),
     ]
+
+
+def test_unavailable_character_parser_preserves_seams_zero_metadata_and_row_order() -> None:
+    lines = Mock(
+        return_value=[
+            "prefix TOP 0 suffix",
+            "#1,002 - First Character 💞 - First Series 🚫",
+            "malformed row",
+            "#1,003 - Second Character - Second Series 🚫 (reason)",
+            "Page 0 / 0",
+        ]
+    )
+    number = Mock(side_effect=lambda value: int(value.replace(",", "")))
+
+    page = UnavailableCharacterPageParser(
+        MudaeParseError, lines, number
+    ).parse("raw topx")
+
+    lines.assert_called_once_with("raw topx")
+    assert page.limit == 0
+    assert page.page_number == 0
+    assert page.page_count == 0
+    assert [(character.name, character.series, character.claim_rank, character.reason) for character in page.characters] == [
+        ("First Character", "First Series", 1002, None),
+        ("Second Character", "Second Series", 1003, "reason"),
+    ]
+
+
+def test_unavailable_character_parser_preserves_normalization_and_markdown_text() -> None:
+    page = UnavailableCharacterPageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "\u200b<:trophy:123> TOP 1,000\n"
+        "#10 - **Character <:heart:456>** - **Series Name** 🚫 ($togglewestern)\n"
+        "\u200bPage 2 / 3\u200b"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 2
+    assert page.page_count == 3
+    assert page.characters[0].name == "**Character :heart:**"
+    assert page.characters[0].series == "**Series Name**"
+    assert page.characters[0].reason == "$togglewestern"
+
+
+def test_unavailable_character_parser_skips_malformed_and_empty_reason_rows() -> None:
+    page = UnavailableCharacterPageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "#1 - Missing marker - Series\n"
+        "#bad - Invalid rank - Series 🚫\n"
+        "#2 - Missing series - 🚫\n"
+        "#3 - Empty reason - Series 🚫 ()\n"
+        "#4 - Valid - Series 🚫"
+    )
+
+    assert page.limit is None
+    assert page.page_number is None
+    assert page.page_count is None
+    assert [(character.name, character.claim_rank) for character in page.characters] == [
+        ("Valid", 4),
+    ]
+
+
+def test_unavailable_character_parser_facade_matches_dedicated_parser() -> None:
+    text = (
+        "🏆 TOP 1000\n"
+        "#10 - 2B - NieR: Automata 🚫\n"
+        "#88 - Venom - Marvel 🚫 ($togglewestern)\n"
+        "Page 1 / 67"
+    )
+
+    expected = UnavailableCharacterPageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert MudaeTextParser().parse_unavailable_characters(text) == expected
+
+
+def test_unavailable_character_parser_rejects_missing_rows_with_exact_error() -> None:
+    parser = UnavailableCharacterPageParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    )
+
+    with pytest.raises(MudaeParseError) as error:
+        parser.parse("🏆 TOP 0\nPage 0 / 0")
+
+    assert str(error.value) == "No unavailable characters found in the Mudae $topx output."
 
 
 def test_parse_kakera_state_reads_balance_and_maxed_badges() -> None:
