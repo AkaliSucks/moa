@@ -47,6 +47,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
+from moa.parser.transaction import TransactionParser
 
 
 class MudaeParseError(ValueError):
@@ -373,36 +374,7 @@ class MudaeTextParser:
 
     def parse_transaction(self, text: str, kind: str) -> None:
         """Validate one response in a Mudae gift or trade flow."""
-        normalized = re.sub(r"\*+", "", text).casefold()
-        if kind == "gift_kakera":
-            valid = (
-                re.search(r"syntax:\s*\$givek\b", normalized) is not None
-                or ("do you really want to give" in normalized and ":kakera:" in normalized)
-                or ("just gifted" in normalized and ":kakera:" in normalized)
-            )
-        elif kind == "gift_spheres":
-            valid = (
-                re.search(r"syntax:\s*\$givesp\b", normalized) is not None
-                or ("do you really want to give" in normalized and ":sp:" in normalized)
-                or ("just gifted" in normalized and ":sp:" in normalized)
-            )
-        elif kind == "gift_character":
-            valid = (
-                re.search(r"syntax:\s*\$give\b", normalized) is not None
-                or ("wants to give you" in normalized and "do you confirm" in normalized)
-                or re.search(r"\bgiven to\s+@", normalized) is not None
-            )
-        elif kind == "trade":
-            valid = (
-                re.search(r"syntax:\s*\$trade\b", normalized) is not None
-                or "type the name(s) of the character" in normalized
-                or "do you confirm the exchange" in normalized
-                or "the exchange is over" in normalized
-            )
-        else:
-            raise MudaeParseError(f"Unsupported transaction kind: {kind}")
-        if not valid:
-            raise MudaeParseError(f"Expected a Mudae {kind} transaction response.")
+        return TransactionParser(MudaeParseError).parse(text, kind)
 
     def parse_divorce_prompt(self, text: str) -> DivorcePrompt:
         """Parse the first response from Mudae's two-step `$divorce` flow."""

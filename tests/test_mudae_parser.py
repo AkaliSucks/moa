@@ -1,4 +1,5 @@
 import re
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -9,6 +10,7 @@ from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
+from moa.parser.transaction import TransactionParser
 
 
 TOP_PAGE = """🏆 TOP 1000
@@ -306,6 +308,69 @@ def test_parse_completed_divorce_from_copied_mudae_output() -> None:
 )
 def test_parse_transaction_steps(kind: str, response: str) -> None:
     MudaeTextParser().parse_transaction(response, kind)
+
+
+@pytest.mark.parametrize(
+    ("kind", "response"),
+    [
+        ("gift_kakera", "Syntax: $givek @user amount"),
+        ("gift_spheres", "Syntax: $givesp @user amount"),
+        ("gift_character", "Syntax: $give @user character"),
+        ("trade", "Syntax: $trade @user"),
+    ],
+)
+def test_transaction_parser_accepts_syntax_responses(kind: str, response: str) -> None:
+    assert TransactionParser(MudaeParseError).parse(response, kind) is None
+
+
+def test_parse_transaction_facade_matches_dedicated_parser() -> None:
+    response = "***ERNIEUUU***, do you really want to give 1:KAKERA: ? (Y/N/YES/NO)"
+
+    expected = TransactionParser(MudaeParseError).parse(response, "gift_kakera")
+
+    assert MudaeTextParser().parse_transaction(response, "gift_kakera") == expected
+
+
+def test_router_probes_transaction_kinds_in_declared_order() -> None:
+    parser = Mock()
+    parser.parse_kakera_reaction_receipt.side_effect = MudaeParseError("not receipt")
+    parser.parse_kakera_reaction_blocked.side_effect = MudaeParseError("not blocked")
+    parser.parse_transaction.side_effect = [
+        MudaeParseError("not kakera"),
+        MudaeParseError("not spheres"),
+        MudaeParseError("not character"),
+        None,
+    ]
+
+    detection = MudaeMessageRouter(parser).detect("transaction response")
+
+    assert detection.kind == "trade"
+    assert parser.parse_transaction.call_args_list == [
+        call("transaction response", "gift_kakera"),
+        call("transaction response", "gift_spheres"),
+        call("transaction response", "gift_character"),
+        call("transaction response", "trade"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "response", "message"),
+    [
+        ("unknown", "anything", "Unsupported transaction kind: unknown"),
+        (
+            "trade",
+            "This is not a transaction response.",
+            "Expected a Mudae trade transaction response.",
+        ),
+    ],
+)
+def test_transaction_parser_preserves_exact_errors(
+    kind: str, response: str, message: str
+) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        TransactionParser(MudaeParseError).parse(response, kind)
+
+    assert str(error.value) == message
 
 
 def test_parse_character_details_accepts_discord_custom_emojis_and_same_line_key() -> None:
