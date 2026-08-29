@@ -35,7 +35,6 @@ from moa.models.character import (
     HaremKeyPage,
     PlayerBonusMetric,
     PlayerBonusSnapshot,
-    RankedCharacter,
     RollObservation,
     TopPage,
     UnavailableCharacter,
@@ -44,6 +43,7 @@ from moa.models.character import (
     WishlistSnapshot,
 )
 from moa.parser.roll import RollParser, clean_series, roll_name_and_series
+from moa.parser.top import TopParser
 
 
 class MudaeParseError(ValueError):
@@ -53,11 +53,7 @@ class MudaeParseError(ValueError):
 class MudaeTextParser:
     """Parse stable, high-value fields from common Mudae message formats."""
 
-    _TOP_HEADER = re.compile(r"\bTOP\s+(?P<limit>[\d,]+)\b", re.IGNORECASE)
-    _TOP_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
-        r"(?:\s*=>\s*(?P<owner>.+?))?\s+-\s+(?P<series>.+)$"
-    )
+    _TOP_HEADER = TopParser._TOP_HEADER
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _ROULETTE = RollParser._ROULETTE
     _CLAIM_RANK = RollParser._CLAIM_RANK
@@ -358,35 +354,7 @@ class MudaeTextParser:
 
     def parse_top_page(self, text: str) -> TopPage:
         """Parse one copied `$top` page into ranked character observations."""
-        lines = self._lines(text)
-        header = next((self._TOP_HEADER.search(line) for line in lines if self._TOP_HEADER.search(line)), None)
-        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
-
-        characters: list[RankedCharacter] = []
-        for line in lines:
-            entry = self._TOP_ENTRY.match(line)
-            if entry is None:
-                continue
-            name = entry.group("name").removesuffix(" 💞").strip()
-            name = name.replace("\U0001f49e", "").strip()
-            characters.append(
-                RankedCharacter(
-                    name=name,
-                    series=entry.group("series").strip(),
-                    claim_rank=self._number(entry.group("rank")),
-                    owner_name=entry.group("owner").strip() if entry.group("owner") else None,
-                )
-            )
-
-        if not characters:
-            raise MudaeParseError("No ranked characters found in the Mudae $top output.")
-
-        return TopPage(
-            limit=self._number(header.group("limit")) if header else None,
-            page_number=int(page.group("page")) if page else None,
-            page_count=int(page.group("pages")) if page else None,
-            characters=tuple(characters),
-        )
+        return TopParser(MudaeParseError).parse(text)
 
     @staticmethod
     def _duration_minutes(value: str) -> int:

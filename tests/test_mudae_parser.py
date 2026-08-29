@@ -2,6 +2,7 @@ import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.parser.roll import RollParser
+from moa.parser.top import TopParser
 
 
 TOP_PAGE = """🏆 TOP 1000
@@ -109,6 +110,29 @@ def test_parse_topo_page_preserves_claimed_owner_names() -> None:
     assert page.characters[0].name == "Hatsune Miku"
     assert page.characters[0].owner_name == "xuppii"
     assert page.characters[1].owner_name == "ernieuuu"
+
+
+def test_parse_top_page_facade_matches_dedicated_parser() -> None:
+    expected = TopParser(MudaeParseError).parse(TOP_PAGE)
+
+    assert MudaeTextParser().parse_top_page(TOP_PAGE) == expected
+
+
+def test_top_parser_normalizes_emoji_zero_width_blanks_and_comma_numbers() -> None:
+    page = TopParser(MudaeParseError).parse(
+        "\u200b<:trophy:123> TOP 1,000\n\n"
+        "#1,002 - Character Name <:heart:456> - Series Name\n"
+        "#1,003 - Claimed Character <:heart:456> => owner - Claimed Series\n"
+        "\u200bPage 2 / 10\u200b"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 2
+    assert page.page_count == 10
+    assert page.characters[0].name == "Character Name"
+    assert page.characters[0].claim_rank == 1002
+    assert page.characters[0].owner_name is None
+    assert page.characters[1].owner_name == "owner"
 
 
 def test_parse_antidisable_page_reads_series_slots_count_and_pages() -> None:
@@ -1474,5 +1498,7 @@ def test_parse_timer_state_accepts_claim_interval_waiting_response() -> None:
 
 
 def test_parse_top_page_rejects_unrecognized_text() -> None:
-    with pytest.raises(MudaeParseError, match="No ranked characters"):
+    with pytest.raises(MudaeParseError) as error:
         MudaeTextParser().parse_top_page("not a Mudae message")
+
+    assert str(error.value) == "No ranked characters found in the Mudae $top output."
