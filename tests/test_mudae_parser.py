@@ -9,6 +9,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
@@ -867,6 +868,14 @@ def test_parse_kakera_reaction_receipt() -> None:
     assert receipt.kakera_earned == 497
 
 
+def test_kakera_reaction_receipt_parser_facade_matches_dedicated_parser() -> None:
+    response = "\u200b<a:kakeraY:123> **ernieuuu +1,234** ($k)"
+
+    expected = KakeraReactionReceiptParser(MudaeParseError).parse(response)
+
+    assert MudaeTextParser().parse_kakera_reaction_receipt(response) == expected
+
+
 def test_parse_bold_kakera_reaction_receipt() -> None:
     receipt = MudaeTextParser().parse_kakera_reaction_receipt(
         ":kakeraY: **ernieuuu +524** ($k)"
@@ -896,6 +905,37 @@ def test_parse_kakera_breakdown_reaction_receipt() -> None:
     assert receipt.reaction_label == ":kakeraL:"
     assert receipt.account_name == "ernieuuu"
     assert receipt.kakera_earned == 2202
+
+
+def test_kakera_reaction_receipt_scans_normalized_lines_in_source_order() -> None:
+    receipt = KakeraReactionReceiptParser(MudaeParseError).parse(
+        "unrelated line\n"
+        "<:kakeraG:123> **first_account +497** ($k)\n"
+        ":kakeraY: second_account +524 ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraG:"
+    assert receipt.account_name == "first_account"
+    assert receipt.kakera_earned == 497
+
+
+def test_kakera_reaction_receipt_prefers_breakdown_pattern_on_each_line() -> None:
+    receipt = KakeraReactionReceiptParser(MudaeParseError).parse(
+        ":kakeraL: breaks down into:kakeraB: +:kakeraR: => account +2,202 ($k)"
+    )
+
+    assert receipt.reaction_label == ":kakeraL:"
+    assert receipt.account_name == "account"
+    assert receipt.kakera_earned == 2202
+
+
+def test_kakera_reaction_receipt_rejects_unsupported_text_with_exact_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        KakeraReactionReceiptParser(MudaeParseError).parse("not a receipt")
+
+    assert str(error.value) == (
+        "Expected a Mudae Kakera reaction receipt such as `:kakeraY: user +497 ($k)`."
+    )
 
 
 def test_parse_keyed_harem_page_from_mmy_output() -> None:

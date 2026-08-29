@@ -47,6 +47,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -62,19 +63,6 @@ class MudaeTextParser:
 
     _TOP_HEADER = TopParser._TOP_HEADER
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
-    _KAKERA_REACTION_RECEIPT = re.compile(
-        r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
-        r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
-        re.IGNORECASE,
-    )
-
-    _KAKERA_REACTION_BREAKDOWN_RECEIPT = re.compile(
-        r"^(?P<reaction>:[a-z0-9_]+:)\s+breaks down into.+?=>\s*"
-        r"(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
-        r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
-        re.IGNORECASE,
-    )
-
     _KAKERA_REACTION_BLOCKED = re.compile(
         r"^(?P<account>.+?),\s*You can't react to kakera for\s*"
         r"(?P<duration>.+?)\.\s*\(\$ku\)$",
@@ -378,26 +366,7 @@ class MudaeTextParser:
 
     def parse_kakera_reaction_receipt(self, text: str) -> KakeraReactionReceipt:
         """Parse the standalone Mudae message shown after a Kakera reaction."""
-        lines = self._lines(text)
-        receipt = next(
-            (
-                match
-                for line in lines
-                for match in (
-                    self._KAKERA_REACTION_BREAKDOWN_RECEIPT.match(line),
-                    self._KAKERA_REACTION_RECEIPT.match(line),
-                )
-                if match is not None
-            ),
-            None,
-        )
-        if receipt is None:
-            raise MudaeParseError("Expected a Mudae Kakera reaction receipt such as `:kakeraY: user +497 ($k)`.")
-        return KakeraReactionReceipt(
-            reaction_label=receipt.group("reaction"),
-            account_name=receipt.group("account").strip(),
-            kakera_earned=self._number(receipt.group("value")),
-        )
+        return KakeraReactionReceiptParser(MudaeParseError).parse(text)
 
     def parse_kakera_reaction_blocked(self, text: str) -> KakeraReactionBlocked:
         """Parse the one-line response shown after an unaffordable Kakera click."""
