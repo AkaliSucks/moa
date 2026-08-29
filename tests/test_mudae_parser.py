@@ -25,6 +25,7 @@ from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
+from moa.parser.timer_state import TimerStateParser
 from moa.parser.unavailable_characters import UnavailableCharacterPageParser
 from moa.parser.wishlist import WishlistParser
 
@@ -2643,6 +2644,47 @@ def test_parse_timer_state_accepts_claim_interval_waiting_response() -> None:
 
     assert state.can_claim_now is False
     assert state.claim_reset_minutes == 53
+
+
+def test_timer_state_parser_uses_injected_facade_seams_and_matches_facade() -> None:
+    response = (
+        "<a:wave:123> **ernieuuu**, you can claim right now! "
+        "The next claim reset is in **1h 2 min**.\n"
+        "Stock: 12,345:kakera:"
+    )
+    lines = Mock(wraps=MudaeTextParser._lines)
+    duration = Mock(wraps=MudaeTextParser._duration_minutes)
+    number = Mock(wraps=MudaeTextParser._number)
+
+    expected = MudaeTextParser().parse_timer_state(response)
+    actual = TimerStateParser(MudaeParseError, lines, duration, number).parse(response)
+
+    assert actual == expected
+    lines.assert_called_once_with(response)
+    assert duration.call_args_list == [call("1h 2 min")]
+    number.assert_called_once_with("12,345")
+
+
+def test_timer_state_parser_preserves_partial_evidence_and_precedence() -> None:
+    state = MudaeTextParser().parse_timer_state(
+        "you can claim right now! The next claim reset is in 1h.\n"
+        "you can't claim for another 2h.\n"
+        "For this server, you can claim once per interval of 3h. "
+        "The next interval begins in 3h.\n"
+        "You have 0 rolls left. Next rolls reset in 4h.\n"
+        "The roulette is limited to 10 uses per hour. 5h left.\n"
+        "Upvote Mudae and use this command again to reset your rolls timer for ONE server."
+    )
+
+    assert state.can_claim_now is True
+    assert state.claim_reset_minutes == 60
+    assert state.rolls_left == 0
+    assert state.rolls_reset_status == "timer"
+    assert state.rolls_reset_minutes == 240
+    assert state.rolls_per_hour_limit == 10
+    assert state.daily_kakera_ready is None
+    assert state.rt_available is None
+    assert state.can_react_kakera_now is None
 
 
 def test_parse_top_page_rejects_unrecognized_text() -> None:
