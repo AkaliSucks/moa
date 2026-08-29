@@ -9,6 +9,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.harem_key import HaremKeyParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.message_router import MudaeMessageRouter
@@ -1012,6 +1013,26 @@ def test_parse_keyed_harem_page_from_mmy_output() -> None:
     assert page.entries[-1].name == "Nezuko Kamado"
 
 
+def test_harem_key_parser_normalizes_custom_emojis_and_trimmed_lines() -> None:
+    page = HaremKeyParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(
+        "\u200b<a:goldkey:123>\u200b\n"
+        "\u200bAlbedo\u200b \u00b7 \u200b<:GoLdKeY:456>  (\u200b0\u200b)\u200b\n"
+        "\u200bPage 2 / 6\u200b\n"
+        "\u200bTotal value: 0:kakera:\u200b"
+    )
+
+    assert page.page_number == 2
+    assert page.page_count == 6
+    assert page.total_harem_value == 0
+    assert len(page.entries) == 1
+    assert page.entries[0].name == "Albedo"
+    assert page.entries[0].key_type == "gold"
+    assert page.entries[0].key_count == 0
+    assert page.entries[0].kakera_value is None
+
+
 def test_parse_value_sorted_keyed_harem_page_from_mmyk_output() -> None:
     page = MudaeTextParser().parse_harem_key_page(
         "ernieuuu's harem\n"
@@ -1026,6 +1047,53 @@ def test_parse_value_sorted_keyed_harem_page_from_mmyk_output() -> None:
     assert page.entries[0].name == "Megumin"
     assert page.entries[0].kakera_value == 1505
     assert page.entries[2].key_type == "gold"
+
+
+def test_harem_key_parser_accepts_complete_page_with_metadata_absent() -> None:
+    page = HaremKeyParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse("  Miku Nakano · :SILVERkey:  (12)  0 ka  \n")
+
+    assert page.page_number is None
+    assert page.page_count is None
+    assert page.total_harem_value is None
+    assert [(entry.name, entry.key_type, entry.key_count, entry.kakera_value) for entry in page.entries] == [
+        ("Miku Nakano", "silver", 12, 0)
+    ]
+
+
+def test_harem_key_parser_facade_matches_dedicated_parser() -> None:
+    expected = HaremKeyParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(HAREM_KEY_PAGE)
+
+    assert MudaeTextParser().parse_harem_key_page(HAREM_KEY_PAGE) == expected
+
+
+def test_harem_key_parser_uses_injected_line_and_number_seams() -> None:
+    lines = Mock(
+        return_value=[
+            "Alpha · :goldkey: (7) 1,234 ka",
+            "Total value: 2,345 ka",
+        ]
+    )
+    number = Mock(side_effect=comma_int)
+
+    page = HaremKeyParser(MudaeParseError, lines, number).parse("raw response")
+
+    lines.assert_called_once_with("raw response")
+    assert number.call_args_list == [call("1,234"), call("2,345")]
+    assert page.entries[0].kakera_value == 1234
+    assert page.total_harem_value == 2345
+
+
+def test_harem_key_parser_rejects_text_without_keyed_entries_with_exact_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        HaremKeyParser(
+            MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+        ).parse("ernieuuu's harem\nPage 1 / 6")
+
+    assert str(error.value) == "No keyed harem entries found in the Mudae $mmy= output."
 
 
 def test_parse_ranked_harem_page_from_mmrk_output() -> None:

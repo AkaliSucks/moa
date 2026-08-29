@@ -31,7 +31,6 @@ from moa.models.character import (
     TowerStateSnapshot,
     DisableListEntry,
     DisableListSnapshot,
-    HaremKeyEntry,
     HaremKeyPage,
     PlayerBonusMetric,
     PlayerBonusSnapshot,
@@ -47,6 +46,7 @@ from moa.parser.claim import ClaimParser
 from moa.parser.divorce_confirmation import DivorceConfirmationParser
 from moa.parser.divorce_declined import DivorceDeclinedValidator
 from moa.parser.divorce_prompt import DivorcePromptParser
+from moa.parser.harem_key import HaremKeyParser
 from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -228,14 +228,6 @@ class MudaeTextParser:
 
     _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
-    _HAREM_KEY_ENTRY = re.compile(
-        r"^(?P<name>.+?)\s*[\u00b7\u2022]\s*:(?P<key_type>[a-z]+)key:\s*"
-        r"\((?P<key_count>\d+)\)(?:\s+(?P<kakera_value>[\d,]+)\s+ka)?$",
-        re.IGNORECASE,
-    )
-    _TOTAL_HAREM_VALUE = re.compile(
-        r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
-    )
     _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
     _WISHLIST_HEADER = re.compile(
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
@@ -371,40 +363,9 @@ class MudaeTextParser:
 
     def parse_harem_key_page(self, text: str) -> HaremKeyPage:
         """Parse one copied keyed-harem page, with optional current Kakera values."""
-        lines = self._lines(text)
-        page = next((self._PAGE.match(line) for line in lines if self._PAGE.match(line)), None)
-        total = next(
-            (self._TOTAL_HAREM_VALUE.match(line) for line in lines if self._TOTAL_HAREM_VALUE.match(line)),
-            None,
-        )
-        entries: list[HaremKeyEntry] = []
-
-        for line in lines:
-            entry = self._HAREM_KEY_ENTRY.match(line)
-            if entry is None:
-                continue
-            entries.append(
-                HaremKeyEntry(
-                    name=entry.group("name").strip(),
-                    key_type=entry.group("key_type").lower(),
-                    key_count=int(entry.group("key_count")),
-                    kakera_value=(
-                        self._number(entry.group("kakera_value"))
-                        if entry.group("kakera_value")
-                        else None
-                    ),
-                )
-            )
-
-        if not entries:
-            raise MudaeParseError("No keyed harem entries found in the Mudae $mmy= output.")
-
-        return HaremKeyPage(
-            page_number=int(page.group("page")) if page else None,
-            page_count=int(page.group("pages")) if page else None,
-            entries=tuple(entries),
-            total_harem_value=self._number(total.group("value")) if total else None,
-        )
+        return HaremKeyParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_ranked_harem_page(self, text: str) -> RankedHaremPage:
         """Parse direct owned-character evidence from `$mmr` or `$mmrk`."""
