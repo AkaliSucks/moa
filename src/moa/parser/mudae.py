@@ -36,7 +36,6 @@ from moa.models.character import (
     TopPage,
     UnavailableCharacter,
     UnavailableCharacterPage,
-    WishlistEntry,
     WishlistSnapshot,
 )
 from moa.parser.character_details import CharacterDetailsParser
@@ -53,6 +52,7 @@ from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
+from moa.parser.wishlist import WishlistParser
 
 
 class MudaeParseError(ValueError):
@@ -219,11 +219,6 @@ class MudaeTextParser:
 
     _TIMER_OURO_REFILL = re.compile(r"^(?P<duration>.+?)\s+before the refill\.$", re.IGNORECASE)
 
-    _WISHLIST_HEADER = re.compile(
-        r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
-        r"(?P<starwish_count>\d+)\s*/\s*(?P<starwish_capacity>\d+)\s*\$sw",
-        re.IGNORECASE,
-    )
     _DISABLELIST_HEADER = re.compile(
         r"Disablelist\s*\((?P<used>\d+)\s*/\s*(?P<capacity>\d+)\)", re.IGNORECASE
     )
@@ -369,47 +364,7 @@ class MudaeTextParser:
 
     def parse_wishlist(self, text: str) -> WishlistSnapshot:
         """Parse one copied Mudae `$wl` response, including Starwish markers."""
-        lines = self._lines(text)
-        header = next(
-            (self._WISHLIST_HEADER.search(line) for line in lines if self._WISHLIST_HEADER.search(line)),
-            None,
-        )
-        if header is None:
-            raise MudaeParseError("Expected a Mudae $wl header with $wl and $sw capacities.")
-
-        entries: list[WishlistEntry] = []
-        header_line = header.group(0)
-        for line in lines:
-            if header_line in line:
-                continue
-            name = (
-                line.replace("✅", "")
-                .replace("⭐", "")
-                .replace(":kakera:", "")
-                .strip()
-                .strip("*")
-                .strip()
-            )
-            if not name:
-                continue
-            entries.append(
-                WishlistEntry(
-                    name=name,
-                    is_starwish="⭐" in line,
-                    is_owned_marker_present="✅" in line,
-                    kakera_marker_present=":kakera:" in line,
-                )
-            )
-
-        if not entries:
-            raise MudaeParseError("No wishlist entries found in the Mudae $wl output.")
-        return WishlistSnapshot(
-            wishlist_count=int(header.group("wishlist_count")),
-            wishlist_capacity=int(header.group("wishlist_capacity")),
-            starwish_count=int(header.group("starwish_count")),
-            starwish_capacity=int(header.group("starwish_capacity")),
-            entries=tuple(entries),
-        )
+        return WishlistParser(MudaeParseError, self._lines).parse(text)
 
     def parse_antidisable_page(self, text: str) -> AntidisablePage:
         """Parse one copied `$adl` page as a series-level list."""

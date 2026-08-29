@@ -19,6 +19,7 @@ from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
+from moa.parser.wishlist import WishlistParser
 
 
 TOP_PAGE = """🏆 TOP 1000
@@ -1390,6 +1391,116 @@ def test_parse_wishlist_reads_starwish_markers_from_wl_output() -> None:
         "Xenovia Quarta",
     ]
     assert [entry.name for entry in wishlist.entries if entry.is_starwish] == ["Emilia", "Power"]
+
+
+def test_wishlist_parser_preserves_zero_counts_source_order_marker_evidence_and_noise() -> None:
+    lines = Mock(
+        return_value=[
+            "prefix Wishlist - 0 / 13 $WL, 0 / 2 $SW suffix",
+            "**First** \u2705 \u2b50 :kakera:",
+            "\u2705 \u2b50 :kakera:",
+            "noise",
+            "**Second**",
+        ]
+    )
+
+    wishlist = WishlistParser(MudaeParseError, lines).parse("raw wishlist response")
+
+    lines.assert_called_once_with("raw wishlist response")
+    assert (
+        wishlist.wishlist_count,
+        wishlist.wishlist_capacity,
+        wishlist.starwish_count,
+        wishlist.starwish_capacity,
+    ) == (0, 13, 0, 2)
+    assert [entry.model_dump() for entry in wishlist.entries] == [
+        {
+            "name": "First",
+            "is_starwish": True,
+            "is_owned_marker_present": True,
+            "kakera_marker_present": True,
+        },
+        {
+            "name": "noise",
+            "is_starwish": False,
+            "is_owned_marker_present": False,
+            "kakera_marker_present": False,
+        },
+        {
+            "name": "Second",
+            "is_starwish": False,
+            "is_owned_marker_present": False,
+            "kakera_marker_present": False,
+        },
+    ]
+
+
+def test_wishlist_parser_preserves_custom_emoji_zero_width_and_markdown_normalization() -> None:
+    text = (
+        "\u200b**ernieuuu's WISHLIST - 0/13 $WL, 0/2 $SW**\n"
+        "\n"
+        "\u200b**Custom** \u2705 <:kakera:123>\n"
+        "**Starred** \u2b50\n"
+    )
+
+    wishlist = WishlistParser(MudaeParseError, MudaeTextParser._lines).parse(text)
+
+    assert [entry.model_dump() for entry in wishlist.entries] == [
+        {
+            "name": "Custom",
+            "is_starwish": False,
+            "is_owned_marker_present": True,
+            "kakera_marker_present": True,
+        },
+        {
+            "name": "Starred",
+            "is_starwish": True,
+            "is_owned_marker_present": False,
+            "kakera_marker_present": False,
+        },
+    ]
+
+
+def test_parse_wishlist_facade_matches_dedicated_parser() -> None:
+    text = (
+        "**ernieuuu's Wishlist - 13/13 $wl, 2/2 $sw**\n"
+        "**Saber** \u2705:kakera:\n"
+        "**Emilia** \u2705 \u2b50\n"
+    )
+    expected = WishlistParser(MudaeParseError, MudaeTextParser._lines).parse(text)
+
+    assert MudaeTextParser().parse_wishlist(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Wishlist - x/13 $wl, 0/2 $sw\nEntry",
+        "not a wishlist response",
+    ],
+)
+def test_wishlist_parser_rejects_missing_or_malformed_header_with_exact_error(text: str) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        WishlistParser(MudaeParseError, MudaeTextParser._lines).parse(text)
+
+    assert str(error.value) == "Expected a Mudae $wl header with $wl and $sw capacities."
+
+
+def test_wishlist_parser_rejects_marker_only_output_with_exact_error() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        WishlistParser(MudaeParseError, MudaeTextParser._lines).parse(
+            "Wishlist - 0/13 $wl, 0/2 $sw\n\u2705 \u2b50 :kakera:"
+        )
+
+    assert str(error.value) == "No wishlist entries found in the Mudae $wl output."
+
+
+def test_wishlist_router_detection_remains_loose_until_parser_revalidation() -> None:
+    text = "Wishlist - 0/13 $wl, 0/2 $sw\n\u2705 \u2b50 :kakera:"
+
+    assert MudaeMessageRouter().detect(text).kind == "wishlist"
+    with pytest.raises(MudaeParseError):
+        MudaeTextParser().parse_wishlist(text)
 
 
 def test_parse_disablelist_reads_pool_limits_toggles_and_bundles() -> None:
