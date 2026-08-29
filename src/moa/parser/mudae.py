@@ -42,8 +42,9 @@ from moa.models.character import (
     WishlistEntry,
     WishlistSnapshot,
 )
+from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
-from moa.parser.roll import RollParser, clean_series, roll_name_and_series
+from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
 
 
@@ -56,11 +57,6 @@ class MudaeTextParser:
 
     _TOP_HEADER = TopParser._TOP_HEADER
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
-    _ROULETTE = RollParser._ROULETTE
-    _CLAIM_RANK = RollParser._CLAIM_RANK
-    _LIKE_RANK = RollParser._LIKE_RANK
-    _ROLL_KEY = RollParser._ROLL_KEY
-    _GENERIC_KEY_COUNT = RollParser._GENERIC_KEY_COUNT
     _KAKERA_REACTION_RECEIPT = re.compile(
         r"^(?P<reaction>:[a-z0-9_]+:|\S+)\s+(?:\(Free\)\s*)?\*{0,2}(?P<account>.+?)\s+"
         r"\+(?P<value>[\d,]+)\*{0,2}\s+\(\$k\)$",
@@ -276,8 +272,6 @@ class MudaeTextParser:
     _TOTAL_HAREM_VALUE = re.compile(
         r"^Total value:\s*(?P<value>[\d,]+)(?::kakera:|\s+ka)?$", re.IGNORECASE
     )
-    _GENDER = RollParser._GENDER
-    _STARWISH_MARKER = RollParser._STARWISH_MARKER
     _BONUS_METRIC = re.compile(r"^(?P<label>[^:]+):\s*(?P<detail>.+)$")
     _WISHLIST_HEADER = re.compile(
         r"Wishlist\s*-\s*(?P<wishlist_count>\d+)\s*/\s*(?P<wishlist_capacity>\d+)\s*\$wl,\s*"
@@ -369,62 +363,9 @@ class MudaeTextParser:
             int(minutes.group("value")) if minutes else 0
         )
 
-    @classmethod
-    def _clean_series(cls, value: str) -> str:
-        """Remove display-only gender and starwish markers from a series."""
-        return clean_series(value)
-
     def parse_character_details(self, text: str) -> CharacterDetails:
         """Parse the key fields from a copied `$im <character>` response."""
-        lines = self._lines(text)
-        roulette_index = next(
-            (index for index, line in enumerate(lines) if self._ROULETTE.match(line)),
-            None,
-        )
-        if roulette_index is None or roulette_index < 2:
-            raise MudaeParseError("Expected a Mudae $im response with a roulette line.")
-
-        roulette_line = self._ROULETTE.match(lines[roulette_index])
-        if roulette_line is None:
-            raise MudaeParseError("Could not parse the Mudae roulette line.")
-
-        name, series_line = self._roll_name_and_series(lines, roulette_index)
-        gender_match = self._GENDER.search(series_line)
-        series = self._clean_series(series_line)
-        key = self._ROLL_KEY.search(lines[roulette_index])
-        generic_key = self._GENERIC_KEY_COUNT.search(lines[roulette_index])
-
-        claim_rank = self._first_number(lines, self._CLAIM_RANK)
-        like_rank = self._first_number(lines, self._LIKE_RANK)
-
-        return CharacterDetails(
-            name=name,
-            series=series,
-            gender=(
-                ",".join(
-                    re.findall(r"(?::(female|male):)", gender_match.group("gender"), re.IGNORECASE)
-                ).lower()
-                if gender_match
-                else None
-            ),
-            roulette=roulette_line.group("roulette").strip().lower(),
-            kakera_value=self._number(roulette_line.group("value")),
-            claim_rank=claim_rank,
-            like_rank=like_rank,
-            key_type=(key.group("key_type").lower() if key else None),
-            key_count=(
-                int(key.group("count"))
-                if key
-                else int(generic_key.group("count"))
-                if generic_key
-                else None
-            ),
-        )
-
-    @classmethod
-    def _roll_name_and_series(cls, lines: list[str], marker_index: int) -> tuple[str, str]:
-        """Recover the name and all wrapped series lines before a roll marker."""
-        return roll_name_and_series(lines, marker_index, MudaeParseError)
+        return CharacterDetailsParser(MudaeParseError).parse(text)
 
     def parse_roll(self, text: str) -> RollObservation:
         """Parse the key fields from a copied standard Mudae roll card."""

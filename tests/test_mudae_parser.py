@@ -3,6 +3,7 @@ import re
 import pytest
 
 from moa.parser.mudae import MudaeParseError, MudaeTextParser
+from moa.parser.character_details import CharacterDetailsParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.top import TopParser
@@ -205,6 +206,12 @@ def test_parse_character_details_from_copied_im_output() -> None:
     assert character.kakera_value == 929
     assert character.claim_rank == 9
     assert character.like_rank == 19
+
+
+def test_parse_character_details_facade_matches_dedicated_parser() -> None:
+    expected = CharacterDetailsParser(MudaeParseError).parse(CHARACTER_DETAILS)
+
+    assert MudaeTextParser().parse_character_details(CHARACTER_DETAILS) == expected
 
 
 def test_parse_claim_confirmation_from_copied_mudae_output() -> None:
