@@ -125,7 +125,7 @@ def build_catalog_search_app(
         table.add_column("Roulette")
         table.add_column("Gender")
         table.add_column("Rollability")
-        table.add_column("Observed (UTC)")
+        table.add_column("$top observed (UTC)")
         for character in characters:
             ownership = _format_catalog_ownership(
                 character.owned,
@@ -158,6 +158,11 @@ def build_catalog_search_app(
                 character.observed_at.strftime("%Y-%m-%d %H:%M"),
             )
         console.print(table)
+        console.print(
+            "[dim]The `$top observed (UTC)` timestamp is the latest local `$top` observation; "
+            "account-scoped evidence has independent timestamps. MOA applies no age threshold to "
+            "classify evidence as fresh or stale.[/dim]"
+        )
         if server and account:
             console.print(
                 "[dim]Missing owned evidence does not prove unowned; one $mm page is not a complete harem snapshot. "

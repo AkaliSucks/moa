@@ -2131,6 +2131,12 @@ def test_catalog_top_preserves_config_sequence_and_search_output(monkeypatch) ->
     assert "Imported Character Catalog Search" in result.stdout
     assert "Power" in result.stdout
     assert ":goldkey: (7)" in result.stdout
+    assert "$top observed (UTC)" in result.stdout
+    assert (
+        "The `$top observed (UTC)` timestamp is the latest local `$top` observation; "
+        "account-scoped evidence has independent timestamps. MOA applies no age threshold to "
+        "classify evidence as fresh or stale."
+    ) in result.stdout
 
 
 def test_catalog_account_search_commands_use_late_bound_resolver(monkeypatch) -> None:
@@ -2271,6 +2277,63 @@ def test_catalog_top_renders_unknown_roulette_distinct_from_observed_empty(
     assert "Observed Empty" in result.stdout
     assert catalog_search_commands_module.format_mudae_roulette_types(None) == "Unknown"
     assert catalog_search_commands_module.format_mudae_roulette_types(()) == "-"
+
+
+def test_catalog_top_cli_preserves_unknown_and_unavailable_precedence(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    entries = (
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=1, name="Unknown Evidence", series="Series", gender=None, roulette=None
+            ),
+            claim_rank=1,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=None,
+            keyed=None,
+            unavailable=None,
+            unavailable_reason=None,
+            roulette_types=None,
+        ),
+        CatalogTopSearchEntry(
+            character=CatalogCharacter(
+                id=2, name="Unavailable Evidence", series="Series", gender=None, roulette=None
+            ),
+            claim_rank=2,
+            like_rank=None,
+            observed_at=observed_at,
+            owned=None,
+            keyed=None,
+            unavailable=True,
+            unavailable_reason="$togglewestern",
+            roulette_types=(),
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "ConfigService",
+        lambda: SimpleNamespace(
+            resolve_context=lambda server, account: (server, account),
+            owned_account_names=lambda _server: (),
+        ),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "TopSearchService",
+        lambda: SimpleNamespace(search=lambda **_kwargs: entries),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "top", "--server", "Lake", "--account", "ernieuuu", "--limit", "2"],
+    )
+
+    assert result.exit_code == 0
+    assert "Unknown Evidence" in result.stdout
+    assert "Not requested" in result.stdout
+    assert "Unavailable Evidence" in result.stdout
+    assert "Unavailable ($togglewestern)" in result.stdout
 
 
 def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
