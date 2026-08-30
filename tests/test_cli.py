@@ -1467,6 +1467,7 @@ def test_catalog_towerstate_renders_middle_dot_separators(monkeypatch) -> None:
         built_perk_ids=(3, 7),
         next_level_cost=100_000,
         kakera_balance=25_000,
+        observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
     )
     monkeypatch.setattr(
         catalog_snapshot_commands_module,
@@ -1483,6 +1484,59 @@ def test_catalog_towerstate_renders_middle_dot_separators(monkeypatch) -> None:
     assert "Completed towers: 2 · Built perks: 3, 7" in result.stdout
     assert "Next floor: 100,000 Kakera · Balance: 25,000 Kakera" in result.stdout
     assert "Balance: 25,000 Kakera · Shortfall: 75,000 Kakera" in result.stdout
+    assert "Observed: 2026-07-12 23:45 UTC" in result.stdout
+    assert (
+        "Provenance: values are from the latest locally imported `$kt`/`$tower` capture; "
+        "they do not establish current, fresh, stale, or complete state."
+    ) in " ".join(result.stdout.split())
+
+
+def test_catalog_towerstate_preserves_missing_zero_and_empty_perks(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                account_name="Account",
+                current_level=4,
+                completed_towers=0,
+                built_perk_ids=(),
+                next_level_cost=100_000,
+                kakera_balance=25_000,
+                observed_at=observed_at,
+            ),
+            SimpleNamespace(
+                account_name="Account",
+                current_level=4,
+                completed_towers=None,
+                built_perk_ids=(3,),
+                next_level_cost=100_000,
+                kakera_balance=25_000,
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(tower_state=lambda *_: next(snapshots)),
+    )
+
+    runner = CliRunner()
+    zero_result = runner.invoke(main.app, ["catalog", "towerstate"])
+    missing_result = runner.invoke(main.app, ["catalog", "towerstate"])
+    no_snapshot_result = runner.invoke(main.app, ["catalog", "towerstate"])
+
+    assert zero_result.exit_code == 0
+    assert "Completed towers: 0" in zero_result.stdout
+    assert "Built perks: no checked perk IDs parsed" in zero_result.stdout
+    assert "Not reported in this capture" not in zero_result.stdout
+    assert missing_result.exit_code == 0
+    assert "Completed towers: Not reported in this capture" in missing_result.stdout
+    assert "Built perks: 3" in missing_result.stdout
+    assert no_snapshot_result.exit_code == 0
+    assert "No $kt snapshot imported for this server/account yet." in no_snapshot_result.stdout
+    assert "Provenance:" not in no_snapshot_result.stdout
 
 
 def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(

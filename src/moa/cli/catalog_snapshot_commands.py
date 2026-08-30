@@ -176,12 +176,20 @@ def build_catalog_snapshot_app(
             console.print("[yellow]No $kt snapshot imported for this server/account yet.[/yellow]")
             raise typer.Exit()
         gap = max(0, state.next_level_cost - state.kakera_balance)
+        completed_towers = (
+            "Not reported in this capture" if state.completed_towers is None else str(state.completed_towers)
+        )
+        built_perks = ", ".join(str(perk) for perk in state.built_perk_ids) or "no checked perk IDs parsed"
         console.print(
             f"[bold cyan]{state.account_name} - Tower level {state.current_level}[/bold cyan]\n"
-            f"Completed towers: {state.completed_towers} · Built perks: "
-            f"{', '.join(str(perk) for perk in state.built_perk_ids) or 'none'}\n"
+            f"Completed towers: {completed_towers} · Built perks: {built_perks}\n"
             f"Next floor: {state.next_level_cost:,} Kakera · Balance: {state.kakera_balance:,} Kakera · "
             f"Shortfall: {gap:,} Kakera"
+        )
+        console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: values are from the latest locally imported `$kt`/`$tower` capture; "
+            "they do not establish current, fresh, stale, or complete state.[/dim]"
         )
 
     @catalog_snapshot_app.command("timers")
