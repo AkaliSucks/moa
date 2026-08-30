@@ -101,6 +101,11 @@ def build_catalog_snapshot_app(
         for entry in disablelist.entries:
             table.add_row(entry.name, f"{entry.disabled_count:,}")
         console.print(table)
+        console.print(f"[dim]Observed: {disablelist.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: counts, rows, and toggles are captured `$dl` evidence only; "
+            "they do not establish current, fresh, or stale state, and snapshot completeness is not established.[/dim]"
+        )
 
     @catalog_snapshot_app.command("unavailable")
     def catalog_unavailable(

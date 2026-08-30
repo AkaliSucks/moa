@@ -1505,6 +1505,7 @@ def test_catalog_disablelist_renders_toggle_presence_without_inventing_false(
         western_disabled=value,
         irl_disabled=value,
         entries=(),
+        observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
     )
     monkeypatch.setattr(
         catalog_snapshot_commands_module,
@@ -1521,6 +1522,101 @@ def test_catalog_disablelist_renders_toggle_presence_without_inventing_false(
     assert f"Western disabled: {rendered}" in result.stdout
     assert f"IRL disabled: {rendered}" in result.stdout
     assert catalog_snapshot_commands_module._format_observed_toggle(value) == rendered
+
+
+def test_catalog_disablelist_cli_preserves_zero_counts_duplicate_bundles_and_provenance(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    disablelist = SimpleNamespace(
+        account_name="Account",
+        slots_used=0,
+        slots_capacity=16,
+        total_disabled=0,
+        disabled_wa=0,
+        disabled_ha=0,
+        disabled_wg=0,
+        disabled_hg=0,
+        western_disabled=True,
+        irl_disabled=False,
+        entries=(
+            SimpleNamespace(name="Repeated bundle", disabled_count=0),
+            SimpleNamespace(name="Other bundle", disabled_count=2),
+            SimpleNamespace(name="Repeated bundle", disabled_count=0),
+        ),
+        observed_at=observed_at,
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(disablelist=lambda *_: disablelist),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "disablelist", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert result.exit_code == 0
+    output = " ".join(result.stdout.split())
+    assert "Slots: 0/16 · Disabled: 0" in output
+    assert "$wa: 0 · $ha: 0 · $wg: 0 · $hg: 0" in output
+    assert output.count("Repeated bundle") == 2
+    first_bundle = output.index("Repeated bundle")
+    other_bundle = output.index("Other bundle")
+    second_bundle = output.index("Repeated bundle", first_bundle + 1)
+    assert first_bundle < other_bundle < second_bundle
+    assert "2026-07-12 23:45 UTC" in output
+    assert (
+        "Provenance: counts, rows, and toggles are captured `$dl` evidence only; "
+        "they do not establish current, fresh, or stale state, and snapshot completeness is not established."
+    ) in output
+
+
+def test_catalog_disablelist_cli_distinguishes_empty_snapshot_from_missing_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                account_name="Account",
+                slots_used=0,
+                slots_capacity=0,
+                total_disabled=0,
+                disabled_wa=0,
+                disabled_ha=0,
+                disabled_wg=0,
+                disabled_hg=0,
+                western_disabled=None,
+                irl_disabled=None,
+                entries=(),
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(disablelist=lambda *_: next(snapshots)),
+    )
+
+    empty_snapshot_result = CliRunner().invoke(
+        main.app,
+        ["catalog", "disablelist", "--server", "Lake", "--account", "Account"],
+    )
+    missing_snapshot_result = CliRunner().invoke(
+        main.app,
+        ["catalog", "disablelist", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert empty_snapshot_result.exit_code == 0
+    empty_snapshot_output = " ".join(empty_snapshot_result.stdout.split())
+    assert "Account - disablelist" in empty_snapshot_output
+    assert "Slots: 0/0 · Disabled: 0" in empty_snapshot_output
+    assert "2026-07-12 23:45 UTC" in empty_snapshot_output
+    assert "Provenance: counts, rows, and toggles are captured `$dl` evidence only" in empty_snapshot_output
+    assert missing_snapshot_result.exit_code == 0
+    assert "No $dl snapshot imported for this server/account yet." in missing_snapshot_result.stdout
+    assert "2026-07-12 23:45 UTC" not in missing_snapshot_result.stdout
+    assert "Provenance:" not in missing_snapshot_result.stdout
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:
