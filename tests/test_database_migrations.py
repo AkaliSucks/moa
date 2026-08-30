@@ -97,6 +97,31 @@ def _open_database(database_path):
     return connection
 
 
+def _restore_generationless_projection_links(connection):
+    """Return a current test database to the migration-12 link schema."""
+    connection.execute(
+        "ALTER TABLE discord_projection_links RENAME TO discord_projection_links_generation_13"
+    )
+    CATALOG_MIGRATIONS[2].apply(connection)
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            id, source_event_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state, claimed_at, completed_at,
+            created_at, updated_at
+        )
+        SELECT
+            id, source_event_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state, claimed_at, completed_at,
+            created_at, updated_at
+        FROM discord_projection_links_generation_13
+        """
+    )
+    connection.execute("DROP TABLE discord_projection_links_generation_13")
+    connection.execute("DROP TABLE projection_generations")
+    connection.execute("DELETE FROM schema_migrations WHERE version = 13")
+
+
 def _make_baseline_database(database_path):
     """Create a version-1 database to exercise the version-2 upgrade path."""
     CatalogRepository(database_path)
@@ -106,6 +131,7 @@ def _make_baseline_database(database_path):
         connection.execute("DROP TABLE discord_source_event_server_attributions")
         connection.execute("DROP TABLE discord_source_event_account_attributions")
         connection.execute("DROP TABLE discord_projection_links")
+        connection.execute("DROP TABLE projection_generations")
         connection.execute("DROP TABLE discord_processing_attempts")
         connection.execute("DROP TABLE discord_source_events")
         connection.execute("DROP TABLE discord_message_revisions")
@@ -121,11 +147,13 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 10")
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
         connection.execute("DELETE FROM schema_migrations WHERE version = 12")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 13")
 
 
 def _make_version_5_database(database_path):
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         connection.execute("DROP TABLE discord_antidisable_response_bindings")
         connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DELETE FROM schema_migrations WHERE version = 6")
@@ -148,6 +176,7 @@ def _make_version_6_database(database_path, completed_towers_by_account):
             "test",
         )
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         connection.execute(
             "ALTER TABLE tower_state_observations DROP COLUMN completed_towers_observed"
         )
@@ -170,6 +199,7 @@ def _make_version_7_kakeraloot_database(database_path, states_by_account):
             "test",
         )
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         for field_name in KAKERALOOT_VALUE_FIELDS:
             connection.execute(
                 f"ALTER TABLE kakeraloot_state_observations DROP COLUMN {field_name}_observed"
@@ -186,6 +216,7 @@ def _make_version_8_profile_database(database_path, profiles_by_account):
     for account, profile in profiles_by_account.items():
         catalog.import_profile(profile, "Server", account, f"legacy {account}", "test")
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         for field_name in PROFILE_PRESENCE_FIELDS:
             connection.execute(
                 f"ALTER TABLE profile_observations DROP COLUMN {field_name}"
@@ -217,6 +248,7 @@ def _make_version_9_ranked_harem_database(database_path, roulette_by_account):
             "test",
         )
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         connection.execute(
             "ALTER TABLE owned_character_observations "
             "DROP COLUMN roulette_types_observed"
@@ -252,6 +284,7 @@ def _make_version_10_disablelist_database(database_path, toggles_by_account):
             "test",
         )
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         connection.execute(
             "ALTER TABLE disablelist_observations "
             "DROP COLUMN western_disabled_observed"
@@ -458,6 +491,7 @@ def _insert_projection_link(
     connection,
     source_event_id,
     *,
+    generation_id=None,
     projection_kind="roll",
     projection_slot="account:1",
     projection_table=None,
@@ -468,16 +502,24 @@ def _insert_projection_link(
     created_at="2026-07-18T00:00:00+00:00",
     updated_at="2026-07-18T00:00:00+00:00",
 ):
+    generation_columns = ""
+    generation_placeholder = ""
+    generation_values = ()
+    if generation_id is not None:
+        generation_columns = "generation_id, "
+        generation_placeholder = "?, "
+        generation_values = (generation_id,)
     return connection.execute(
-        """
+        f"""
         INSERT INTO discord_projection_links (
-            source_event_id, projection_kind, projection_slot,
+            source_event_id, {generation_columns}projection_kind, projection_slot,
             projection_table, projection_row_id, state,
             claimed_at, completed_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, {generation_placeholder}?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             source_event_id,
+            *generation_values,
             projection_kind,
             projection_slot,
             projection_table,
@@ -510,6 +552,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         "discord_message_revisions",
         "discord_source_events",
         "discord_processing_attempts",
+        "projection_generations",
         "discord_projection_links",
         "discord_source_event_server_attributions",
         "discord_source_event_account_attributions",
@@ -529,8 +572,12 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
+        (13, "projection-generation-foundation"),
     ]
     with _open_database(database_path) as connection:
+        assert connection.execute(
+            "SELECT id, is_current FROM projection_generations"
+        ).fetchall() == [(1, 1)]
         indexes = {
             row[0]
             for row in connection.execute(
@@ -615,9 +662,14 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
             "failure_detail_expired_at",
             "created_at",
         },
+        "projection_generations": {
+            "id",
+            "is_current",
+        },
         "discord_projection_links": {
             "id",
             "source_event_id",
+            "generation_id",
             "projection_kind",
             "projection_slot",
             "projection_table",
@@ -796,6 +848,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
+        (13, "projection-generation-foundation"),
     ]
 
 
@@ -895,7 +948,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 13))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 14))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -1047,8 +1100,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            12,
-            "raw-evidence-lifecycle-foundation",
+            13,
+            "projection-generation-foundation",
         )
 
 
@@ -1252,6 +1305,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
+        (13, "projection-generation-foundation"),
     ]
 
 
@@ -1329,6 +1383,7 @@ def test_upgrade_from_version_3_preserves_discord_source_event_rows(tmp_path) ->
     database_path = tmp_path / "catalog.db"
     CatalogRepository(database_path)
     with _open_database(database_path) as connection:
+        _restore_generationless_projection_links(connection)
         connection.execute("DROP TABLE discord_antidisable_response_bindings")
         connection.execute("DROP TABLE discord_antidisable_workflows")
         connection.execute("DROP TABLE discord_source_event_server_attributions")
@@ -1658,6 +1713,176 @@ def test_projection_link_identity_is_unique_per_source_event(tmp_path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM discord_projection_links"
         ).fetchone()[0] == 4
+
+
+def test_projection_generation_upgrade_backfills_and_preserves_source_and_link_rows(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:12])
+        aggregate_id = _insert_aggregate(connection)
+        revision_id = _insert_revision(connection, aggregate_id)
+        source_event_id = _insert_source_event(connection, revision_id)
+        link_id = _insert_projection_link(
+            connection,
+            source_event_id,
+            state="completed",
+            projection_table="roll_observations",
+            projection_row_id=42,
+            completed_at="2026-07-18T00:01:00+00:00",
+        )
+        source_before = connection.execute(
+            "SELECT * FROM discord_source_events WHERE id = ?", (source_event_id,)
+        ).fetchone()
+        link_before = connection.execute(
+            "SELECT * FROM discord_projection_links WHERE id = ?", (link_id,)
+        ).fetchone()
+        connection.commit()
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        assert connection.execute(
+            "SELECT * FROM discord_source_events WHERE id = ?", (source_event_id,)
+        ).fetchone() == source_before
+        link_after = connection.execute(
+            """
+            SELECT id, source_event_id, projection_kind, projection_slot,
+                   projection_table, projection_row_id, state, claimed_at,
+                   completed_at, created_at, updated_at
+            FROM discord_projection_links
+            WHERE id = ?
+            """,
+            (link_id,),
+        ).fetchone()
+        assert link_after == link_before
+        assert connection.execute(
+            "SELECT generation_id FROM discord_projection_links WHERE id = ?",
+            (link_id,),
+        ).fetchone() == (1,)
+        assert _migration_rows(database_path)[-1] == (
+            13,
+            "projection-generation-foundation",
+        )
+
+
+def test_projection_link_identity_is_generation_qualified(tmp_path) -> None:
+    database_path = tmp_path / "catalog.db"
+    source_event_id = _current_database_with_source_event(database_path)
+
+    with _open_database(database_path) as connection:
+        _insert_projection_link(connection, source_event_id)
+        connection.execute(
+            "INSERT INTO projection_generations (id, is_current) VALUES (2, 0)"
+        )
+        _insert_projection_link(connection, source_event_id, generation_id=2)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(connection, source_event_id, generation_id=2)
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_projection_link(
+                connection,
+                source_event_id,
+                generation_id=999,
+                projection_slot="missing-generation",
+            )
+        assert connection.execute(
+            "SELECT generation_id FROM discord_projection_links ORDER BY generation_id"
+        ).fetchall() == [(1,), (2,)]
+
+
+def test_projection_generations_require_positive_ids_and_exactly_one_current(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    CatalogRepository(database_path)
+
+    with _open_database(database_path) as connection:
+        for generation_id in (0, -1):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO projection_generations (id, is_current) "
+                    "VALUES (?, 0)",
+                    (generation_id,),
+                )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO projection_generations (id, is_current) VALUES (2, 1)"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE projection_generations SET is_current = 0 WHERE id = 1"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE projection_generations SET id = 2 WHERE id = 1"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM projection_generations WHERE id = 1"
+            )
+        assert connection.execute(
+            "SELECT id, is_current FROM projection_generations"
+        ).fetchall() == [(1, 1)]
+
+
+def test_failed_projection_generation_migration_rolls_back_schema_data_and_metadata(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:12])
+        source_event_id = _insert_source_event(
+            connection,
+            _insert_revision(connection, _insert_aggregate(connection)),
+        )
+        link_id = _insert_projection_link(connection, source_event_id)
+        connection.commit()
+
+        def fail_after_schema(migration_connection):
+            CATALOG_MIGRATIONS[12].apply(migration_connection)
+            raise RuntimeError("migration 13 failed")
+
+        with pytest.raises(RuntimeError, match="migration 13 failed"):
+            run_migrations(
+                connection,
+                CATALOG_MIGRATIONS[:12]
+                + (Migration(13, "failing-projection-generation", fail_after_schema),),
+            )
+
+        assert connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'projection_generations'"
+        ).fetchone() is None
+        assert {
+            row[1] for row in connection.execute("PRAGMA table_info(discord_projection_links)")
+        } == {
+            "id",
+            "source_event_id",
+            "projection_kind",
+            "projection_slot",
+            "projection_table",
+            "projection_row_id",
+            "state",
+            "claimed_at",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        }
+        assert connection.execute(
+            "SELECT id, source_event_id FROM discord_projection_links"
+        ).fetchall() == [(link_id, source_event_id)]
+        assert connection.execute(
+            "SELECT MAX(version) FROM schema_migrations"
+        ).fetchone() == (12,)
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        assert connection.execute(
+            "SELECT id, source_event_id, generation_id FROM discord_projection_links"
+        ).fetchall() == [(link_id, source_event_id, 1)]
 
 
 @pytest.mark.parametrize(
@@ -2013,6 +2238,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
+        (13, "projection-generation-foundation"),
     ]
 
 
@@ -2045,6 +2271,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (10, "ranked-harem-roulette-presence"),
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
+        (13, "projection-generation-foundation"),
     ]
 
 
@@ -3246,11 +3473,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (13, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (14, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(13,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(14,)]

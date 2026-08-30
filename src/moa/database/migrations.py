@@ -65,6 +65,7 @@ CATALOG_DURABLE_TABLES = frozenset(
         "discord_message_revisions",
         "discord_source_events",
         "discord_processing_attempts",
+        "projection_generations",
         "discord_projection_links",
         "discord_source_event_server_attributions",
         "discord_source_event_account_attributions",
@@ -161,6 +162,8 @@ CATALOG_CURRENT_REQUIRED_COLUMNS = {
     "import_events": frozenset({"raw_message_expired_at"}),
     "discord_source_events": frozenset({"raw_evidence_expired_at"}),
     "discord_processing_attempts": frozenset({"failure_detail_expired_at"}),
+    "projection_generations": frozenset({"id", "is_current"}),
+    "discord_projection_links": frozenset({"generation_id"}),
 }
 
 
@@ -848,6 +851,168 @@ def _apply_raw_evidence_lifecycle_foundation(connection: sqlite3.Connection) -> 
     )
 
 
+def _apply_projection_generation_foundation(connection: sqlite3.Connection) -> None:
+    """Qualify durable projection links with the immutable initial generation."""
+    connection.execute(
+        """
+        CREATE TABLE projection_generations (
+            id INTEGER PRIMARY KEY CHECK(id > 0),
+            is_current INTEGER NOT NULL CHECK(is_current IN (0, 1))
+        )
+        """
+    )
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (1, 1)"
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX uq_projection_generations_current
+        ON projection_generations(is_current)
+        WHERE is_current = 1
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER projection_generations_keep_current_on_update
+        BEFORE UPDATE OF is_current ON projection_generations
+        WHEN OLD.is_current = 1 AND NEW.is_current != 1
+        BEGIN
+            SELECT RAISE(ABORT, 'projection generations require exactly one current row');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER projection_generations_keep_initial_id
+        BEFORE UPDATE OF id ON projection_generations
+        WHEN OLD.id = 1 AND NEW.id != 1
+        BEGIN
+            SELECT RAISE(ABORT, 'initial projection generation is immutable');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER projection_generations_keep_current_on_delete
+        BEFORE DELETE ON projection_generations
+        WHEN OLD.is_current = 1
+        BEGIN
+            SELECT RAISE(ABORT, 'projection generations require exactly one current row');
+        END
+        """
+    )
+
+    legacy_count = connection.execute(
+        "SELECT COUNT(*) FROM discord_projection_links"
+    ).fetchone()[0]
+    connection.execute(
+        """
+        CREATE TABLE discord_projection_links_generation_13 (
+            id INTEGER PRIMARY KEY,
+            source_event_id INTEGER NOT NULL
+                REFERENCES discord_source_events(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            generation_id INTEGER NOT NULL DEFAULT 1
+                REFERENCES projection_generations(id)
+                ON DELETE RESTRICT
+                ON UPDATE RESTRICT,
+            projection_kind TEXT NOT NULL,
+            projection_slot TEXT NOT NULL,
+            projection_table TEXT NULL,
+            projection_row_id INTEGER NULL,
+            state TEXT NOT NULL,
+            claimed_at TEXT NOT NULL,
+            completed_at TEXT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source_event_id, generation_id, projection_kind, projection_slot),
+            CHECK(length(trim(projection_kind)) > 0),
+            CHECK(length(trim(projection_slot)) > 0),
+            CHECK(
+                projection_table IS NULL
+                OR length(trim(projection_table)) > 0
+            ),
+            CHECK(
+                projection_row_id IS NULL
+                OR projection_row_id > 0
+            ),
+            CHECK(
+                (projection_table IS NULL AND projection_row_id IS NULL)
+                OR
+                (projection_table IS NOT NULL AND projection_row_id IS NOT NULL)
+            ),
+            CHECK(state IN ('claimed', 'completed')),
+            CHECK(
+                (
+                    state = 'claimed'
+                    AND completed_at IS NULL
+                )
+                OR
+                (
+                    state = 'completed'
+                    AND projection_table IS NOT NULL
+                    AND projection_row_id IS NOT NULL
+                    AND completed_at IS NOT NULL
+                )
+            )
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links_generation_13 (
+            id, source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state, claimed_at, completed_at,
+            created_at, updated_at
+        )
+        SELECT
+            id, source_event_id, 1, projection_kind, projection_slot,
+            projection_table, projection_row_id, state, claimed_at, completed_at,
+            created_at, updated_at
+        FROM discord_projection_links
+        """
+    )
+
+    copied_count = connection.execute(
+        "SELECT COUNT(*) FROM discord_projection_links_generation_13"
+    ).fetchone()[0]
+    invalid_generation_count = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM discord_projection_links_generation_13 AS links
+        LEFT JOIN projection_generations AS generations
+            ON generations.id = links.generation_id
+        WHERE links.generation_id != 1 OR generations.id IS NULL
+        """
+    ).fetchone()[0]
+    distinct_key_count = connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT source_event_id, generation_id, projection_kind, projection_slot
+            FROM discord_projection_links_generation_13
+            GROUP BY source_event_id, generation_id, projection_kind, projection_slot
+        )
+        """
+    ).fetchone()[0]
+    current_generation_count = connection.execute(
+        "SELECT COUNT(*) FROM projection_generations WHERE is_current = 1"
+    ).fetchone()[0]
+    if (
+        copied_count != legacy_count
+        or invalid_generation_count != 0
+        or distinct_key_count != copied_count
+        or current_generation_count != 1
+    ):
+        raise MigrationError("Projection generation migration integrity validation failed.")
+
+    connection.execute("DROP TABLE discord_projection_links")
+    connection.execute(
+        "ALTER TABLE discord_projection_links_generation_13 RENAME TO discord_projection_links"
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -908,5 +1073,10 @@ CATALOG_MIGRATIONS = (
         version=12,
         name="raw-evidence-lifecycle-foundation",
         apply=_apply_raw_evidence_lifecycle_foundation,
+    ),
+    Migration(
+        version=13,
+        name="projection-generation-foundation",
+        apply=_apply_projection_generation_foundation,
     ),
 )
