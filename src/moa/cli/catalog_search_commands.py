@@ -189,6 +189,11 @@ def build_catalog_search_app(
 
         if not profile.server_observations:
             console.print("[yellow]No server-specific observations imported yet.[/yellow]")
+            console.print(
+                "[dim]Claim and like ranks are the latest locally imported global snapshots; "
+                "server Kakera rows are the latest locally imported observation per server. "
+                "Displayed timestamps do not establish current, fresh, or stale state.[/dim]"
+            )
             return
 
         table = Table(title="Latest server observations")
@@ -202,6 +207,11 @@ def build_catalog_search_app(
                 observation.observed_at.strftime("%Y-%m-%d %H:%M"),
             )
         console.print(table)
+        console.print(
+            "[dim]Claim and like ranks are the latest locally imported global snapshots; "
+            "server Kakera rows are the latest locally imported observation per server. "
+            "Displayed timestamps do not establish current, fresh, or stale state.[/dim]"
+        )
 
     @catalog_search_app.command("harem")
     def catalog_harem(

@@ -2238,6 +2238,71 @@ def test_catalog_harem_cli_clarifies_key_observation_status(monkeypatch) -> None
     ) in result.stdout
 
 
+def test_catalog_show_cli_clarifies_global_and_server_evidence(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+    profile = SimpleNamespace(
+        character=CatalogCharacter(
+            id=1, name="Power", series="Chainsaw Man", gender=None, roulette=None
+        ),
+        claim_rank=7,
+        like_rank=None,
+        server_observations=(
+            SimpleNamespace(server_name="Lake", kakera_value=1448, observed_at=observed_at),
+            SimpleNamespace(server_name="Mountain", kakera_value=None, observed_at=observed_at),
+        ),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(get_profile=lambda name, series: profile),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(main.app, ["catalog", "show", "Power", "--series", "Chainsaw Man"])
+
+    assert result.exit_code == 0
+    assert "Power - Chainsaw Man" in result.stdout
+    assert "Claim rank:" in result.stdout
+    assert "Like rank:" in result.stdout
+    assert "Lake" in result.stdout
+    assert "Mountain" in result.stdout
+    assert "1,448:kakera:" in result.stdout
+    assert "-" in result.stdout
+    assert "2026-07-13 00:15" in result.stdout
+    assert (
+        "Claim and like ranks are the latest locally imported global snapshots; server Kakera rows "
+        "are the latest locally imported observation per server. Displayed timestamps do not establish "
+        "current, fresh, or stale state."
+    ) in result.stdout
+
+
+def test_catalog_show_cli_keeps_distinct_no_server_observations_message(monkeypatch) -> None:
+    profile = SimpleNamespace(
+        character=CatalogCharacter(
+            id=1, name="Power", series="Chainsaw Man", gender=None, roulette=None
+        ),
+        claim_rank=None,
+        like_rank=19,
+        server_observations=(),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(get_profile=lambda name, series: profile),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(main.app, ["catalog", "show", "Power", "--series", "Chainsaw Man"])
+
+    assert result.exit_code == 0
+    assert "No server-specific observations imported yet." in result.stdout
+    assert (
+        "Claim and like ranks are the latest locally imported global snapshots; server Kakera rows "
+        "are the latest locally imported observation per server. Displayed timestamps do not establish "
+        "current, fresh, or stale state."
+    ) in result.stdout
+
+
 def test_catalog_top_displays_unavailable_reasons() -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     entries = (
