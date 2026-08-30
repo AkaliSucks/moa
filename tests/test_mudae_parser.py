@@ -25,6 +25,7 @@ from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.server_settings import ServerSettingsParser
+from moa.parser.sphere_result import SphereResultParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
 from moa.parser.timer_state import TimerStateParser
@@ -2332,6 +2333,82 @@ def test_parse_sphere_result_reads_color_gains_total_and_stock() -> None:
     ]
     assert state.total_gained == 158
     assert state.stock == 3655
+
+
+def test_sphere_result_parser_facade_matches_injected_parser_and_preserves_metadata() -> None:
+    text = (
+        "\u200b\n"
+        "You can click 7 times on the buttons below (2 minutes).\n"
+        "Find 3 purple spheres (out of 4) to turn the 4th purple into a red sphere or more.\n"
+        "<:spB:123> +18\n"
+        ":sp: +158\n"
+        ":spG: +43 (Stock: 3,655)"
+    )
+
+    expected = SphereResultParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert MudaeTextParser().parse_sphere_result(text) == expected
+    assert expected.clicks_available == 7
+    assert expected.click_window_minutes == 2
+    assert expected.purple_target == 3
+    assert expected.purple_total == 4
+
+
+@pytest.mark.parametrize(
+    ("text", "total", "stock", "gains"),
+    [
+        (":spB: +1\n:spB: (Free) +0\n:spG: +2 (Stock: 0)", 3, 0, (("b", 1, False), ("b", 0, True), ("g", 2, False))),
+        (":spB: +1\n:sp: +9\n:sp: +12\n:spG: +2 (Stock: 3)\n:spP: +4 (Stock: 0)", 12, 0, (("b", 1, False), ("g", 2, False), ("p", 4, False))),
+        (":spB: +1\n:spG: +2 (Stock: 3)\n:spP: +4", 7, 3, (("b", 1, False), ("g", 2, False), ("p", 4, False))),
+    ],
+)
+def test_sphere_result_parser_preserves_order_repeats_zero_stock_and_total_semantics(
+    text: str,
+    total: int,
+    stock: int,
+    gains: tuple[tuple[str, int, bool], ...],
+) -> None:
+    state = SphereResultParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert state.total_gained == total
+    assert state.stock == stock
+    assert [(gain.sphere_type, gain.amount, gain.is_free) for gain in state.gains] == list(gains)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Find 3 purple spheres (out of 4)",
+        ":spB: -1",
+        ":spB: +1 trailing text",
+        ":spB: (Free)",
+    ],
+)
+def test_sphere_result_parser_rejects_malformed_negative_and_metadata_only_payloads(
+    text: str,
+) -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_sphere_result(text)
+
+    assert str(error.value) == "Expected a Mudae $oq response with sphere gains."
+
+
+def test_oq_registry_aliases_have_no_modifiers_or_arguments_and_router_precedes_timer() -> None:
+    for token in ("$oq", "$ouroquest"):
+        match = COMMAND_REGISTRY.lookup(token)
+        assert match is not None
+        assert match.canonical_name == "oq"
+        assert match.matched_form in {"oq", "ouroquest"}
+        assert match.modifier_text == ""
+        assert match.spec.argument_policy is ArgumentPolicy.NONE
+        assert match.expected_response == "sphere_result"
+
+    detection = MudaeMessageRouter().detect(":spB: +1\n1 $oq remaining")
+    assert detection.kind == "sphere_result"
 
 
 def test_parse_server_settings_reads_core_rules_and_visible_options() -> None:

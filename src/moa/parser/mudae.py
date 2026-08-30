@@ -19,7 +19,6 @@ from moa.models.character import (
     ProfileSnapshot,
     PersonalRareSnapshot,
     ServerSettingsSnapshot,
-    SphereGain,
     SphereResultSnapshot,
     TimerStateSnapshot,
     RankedHaremPage,
@@ -52,6 +51,7 @@ from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
 from moa.parser.roll import RollParser
 from moa.parser.server_settings import ServerSettingsParser
+from moa.parser.sphere_result import SphereResultParser
 from moa.parser.top import TopParser
 from moa.parser.transaction import TransactionParser
 from moa.parser.timer_state import TimerStateParser
@@ -71,22 +71,6 @@ class MudaeTextParser:
 
     _NO_MUDAPINS = re.compile(
         r"No mudapins found!.*kakeraloots", re.IGNORECASE
-    )
-
-    _SPHERE_CLICKS = re.compile(
-        r"You can click\s+(?P<clicks>\d+)\s+times.*?\((?P<minutes>\d+)\s+minutes?\)",
-        re.IGNORECASE,
-    )
-
-    _SPHERE_GOAL = re.compile(
-        r"Find\s+(?P<target>\d+)\s+purple spheres?\s+\(out of\s+(?P<total>\d+)\)",
-        re.IGNORECASE,
-    )
-
-    _SPHERE_GAIN = re.compile(
-        r"^:(?P<marker>sp[a-z0-9_]*):\s*(?P<free>\(Free\)\s*)?"
-        r"\+(?P<amount>[\d,]+)(?:\s+\(Stock:\s*(?P<stock>[\d,]+)\))?$",
-        re.IGNORECASE,
     )
 
     _LOOT_COST = re.compile(
@@ -239,52 +223,9 @@ class MudaeTextParser:
 
     def parse_sphere_result(self, text: str) -> SphereResultSnapshot:
         """Parse the payout and stock summary from one `$oq` response."""
-        lines = self._lines(text)
-        clicks = next(
-            (self._SPHERE_CLICKS.search(line) for line in lines if self._SPHERE_CLICKS.search(line)),
-            None,
-        )
-        goal = next(
-            (self._SPHERE_GOAL.search(line) for line in lines if self._SPHERE_GOAL.search(line)),
-            None,
-        )
-        gains: list[SphereGain] = []
-        total_gained: int | None = None
-        stock: int | None = None
-        for line in lines:
-            match = self._SPHERE_GAIN.match(line)
-            if match is None:
-                continue
-            amount = self._number(match.group("amount"))
-            marker = match.group("marker").casefold()
-            if marker == "sp":
-                total_gained = amount
-            else:
-                gains.append(
-                    SphereGain(
-                        sphere_type=marker.removeprefix("sp"),
-                        amount=amount,
-                        is_free=match.group("free") is not None,
-                    )
-                )
-            if match.group("stock") is not None:
-                stock = self._number(match.group("stock"))
-
-        if total_gained is None and not gains:
-            raise MudaeParseError("Expected a Mudae $oq response with sphere gains.")
-        return SphereResultSnapshot(
-            clicks_available=int(clicks.group("clicks")) if clicks else None,
-            click_window_minutes=int(clicks.group("minutes")) if clicks else None,
-            purple_target=int(goal.group("target")) if goal else None,
-            purple_total=int(goal.group("total")) if goal else None,
-            gains=tuple(gains),
-            total_gained=(
-                total_gained
-                if total_gained is not None
-                else sum(gain.amount for gain in gains)
-            ),
-            stock=stock,
-        )
+        return SphereResultParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_kakeraloot_settings(self, text: str) -> KakeralootSettingsSnapshot:
         """Parse server-configurable and universal Kakeraloot costs from `$infokl`."""
