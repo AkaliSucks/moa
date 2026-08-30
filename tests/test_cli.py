@@ -1120,8 +1120,68 @@ def test_catalog_snapshot_cli_boundary_and_late_bound_resolvers(monkeypatch) -> 
         "catalog-construct",
         ("settings-read", "Lake"),
     ]
-    assert "2026-07-12 23:45 UTC" in bonus_result.stdout
+    bonus_output = " ".join(bonus_result.stdout.split())
+    assert "2026-07-12 23:45 UTC" in bonus_output
+    assert (
+        "Latest locally imported `$bonus` capture; displayed values are observed, "
+        "and the capture may be partial."
+    ) in bonus_output
     assert "2026-07-12" in settings_result.stdout
+
+
+def test_catalog_bonus_cli_preserves_duplicate_metric_rows_and_source_order(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    bonus = SimpleNamespace(
+        account_name="ernieuuu",
+        metrics=(
+            SimpleNamespace(label="Repeated metric", detail="first observed detail"),
+            SimpleNamespace(label="Repeated metric", detail="second observed detail"),
+        ),
+        observed_at=observed_at,
+    )
+
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(player_bonus=lambda *_: bonus),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+
+    result = CliRunner().invoke(main.app, ["catalog", "bonus"])
+
+    assert result.exit_code == 0
+    assert result.stdout.index("first observed detail") < result.stdout.index("second observed detail")
+    assert "2026-07-12 23:45 UTC" in result.stdout
+    assert "Latest locally imported `$bonus` capture" in result.stdout
+
+
+def test_catalog_bonus_cli_distinguishes_empty_snapshot_from_no_matching_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(account_name="ernieuuu", metrics=(), observed_at=observed_at),
+            None,
+        )
+    )
+
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(player_bonus=lambda *_: next(snapshots)),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+
+    empty_snapshot_result = CliRunner().invoke(main.app, ["catalog", "bonus"])
+    no_snapshot_result = CliRunner().invoke(main.app, ["catalog", "bonus"])
+
+    assert empty_snapshot_result.exit_code == 0
+    empty_snapshot_output = " ".join(empty_snapshot_result.stdout.split())
+    assert "ernieuuu - player bonuses" in empty_snapshot_output
+    assert "2026-07-12 23:45 UTC" in empty_snapshot_output
+    assert "Latest locally imported `$bonus` capture" in empty_snapshot_output
+    assert no_snapshot_result.exit_code == 0
+    assert "No $bonus snapshot imported for this server/account yet." in no_snapshot_result.stdout
+    assert "player bonuses" not in no_snapshot_result.stdout
 
 
 def test_catalog_operational_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:

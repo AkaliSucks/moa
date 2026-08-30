@@ -41,6 +41,10 @@ def build_catalog_snapshot_app(
         for metric in bonus.metrics:
             table.add_row(metric.label, metric.detail)
         console.print(table)
+        console.print(
+            "[dim]Latest locally imported `$bonus` capture; displayed values are observed, "
+            "and the capture may be partial.[/dim]"
+        )
         console.print(f"[dim]Observed: {bonus.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
 
     @catalog_snapshot_app.command("wishlist")
