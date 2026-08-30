@@ -303,30 +303,36 @@ def build_catalog_search_app(
             )
             raise typer.Exit()
 
-        table = Table(title=f"{account} - current key-farm shortlist")
+        table = Table(title=f"{account} - latest local key-farm shortlist")
         table.add_column("Character", style="green")
         table.add_column("Kakera", justify="right", style="magenta")
         table.add_column("Keys", justify="right", style="cyan")
         table.add_column("Wishlist")
         table.add_column("Rollability")
+        table.add_column("Observed (UTC)")
         for entry in valued_entries:
             wishlist_entry = wishlist_by_name.get(entry.character_name.casefold())
             wishlist_status = (
                 "Starwish" if wishlist_entry and wishlist_entry.is_starwish
                 else "Wish" if wishlist_entry
-                else "-"
+                else "Not listed in observed wishlist" if wishlist is not None
+                else "No imported $wl snapshot"
             )
             table.add_row(
                 entry.character_name,
                 format_mudae_kakera(entry.kakera_value),
                 format_mudae_key_marker(entry.key_type, entry.key_count),
                 wishlist_status,
-                "Unavailable" if entry.character_name.casefold() in unavailable_names else "Unknown",
+                "Observed unavailable"
+                if entry.character_name.casefold() in unavailable_names
+                else "No matching unavailable evidence",
+                entry.observed_at.strftime("%Y-%m-%d %H:%M"),
             )
         console.print(table)
         console.print(
-            "[dim]Ordered by the current Mudae values you imported. This is a factual shortlist, "
-            "not yet an expected-value recommendation.[/dim]"
+            "[dim]Ordered by latest local harem-key observations. Observed timestamps have no "
+            "freshness/staleness age classification; this does not claim a complete harem. "
+            "This factual shortlist is not an expected-value recommendation.[/dim]"
         )
 
     @catalog_search_app.command("keyprogress")

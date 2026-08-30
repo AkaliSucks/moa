@@ -2238,6 +2238,161 @@ def test_catalog_harem_cli_clarifies_key_observation_status(monkeypatch) -> None
     ) in result.stdout
 
 
+def test_catalog_keyfarm_cli_renders_latest_local_evidence_without_inference(monkeypatch) -> None:
+    events: list[object] = []
+    first_observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    second_observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+    third_observed_at = datetime(2026, 7, 13, 0, 30, tzinfo=timezone.utc)
+    entries = (
+        SimpleNamespace(
+            character_name="Zero Kakera",
+            key_type="silver",
+            key_count=0,
+            kakera_value=0,
+            observed_at=first_observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Missing Kakera",
+            key_type="gold",
+            key_count=7,
+            kakera_value=None,
+            observed_at=first_observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Starwish",
+            key_type="gold",
+            key_count=5,
+            kakera_value=150,
+            observed_at=second_observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Unlisted",
+            key_type="silver",
+            key_count=2,
+            kakera_value=100,
+            observed_at=third_observed_at,
+        ),
+    )
+    wishlist = SimpleNamespace(
+        entries=(SimpleNamespace(name="Starwish", is_starwish=True),)
+    )
+    unavailable = (
+        SimpleNamespace(
+            character=CatalogCharacter(
+                id=1, name="Starwish", series="Series", gender=None, roulette=None
+            )
+        ),
+    )
+
+    class RecordingCatalogService:
+        def __init__(self):
+            events.append("construct")
+
+        def harem_keys(self, server, account):
+            events.append(("harem_keys", server, account))
+            return entries
+
+        def wishlist(self, server, account):
+            events.append(("wishlist", server, account))
+            return wishlist
+
+        def unavailable_characters(self, server, account):
+            events.append(("unavailable_characters", server, account))
+            return unavailable
+
+    monkeypatch.setattr(
+        main,
+        "_resolve_account_context",
+        lambda server, account: events.append(("resolve", server, account)) or ("Lake", "ernieuuu"),
+    )
+    monkeypatch.setattr(catalog_search_commands_module, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "keyfarm",
+            "--server",
+            "ignored",
+            "--account",
+            "ignored",
+            "--limit",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert events == [
+        ("resolve", "ignored", "ignored"),
+        "construct",
+        ("harem_keys", "Lake", "ernieuuu"),
+        ("wishlist", "Lake", "ernieuuu"),
+        ("unavailable_characters", "Lake", "ernieuuu"),
+    ]
+    assert "latest local key-farm shortlist" in result.stdout
+    assert "current key-farm" not in result.stdout
+    assert "Observed (UTC)" in result.stdout
+    assert "Zero Kakera" in result.stdout
+    assert "Starwish" in result.stdout
+    assert "Unlisted" in result.stdout
+    assert "Missing Kakera" not in result.stdout
+    assert result.stdout.index("Zero Kakera") < result.stdout.index("Starwish") < result.stdout.index("Unlisted")
+    assert "0:kakera:" in result.stdout
+    assert "No imported $wl snapshot" not in result.stdout
+    assert "Not listed in observed wishlist" in result.stdout
+    assert "Observed unavailable" in result.stdout
+    assert "No matching unavailable evidence" in result.stdout
+    assert "2026-07-12 23:45" in result.stdout
+    assert "2026-07-13 00:15" in result.stdout
+    assert "2026-07-13 00:30" in result.stdout
+    assert (
+        "Observed timestamps have no freshness/staleness age classification; this does not claim a "
+        "complete harem. This factual shortlist is not an expected-value recommendation."
+    ) in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("wishlist", "expected_status"),
+    (
+        (None, "No imported $wl snapshot"),
+        (SimpleNamespace(entries=()), "Not listed in observed wishlist"),
+    ),
+)
+def test_catalog_keyfarm_cli_distinguishes_absent_and_observed_empty_wishlist(
+    monkeypatch, wishlist, expected_status
+) -> None:
+    entry = SimpleNamespace(
+        character_name="Power",
+        key_type="silver",
+        key_count=2,
+        kakera_value=100,
+        observed_at=datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc),
+    )
+    service = SimpleNamespace(
+        harem_keys=lambda _server, _account: (entry,),
+        wishlist=lambda _server, _account: wishlist,
+        unavailable_characters=lambda _server, _account: (),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda _server, _account: ("Lake", "ernieuuu"))
+    monkeypatch.setattr(catalog_search_commands_module, "CatalogService", lambda: service)
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "keyfarm", "--server", "Lake", "--account", "ernieuuu"],
+    )
+
+    assert result.exit_code == 0
+    assert expected_status in result.stdout
+    other_status = (
+        "Not listed in observed wishlist"
+        if wishlist is None
+        else "No imported $wl snapshot"
+    )
+    assert other_status not in result.stdout
+
+
 def test_catalog_show_cli_clarifies_global_and_server_evidence(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
     profile = SimpleNamespace(
