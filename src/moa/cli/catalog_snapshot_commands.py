@@ -229,6 +229,11 @@ def build_catalog_snapshot_app(
             table.add_row("Ouro", f"$oh {state.oh_remaining}; $oc {state.oc_remaining}; $oq {state.oq_remaining}; $ot {state.ot_remaining}")
         console.print(table)
         console.print(f"[dim]Observed: {observation.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: values are from the latest locally imported timer snapshot for the "
+            "selected server/account; displayed countdowns are captured evidence, not current "
+            "deadlines, and do not establish fresh, stale, expired, or complete state.[/dim]"
+        )
 
     @catalog_snapshot_app.command("lootstate")
     def catalog_lootstate(

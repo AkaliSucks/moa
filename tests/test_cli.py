@@ -1539,6 +1539,119 @@ def test_catalog_towerstate_preserves_missing_zero_and_empty_perks(monkeypatch) 
     assert "Provenance:" not in no_snapshot_result.stdout
 
 
+def test_catalog_timers_preserves_explicit_zero_false_and_omitted_fields(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    observations = iter(
+        (
+            SimpleNamespace(
+                account_name="Account",
+                snapshot=SimpleNamespace(
+                    can_claim_now=False,
+                    claim_reset_minutes=0,
+                    rolls_left=0,
+                    rolls_reset_minutes=0,
+                    rolls_reset_status=None,
+                    daily_kakera_ready=False,
+                    rt_available=False,
+                    reaction_power_percent=0,
+                    oh_remaining=0,
+                    oc_remaining=0,
+                    oq_remaining=0,
+                    ot_remaining=0,
+                ),
+                observed_at=observed_at,
+            ),
+            SimpleNamespace(
+                account_name="Account",
+                snapshot=SimpleNamespace(
+                    can_claim_now=None,
+                    rolls_left=None,
+                    rolls_reset_status=None,
+                    daily_kakera_ready=None,
+                    rt_available=None,
+                    reaction_power_percent=None,
+                    oh_remaining=None,
+                ),
+                observed_at=observed_at,
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(timer_state=lambda *_: next(observations)),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "Account"))
+
+    runner = CliRunner()
+    explicit_result = runner.invoke(main.app, ["catalog", "timers"])
+    omitted_result = runner.invoke(main.app, ["catalog", "timers"])
+
+    assert explicit_result.exit_code == 0
+    assert "Available in 0 min" in explicit_result.stdout
+    assert "0 left; reset in 0 min" in explicit_result.stdout
+    assert "$dk" in explicit_result.stdout and "Not ready" in explicit_result.stdout
+    assert "$rt" in explicit_result.stdout and "Not available" in explicit_result.stdout
+    assert "Kakera reaction power" in explicit_result.stdout
+    assert "Ouro" in explicit_result.stdout
+    assert omitted_result.exit_code == 0
+    assert "Claim" not in omitted_result.stdout
+    assert "Rolls" not in omitted_result.stdout
+    assert "$dk" not in omitted_result.stdout
+    assert "$rt" not in omitted_result.stdout
+    assert "Kakera reaction power" not in omitted_result.stdout
+    assert "Ouro" not in omitted_result.stdout
+
+
+def test_catalog_timers_distinguishes_observed_empty_from_no_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    observations = iter(
+        (
+            SimpleNamespace(
+                account_name="Account",
+                snapshot=SimpleNamespace(
+                    can_claim_now=None,
+                    rolls_left=None,
+                    rolls_reset_status=None,
+                    daily_kakera_ready=None,
+                    rt_available=None,
+                    reaction_power_percent=None,
+                    oh_remaining=None,
+                ),
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(timer_state=lambda *_: next(observations)),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "Account"))
+
+    runner = CliRunner()
+    observed_empty_result = runner.invoke(main.app, ["catalog", "timers"])
+    no_snapshot_result = runner.invoke(main.app, ["catalog", "timers"])
+
+    assert observed_empty_result.exit_code == 0
+    assert "$tu snapshot" in observed_empty_result.stdout
+    assert "Observed: 2026-07-12 23:45 UTC" in observed_empty_result.stdout
+    observed_output = " ".join(observed_empty_result.stdout.split())
+    assert (
+        "Provenance: values are from the latest locally imported timer snapshot for the selected "
+        "server/account; displayed countdowns are captured evidence, not current deadlines, and "
+        "do not establish fresh, stale, expired, or complete state."
+    ) in observed_output
+    assert "Source:" not in observed_empty_result.stdout
+    assert "Expires at" not in observed_empty_result.stdout
+    assert "Freshness:" not in observed_empty_result.stdout
+    assert no_snapshot_result.exit_code == 0
+    assert "No $tu snapshot imported for this server/account yet." in no_snapshot_result.stdout
+    assert "Observed:" not in no_snapshot_result.stdout
+    assert "Provenance:" not in no_snapshot_result.stdout
+
+
 def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
     monkeypatch,
 ) -> None:
