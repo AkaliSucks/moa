@@ -1554,7 +1554,7 @@ def test_catalog_operational_commands_preserve_resolution_order_and_rendering(mo
 @pytest.mark.parametrize(
     ("command", "arguments", "method", "value", "message"),
     [
-        ("imports", (), "recent_imports", (), "No imports recorded yet."),
+        ("imports", (), "recent_imports", (), "No local import events recorded yet."),
         ("reactions", ("--server", "Lake", "--account", "ernieuuu"), "kakera_reactions", (), "No reaction receipts imported for this server/account yet."),
         ("spheres", ("--server", "Lake", "--account", "ernieuuu"), "sphere_result", None, "No $oq sphere result imported for this server/account yet."),
         ("reaction-summary", ("--server", "Lake", "--account", "ernieuuu"), "kakera_reaction_summary", SimpleNamespace(receipt_count=0), "No reaction receipts imported for this server/account yet."),
@@ -1592,6 +1592,70 @@ def test_catalog_imports_preserves_red_value_error_boundary(monkeypatch) -> None
     assert result.exit_code == 1
     assert "invalid import limit" in result.stdout
     assert "Traceback" not in result.stdout
+
+
+def test_catalog_imports_renders_local_history_and_forwards_limits(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    imports = (
+        SimpleNamespace(
+            id=18,
+            kind="harem_key",
+            source="clipboard",
+            server_name=None,
+            observed_at=observed_at,
+        ),
+        SimpleNamespace(
+            id=17,
+            kind="top_page",
+            source="discord",
+            server_name="Lake",
+            observed_at=observed_at,
+        ),
+    )
+    calls: list[int] = []
+
+    def recent_imports(limit):
+        calls.append(limit)
+        return imports[:limit]
+
+    monkeypatch.setattr(
+        catalog_operational_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(recent_imports=recent_imports),
+    )
+
+    runner = CliRunner()
+    help_result = runner.invoke(main.app, ["catalog", "imports", "--help"])
+    default_result = runner.invoke(main.app, ["catalog", "imports"])
+    explicit_result = runner.invoke(main.app, ["catalog", "imports", "--limit", "1"])
+
+    assert help_result.exit_code == 0
+    imports_command = get_command(main.app).commands["catalog"].commands["imports"]
+    assert imports_command.help == "Show local import-event history."
+    assert imports_command.params[0].help == "Number of local import-event summaries to display."
+    assert default_result.exit_code == explicit_result.exit_code == 0
+    assert calls == [20, 1]
+    output = " ".join(default_result.stdout.split())
+    assert "Recent local import-event history" in output
+    assert "18" in output and "harem_key" in output and "clipboard" in output
+    assert "17" in output and "top_page" in output and "discord" in output and "Lake" in output
+    assert "2026-07-12 23:45" in output
+    assert "-" in output
+    assert (
+        "Provenance: rows are limited local import-event summaries ordered by newest stored event ID; "
+        "the server label is best-effort. Rows do not establish account scope, processing/replay/success "
+        "status, freshness, completeness, or current state."
+    ) in output
+    assert "Account" not in output
+    assert "Status" not in output
+    assert "Fresh" not in output
+    assert "Success" not in output
+
+    explicit_output = " ".join(explicit_result.stdout.split())
+    assert "Recent local import-event history" in explicit_output
+    assert "18" in explicit_output and "harem_key" in explicit_output
+    assert "top_page" not in explicit_output
+    assert "No local import events recorded yet." not in explicit_output
 
 
 def test_catalog_towerstate_renders_middle_dot_separators(monkeypatch) -> None:

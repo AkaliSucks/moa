@@ -19,9 +19,11 @@ def build_catalog_operational_app(
 
     @catalog_operational_app.command("imports")
     def catalog_imports(
-        limit: int = typer.Option(20, "--limit", "-n", min=1, help="Number of imports to display."),
+        limit: int = typer.Option(
+            20, "--limit", "-n", min=1, help="Number of local import-event summaries to display."
+        ),
     ) -> None:
-        """Show recent raw Mudae imports and their server labels."""
+        """Show local import-event history."""
         service = CatalogService()
         try:
             imports = service.recent_imports(limit)
@@ -30,10 +32,10 @@ def build_catalog_operational_app(
             raise typer.Exit(1) from error
 
         if not imports:
-            console.print("[yellow]No imports recorded yet.[/yellow]")
+            console.print("[yellow]No local import events recorded yet.[/yellow]")
             raise typer.Exit()
 
-        table = Table(title="Recent Mudae imports")
+        table = Table(title="Recent local import-event history")
         table.add_column("ID", justify="right", style="cyan")
         table.add_column("Kind")
         table.add_column("Server", style="green")
@@ -48,6 +50,11 @@ def build_catalog_operational_app(
                 import_event.observed_at.strftime("%Y-%m-%d %H:%M"),
             )
         console.print(table)
+        console.print(
+            "[dim]Provenance: rows are limited local import-event summaries ordered by newest stored event ID; "
+            "the server label is best-effort. Rows do not establish account scope, processing/replay/success "
+            "status, freshness, completeness, or current state.[/dim]"
+        )
 
     @catalog_operational_app.command("reactions")
     def catalog_reactions(
