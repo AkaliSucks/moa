@@ -157,6 +157,12 @@ def build_catalog_snapshot_app(
         for badge in state.badges:
             table.add_row(badge.badge_name.title(), str(badge.level), "Max" if badge.max_reached else "In progress")
         console.print(table)
+        console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: Kakera balance and badges are from the latest locally imported `$k` "
+            "capture; they do not establish current, fresh, or stale state, and snapshot "
+            "completeness is not established.[/dim]"
+        )
 
     @catalog_snapshot_app.command("towerstate")
     def catalog_towerstate(

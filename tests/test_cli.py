@@ -1185,6 +1185,45 @@ def test_catalog_bonus_cli_distinguishes_empty_snapshot_from_no_matching_snapsho
     assert "player bonuses" not in no_snapshot_result.stdout
 
 
+def test_catalog_kakera_cli_distinguishes_zero_empty_snapshot_from_missing_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                account_name="ernieuuu",
+                kakera_balance=0,
+                badges=(),
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(kakera_state=lambda *_: next(snapshots)),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+
+    empty_snapshot_result = CliRunner().invoke(main.app, ["catalog", "kakera"])
+    missing_snapshot_result = CliRunner().invoke(main.app, ["catalog", "kakera"])
+
+    assert empty_snapshot_result.exit_code == 0
+    empty_snapshot_output = " ".join(empty_snapshot_result.stdout.split())
+    assert "ernieuuu - Kakera balance: 0" in empty_snapshot_output
+    assert "2026-07-12 23:45 UTC" in empty_snapshot_output
+    assert (
+        "Provenance: Kakera balance and badges are from the latest locally imported `$k` capture; "
+        "they do not establish current, fresh, or stale state, and snapshot completeness is not "
+        "established."
+    ) in empty_snapshot_output
+    assert missing_snapshot_result.exit_code == 0
+    assert "No $k snapshot imported for this server/account yet." in missing_snapshot_result.stdout
+    assert "Kakera balance" not in missing_snapshot_result.stdout
+    assert "Provenance:" not in missing_snapshot_result.stdout
+
+
 def test_catalog_wishlist_cli_preserves_duplicate_rows_zero_counts_and_evidence_wording(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     wishlist = SimpleNamespace(
