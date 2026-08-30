@@ -158,6 +158,11 @@ def build_catalog_operational_app(
                 format_optional_rank(observation.like_rank),
             )
         console.print(table)
-        console.print("[dim]Only ranks MOA imported from Mudae are shown; this is not a complete rank timeline.[/dim]")
+        console.print(
+            "[dim]Provenance: rows are up-to-limit local-import-time records, shown newest stored first; ranks are "
+            "direct global-rank observations imported from Mudae. '-' means that rank was not observed. This output "
+            "does not establish current, fresh, or stale rank, a complete timeline, server/account ownership or "
+            "availability, trend, or causality.[/dim]"
+        )
 
     return catalog_operational_app

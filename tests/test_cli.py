@@ -1570,6 +1570,13 @@ def test_catalog_operational_commands_preserve_resolution_order_and_rendering(mo
     assert "#1,200" in history.stdout
     assert "-" in history.stdout
     assert "2026-07-12 23:45" in history.stdout
+    history_output = " ".join(history.stdout.split())
+    assert (
+        "Provenance: rows are up-to-limit local-import-time records, shown newest stored first; ranks are direct "
+        "global-rank observations imported from Mudae. '-' means that rank was not observed. This output does not "
+        "establish current, fresh, or stale rank, a complete timeline, server/account ownership or availability, "
+        "trend, or causality."
+    ) in history_output
 
 
 def test_catalog_spheres_distinguishes_empty_observation_from_no_history(monkeypatch) -> None:
@@ -1607,6 +1614,23 @@ def test_catalog_spheres_distinguishes_empty_observation_from_no_history(monkeyp
     assert "No $oq sphere result imported for this server/account yet." in no_history.stdout
     assert "Recorded observation:" not in no_history.stdout
     assert "Provenance:" not in no_history.stdout
+
+
+def test_catalog_rank_history_empty_output_is_distinct_and_has_no_provenance(monkeypatch) -> None:
+    monkeypatch.setattr(
+        catalog_operational_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(rank_history=lambda *_args: ()),
+    )
+
+    result = CliRunner().invoke(main.app, ["catalog", "rank-history", "Power", "--series", "Chainsaw Man"])
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "No rank observations imported for that character/series yet."
+    assert "imported rank history" not in result.stdout
+    assert "Claim rank" not in result.stdout
+    assert "Like rank" not in result.stdout
+    assert "Provenance:" not in result.stdout
 
 
 @pytest.mark.parametrize(
