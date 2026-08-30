@@ -19,6 +19,7 @@ from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.kakeraloot_state import KakeralootStateParser
+from moa.parser.kakeraloot_settings import KakeralootSettingsParser
 from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
@@ -2734,6 +2735,70 @@ def test_parse_kakeraloot_settings_accepts_discord_formatting_and_custom_emoji()
     assert settings.loot_cost == 500
     assert settings.quantity_quality_base_cost == 2000
     assert settings.quantity_quality_level_increment == 200
+
+
+def test_kakeraloot_settings_parser_preserves_facade_and_injected_normalization() -> None:
+    text = (
+        "\u200bKakeraloots\n"
+        "<a:kakera:100001> Each $kl costs __0__ <:kakera:100002>\u200b\n"
+        "Reaching the level 1 of quantity or quality costs **1,000** <:kakera:100003> "
+        "(increased by _0_/level)\n"
+        "\n"
+    )
+    def lines(value: str) -> list[str]:
+        normalized = normalize_custom_emojis(value)
+        return [
+            line.strip().replace("\u200b", "")
+            for line in normalized.splitlines()
+            if line.strip()
+        ]
+
+    def numbers(value: str) -> int:
+        return int(value.replace(",", ""))
+
+    expected = KakeralootSettingsParser(
+        MudaeParseError, lines, numbers
+    ).parse(text)
+
+    assert expected == MudaeTextParser().parse_kakeraloot_settings(text)
+    assert (expected.loot_cost, expected.quantity_quality_base_cost) == (0, 1000)
+    assert expected.quantity_quality_level_increment == 0
+
+
+@pytest.mark.parametrize("missing", ["loot", "base", "increment"])
+def test_parse_kakeraloot_settings_rejects_partial_response(missing: str) -> None:
+    parts = {
+        "loot": "Each $kl costs 500:kakera:",
+        "base": "Reaching the level 1 of quantity or quality costs 2,000:kakera:",
+        "increment": "(increased by 200/level)",
+    }
+    lines = [value for key, value in parts.items() if key != missing]
+
+    with pytest.raises(MudaeParseError) as error:
+        MudaeTextParser().parse_kakeraloot_settings("\n".join(lines))
+
+    assert str(error.value) == (
+        "Expected a Mudae $infokl response with Kakeraloot cost details."
+    )
+
+
+def test_infokl_registry_aliases_have_no_modifiers_or_arguments_and_router_precedes_lootstate() -> None:
+    for token in ("$infokl", "$kakeralootinfo"):
+        match = COMMAND_REGISTRY.lookup(token)
+        assert match is not None
+        assert match.canonical_name == "infokl"
+        assert match.matched_form in {"infokl", "kakeralootinfo"}
+        assert match.modifier_text == ""
+        assert match.spec.argument_policy is ArgumentPolicy.NONE
+        assert match.expected_response == "infokl"
+
+    detection = MudaeMessageRouter().detect(
+        "Each $kl costs 500:kakera:\n"
+        "Reaching the level 1 of quantity or quality costs 2,000:kakera: "
+        "(increased by 200/level)\n"
+        "Prerequisites: Sapphire I + Ruby I + Emerald I ($infokl)"
+    )
+    assert detection.kind == "infokl"
 
 
 def test_profile_parser_characterizes_full_grounded_variant() -> None:

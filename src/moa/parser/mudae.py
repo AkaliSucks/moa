@@ -46,6 +46,7 @@ from moa.parser.kakera_reaction_blocked import KakeraReactionBlockedParser
 from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.kakeraloot_state import KakeralootStateParser
+from moa.parser.kakeraloot_settings import KakeralootSettingsParser
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -71,17 +72,6 @@ class MudaeTextParser:
 
     _NO_MUDAPINS = re.compile(
         r"No mudapins found!.*kakeraloots", re.IGNORECASE
-    )
-
-    _LOOT_COST = re.compile(
-        r"Each\s+\$kl\s+costs\s+(?P<value>[\d,]+)\s*:(?:kakera):",
-        re.IGNORECASE,
-    )
-
-    _LOOT_UPGRADE_COST = re.compile(
-        r"level\s+1\s+of\s+quantity\s+or\s+quality\s+costs\s+(?P<base>[\d,]+)\s*:(?:kakera):"
-        r".*?increased\s+by\s+(?P<increment>[\d,]+)/level",
-        re.IGNORECASE,
     )
 
     _KAKERA_BALANCE = re.compile(
@@ -229,18 +219,9 @@ class MudaeTextParser:
 
     def parse_kakeraloot_settings(self, text: str) -> KakeralootSettingsSnapshot:
         """Parse server-configurable and universal Kakeraloot costs from `$infokl`."""
-        normalized_text = "\n".join(
-            re.sub(r"[*_]", "", line) for line in self._lines(text)
-        )
-        loot_cost = self._LOOT_COST.search(normalized_text)
-        upgrade_cost = self._LOOT_UPGRADE_COST.search(normalized_text)
-        if loot_cost is None or upgrade_cost is None:
-            raise MudaeParseError("Expected a Mudae $infokl response with Kakeraloot cost details.")
-        return KakeralootSettingsSnapshot(
-            loot_cost=self._number(loot_cost.group("value")),
-            quantity_quality_base_cost=self._number(upgrade_cost.group("base")),
-            quantity_quality_level_increment=self._number(upgrade_cost.group("increment")),
-        )
+        return KakeralootSettingsParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_profile(self, text: str) -> ProfileSnapshot:
         """Parse account progress totals from a copied `$profile` response."""
