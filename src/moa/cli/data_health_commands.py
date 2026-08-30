@@ -203,6 +203,11 @@ def build_data_health_app(
             f"[bold cyan]Retention eligibility[/bold cyan] — as of {report.as_of.isoformat()} "
             f"(cutoff {report.cutoff.isoformat()})"
         )
+        console.print(
+            "Read-only classification; no evidence was changed and this report does not "
+            "authorize expiry or deletion.",
+            soft_wrap=True,
+        )
         table = Table()
         table.add_column("Category", style="cyan")
         table.add_column("Eligible", justify="right")

@@ -267,6 +267,10 @@ def test_report_is_aggregate_private_and_read_only_and_cli_zero_noop_succeeds(tm
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", path)
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "retention"])
     assert result.exit_code == 0
+    assert (
+        "Read-only classification; no evidence was changed and this report does not authorize "
+        "expiry or deletion."
+    ) in result.stdout
     assert "No eligible" not in result.stdout
     assert "raw import" not in result.stdout
     assert "private" not in result.stdout
