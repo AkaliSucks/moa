@@ -5700,13 +5700,43 @@ def test_catalog_delete_import_help_is_lazy_and_constructs_service_at_callback_t
 
     assert help_result.exit_code == 0
     assert "Delete one mistaken import" in help_result.stdout
+    assert "--confirm" in help_result.stdout
     assert constructions == []
 
-    result = runner.invoke(main.app, ["catalog", "delete-import", "42"])
+    result = runner.invoke(main.app, ["catalog", "delete-import", "42", "--confirm"])
 
     assert result.exit_code == 0
     assert constructions == [1]
     assert "Deleted import event 42." in result.stdout
+
+
+def test_catalog_delete_import_declines_without_confirmation_before_service_or_mutation(
+    monkeypatch,
+) -> None:
+    constructions: list[int] = []
+    deletions: list[int] = []
+
+    class UnexpectedCatalogService:
+        def __init__(self):
+            constructions.append(1)
+
+        def delete_import_event(self, import_event_id):
+            deletions.append(import_event_id)
+            return True
+
+    monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", UnexpectedCatalogService)
+
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "42"])
+
+    assert result.exit_code == 1
+    output = " ".join(result.stdout.split())
+    assert "Declined unsafe invocation" in output
+    assert "permanently removes the selected unlinked local import event and its import-derived observations" in output
+    assert "may change derived/current reports" in output
+    assert "not retention expiry or privacy erasure" in output
+    assert "requires --confirm to proceed" in output
+    assert constructions == []
+    assert deletions == []
 
 
 def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> None:
@@ -5718,7 +5748,7 @@ def test_catalog_delete_import_reports_durable_source_refusal(monkeypatch) -> No
 
     monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", BlockingCatalogService)
 
-    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "42"])
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "42", "--confirm"])
 
     assert result.exit_code == 1
     assert "Deletion blocked" in result.stdout
@@ -5734,7 +5764,7 @@ def test_catalog_delete_import_reports_missing_event(monkeypatch) -> None:
 
     monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", MissingCatalogService)
 
-    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "404"])
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "404", "--confirm"])
 
     assert result.exit_code == 1
     assert "Import event not found." in result.stdout
@@ -5748,7 +5778,7 @@ def test_catalog_delete_import_renders_successful_deletion(monkeypatch) -> None:
 
     monkeypatch.setattr(catalog_delete_import_commands_module, "CatalogService", SuccessfulCatalogService)
 
-    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "7"])
+    result = CliRunner().invoke(main.app, ["catalog", "delete-import", "7", "--confirm"])
 
     assert result.exit_code == 0
     assert "Deleted import event 7." in result.stdout

@@ -12,8 +12,19 @@ def register_catalog_delete_import_command(
     console: Console,
 ) -> None:
     @catalog_app.command("delete-import")
-    def catalog_delete_import(import_event_id: int) -> None:
+    def catalog_delete_import(
+        import_event_id: int,
+        confirm: bool = typer.Option(False, "--confirm", help="Confirm the permanent deletion."),
+    ) -> None:
         """Delete one mistaken import while preserving all other catalog data."""
+        if not confirm:
+            console.print(
+                "[yellow]Declined unsafe invocation: this command permanently removes the "
+                "selected unlinked local import event and its import-derived observations, "
+                "may change derived/current reports, is not retention expiry or privacy "
+                "erasure, and requires --confirm to proceed.[/yellow]"
+            )
+            raise typer.Exit(1)
         try:
             deleted = CatalogService().delete_import_event(import_event_id)
         except ImportEventDeletionBlockedError:
