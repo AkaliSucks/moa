@@ -1243,6 +1243,83 @@ def test_catalog_infokl_cli_renders_zero_values_and_distinguishes_missing_snapsh
     ]
 
 
+def test_catalog_settings_cli_preserves_observed_rows_and_distinguishes_empty_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                server_name="Lake",
+                metrics=(
+                    SimpleNamespace(label="Premium", value="False"),
+                    SimpleNamespace(label="Zero setting", value="0"),
+                    SimpleNamespace(label="Repeated metric", value="first observed value"),
+                    SimpleNamespace(label="Repeated metric", value="second observed value"),
+                ),
+                game_mode=0,
+                rolls_per_hour=0,
+                claim_reset_minutes=0,
+                observed_at=observed_at,
+            ),
+            SimpleNamespace(
+                server_name="Lake",
+                metrics=(),
+                game_mode=0,
+                rolls_per_hour=0,
+                claim_reset_minutes=0,
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+
+    def read_settings(server):
+        assert server == "Lake"
+        return next(snapshots)
+
+    monkeypatch.setattr(main, "_resolve_server_context", lambda server: "Lake")
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(server_settings=read_settings),
+    )
+
+    runner = CliRunner()
+    populated_result = runner.invoke(main.app, ["catalog", "settings"])
+    empty_result = runner.invoke(main.app, ["catalog", "settings"])
+    missing_result = runner.invoke(main.app, ["catalog", "settings"])
+
+    assert populated_result.exit_code == 0
+    populated_output = " ".join(populated_result.stdout.split())
+    assert "Premium" in populated_output
+    assert "False" in populated_output
+    assert "Zero setting" in populated_output
+    assert "0" in populated_output
+    assert populated_output.index("first observed value") < populated_output.index("second observed value")
+    assert "Core: Gamemode 0 | 0 rolls/hour | claim reset 0 min" in populated_output
+    assert "observed 2026-07-12 23:45 UTC" in populated_output
+    assert (
+        "Provenance: values are the latest locally imported server-scoped `$settings` capture for the "
+        "selected server; they are observed only and may not be current or fresh. This display does "
+        "not claim to include every server setting."
+    ) in populated_output
+    assert "Current server settings" not in populated_output
+    assert "Fresh server settings" not in populated_output
+    assert "Complete server settings" not in populated_output
+
+    assert empty_result.exit_code == 0
+    empty_output = " ".join(empty_result.stdout.split())
+    assert "Lake - server settings" in empty_output
+    assert "Core: Gamemode 0 | 0 rolls/hour | claim reset 0 min" in empty_output
+    assert "observed 2026-07-12 23:45 UTC" in empty_output
+    assert "Provenance:" in empty_output
+    assert "Repeated metric" not in empty_output
+
+    assert missing_result.exit_code == 0
+    assert "No $settings snapshot imported for this server yet." in missing_result.stdout
+    assert "server settings" not in missing_result.stdout
+    assert "Provenance:" not in missing_result.stdout
+
+
 def test_catalog_kakera_cli_distinguishes_zero_empty_snapshot_from_missing_snapshot(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     snapshots = iter(

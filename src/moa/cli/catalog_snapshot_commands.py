@@ -349,5 +349,10 @@ def build_catalog_snapshot_app(
             f"claim reset {settings.claim_reset_minutes} min | observed "
             f"{settings.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
         )
+        console.print(
+            "[dim]Provenance: values are the latest locally imported server-scoped `$settings` capture "
+            "for the selected server; they are observed only and may not be current or fresh. "
+            "This display does not claim to include every server setting.[/dim]"
+        )
 
     return catalog_snapshot_app
