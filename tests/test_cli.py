@@ -2180,6 +2180,66 @@ def test_catalog_account_search_commands_use_late_bound_resolver(monkeypatch) ->
     ]
 
 
+def test_catalog_keyprogress_cli_discloses_provenance_and_honors_limit(monkeypatch) -> None:
+    entries = (
+        SimpleNamespace(
+            character_name="Power",
+            current_tier="Gold Key",
+            key_count=7,
+            next_milestone_key_count=9,
+            keys_until_next_milestone=2,
+            next_effects=("Gold bonus.",),
+        ),
+        SimpleNamespace(
+            character_name="Saber",
+            current_tier="Silver Key",
+            key_count=5,
+            next_milestone_key_count=6,
+            keys_until_next_milestone=1,
+            next_effects=("Gold bonus.",),
+        ),
+        SimpleNamespace(
+            character_name="Miku",
+            current_tier="Chaos Key",
+            key_count=24,
+            next_milestone_key_count=25,
+            keys_until_next_milestone=1,
+            next_effects=("Second reaction.",),
+        ),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda _server, _account: ("Lake", "ernieuuu"))
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "KeyProgressService",
+        lambda: SimpleNamespace(progress=lambda _server, _account: entries),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "keyprogress",
+            "--server",
+            "Lake",
+            "--account",
+            "ernieuuu",
+            "--limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Power" in result.stdout
+    assert "Saber" in result.stdout
+    assert "Miku" not in result.stdout
+    assert (
+        "Keys are latest local key observations; Tier, Next, Away, and Next unlock are derived from "
+        "universal key rules. Observations do not establish current, fresh, or stale state; timestamps "
+        "and scan completeness are not shown."
+    ) in result.stdout
+
+
 def test_catalog_harem_cli_clarifies_key_observation_status(monkeypatch) -> None:
     first_observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     second_observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)

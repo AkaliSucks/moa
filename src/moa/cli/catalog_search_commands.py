@@ -365,7 +365,10 @@ def build_catalog_search_app(
             )
         console.print(table)
         console.print(
-            "[dim]This explains the next key unlock only; it does not yet estimate how often each character rolls.[/dim]"
+            "[dim]Keys are latest local key observations; Tier, Next, Away, and Next unlock are derived from "
+            "universal key rules. Observations do not establish current, fresh, or stale state; timestamps "
+            "and scan completeness are not shown. This explains the next key unlock only; it does not yet "
+            "estimate how often each character rolls.[/dim]"
         )
 
     @catalog_search_app.command("key-gains")
