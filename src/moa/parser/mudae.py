@@ -50,6 +50,7 @@ from moa.parser.kakeraloot_settings import KakeralootSettingsParser
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
+from moa.parser.profile import ProfileParser
 from moa.parser.roll import RollParser
 from moa.parser.server_settings import ServerSettingsParser
 from moa.parser.sphere_result import SphereResultParser
@@ -225,148 +226,9 @@ class MudaeTextParser:
 
     def parse_profile(self, text: str) -> ProfileSnapshot:
         """Parse account progress totals from a copied `$profile` response."""
-        lines = [re.sub(r"\*", "", line) for line in self._lines(text)]
-
-        collection = next(
-            (re.search(
-                r"Collection size:\s*(?P<size>[\d,]+)\s*"
-                r"\((?P<female>\d+)%\s*:female:\s*"
-                r"(?P<male>\d+)%\s*:male:\s*\)",
-                line,
-                re.IGNORECASE,
-            ) for line in lines if "collection size:" in line.casefold()),
-            None,
-        )
-        pokedex = next(
-            (re.search(
-                r"Pok(?:é|e)dex:\s*(?P<count>[\d,]+)\s+Pok(?:é|e)mon(?P<items>.*)$",
-                line,
-                re.IGNORECASE,
-            ) for line in lines if "dex:" in line.casefold()),
-            None,
-        )
-        if pokedex is None:
-            pokedex = next(
-                (re.search(
-                    r"Pok.*?dex:\s*(?P<count>[\d,]+)\s+Pok.*?mon(?P<items>.*)$",
-                    line,
-                    re.IGNORECASE,
-                ) for line in lines if "dex:" in line.casefold()),
-                None,
-            )
-        mudapins = next(
-            (re.search(
-                r"Mudapins:\s*(?P<collected>[\d,]+)\s*/\s*(?P<total>[\d,]+)",
-                line,
-                re.IGNORECASE,
-            ) for line in lines if line.casefold().startswith("mudapins:")),
-            None,
-        )
-        kakera_balance = next(
-            (re.match(r"^(?P<value>[\d,]+)\s*:kakera:\s*$", line, re.IGNORECASE)
-             for line in lines if re.match(r"^[\d,]+\s*:kakera:", line, re.IGNORECASE)),
-            None,
-        )
-        keys_line = next(
-            (line for line in lines if line.casefold().startswith("keys:")),
-            None,
-        )
-        key_counts = {
-            marker.casefold(): self._number(value)
-            for value, marker in re.findall(
-                r"([\d,]+)\s*:([a-z]+key):", keys_line or "", re.IGNORECASE
-            )
-        }
-        sphere_stock = next(
-            (re.match(r"^(?P<value>[\d,]+)\s*:sp:\s*$", line, re.IGNORECASE)
-             for line in lines if re.match(r"^[\d,]+\s*:sp:\s*$", line, re.IGNORECASE)),
-            None,
-        )
-        if collection is None:
-            raise MudaeParseError("Expected a complete Mudae $profile response with account totals.")
-
-        def marker_counts(line: str, prefix: str) -> dict[str, int]:
-            return {
-                f":{marker}:": self._number(value)
-                for value, marker in re.findall(
-                    rf"([\d,]+)\s*x\s*:({prefix}[A-Za-z0-9_]*)\s*:", line, re.IGNORECASE
-                )
-            }
-
-        reacts_index = next(
-            (index for index, line in enumerate(lines) if line.casefold() == "reacts:"),
-            None,
-        )
-        reactions_observed = reacts_index is not None
-        reacts = None
-        if reacts_index is not None:
-            if reacts_index + 1 >= len(lines):
-                raise MudaeParseError(
-                    "Expected a Mudae $profile reactions section with reaction counts."
-                )
-            reacts = marker_counts(lines[reacts_index + 1], "kakera")
-            if not reacts:
-                raise MudaeParseError(
-                    "Expected a Mudae $profile reactions section with reaction counts."
-                )
-        sphere_index = next(
-            (index for index, line in enumerate(lines) if re.match(r"^[\d,]+\s*:sp:\s*$", line, re.IGNORECASE)),
-            None,
-        )
-        spheres = None
-        if sphere_index is not None and sphere_index + 1 < len(lines):
-            parsed_spheres = marker_counts(lines[sphere_index + 1], "sp")
-            spheres = parsed_spheres or None
-        badge_line = next(
-            (line for line in reversed(lines) if any(
-                marker in line.casefold()
-                for marker in (":bronzeiv:", ":silveriv:", ":diamondiv:", ":diamondi:")
-            )),
-            None,
-        )
-        displayed_badges = (
-            tuple(f":{marker}:" for marker in re.findall(r":([A-Za-z0-9_]+):", badge_line))
-            if badge_line is not None
-            else None
-        )
-
-        return ProfileSnapshot(
-            profile_name=lines[0],
-            collection_size=self._number(collection.group("size")),
-            female_percent=int(collection.group("female")),
-            male_percent=int(collection.group("male")),
-            pokedex_count=self._number(pokedex.group("count")) if pokedex else None,
-            pokedex_pokemon=(
-                tuple(re.findall(r":([A-Za-z0-9_]+):", pokedex.group("items")))
-                if pokedex
-                else None
-            ),
-            kakera_reacts=reacts,
-            mudapins_collected=(
-                self._number(mudapins.group("collected")) if mudapins else None
-            ),
-            mudapins_total=(self._number(mudapins.group("total")) if mudapins else None),
-            kakera_balance=(
-                self._number(kakera_balance.group("value")) if kakera_balance else None
-            ),
-            bronze_keys=key_counts.get("bronzekey"),
-            silver_keys=key_counts.get("silverkey"),
-            gold_keys=key_counts.get("goldkey"),
-            sphere_stock=(self._number(sphere_stock.group("value")) if sphere_stock else None),
-            spheres=spheres,
-            displayed_badges=displayed_badges,
-            pokedex_observed=pokedex is not None,
-            reactions_observed=reactions_observed,
-            mudapins_observed=mudapins is not None,
-            kakera_balance_observed=kakera_balance is not None,
-            keys_observed=keys_line is not None,
-            bronze_keys_observed="bronzekey" in key_counts,
-            silver_keys_observed="silverkey" in key_counts,
-            gold_keys_observed="goldkey" in key_counts,
-            sphere_stock_observed=sphere_stock is not None,
-            sphere_counts_observed=spheres is not None,
-            badges_observed=badge_line is not None,
-        )
+        return ProfileParser(
+            MudaeParseError, self._lines, self._number
+        ).parse(text)
 
     def parse_mudapins(self, text: str) -> MudapinSnapshot:
         """Parse a `$mp` inventory, including Mudae's empty response."""

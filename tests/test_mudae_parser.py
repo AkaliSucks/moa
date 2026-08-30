@@ -24,6 +24,7 @@ from moa.parser.message_router import MudaeMessageRouter
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
+from moa.parser.profile import ProfileParser
 from moa.parser.roll import RollParser
 from moa.parser.server_settings import ServerSettingsParser
 from moa.parser.sphere_result import SphereResultParser
@@ -2853,6 +2854,58 @@ def test_profile_parser_characterizes_full_grounded_variant() -> None:
     assert profile.badges_observed is True
 
 
+def test_profile_parser_facade_matches_dedicated_parser() -> None:
+    text = (
+        "\u200bernieuuu\n"
+        "\u200b**Collection size: 35 (100%:female: 0% :male:)**\n"
+        "Pokedex: 2 Pokemon <:gulpin:123> :piloswine:\n"
+        "Keys: 3:BronzeKey: 2:SILVERKEY: 1:goldKEY:\n"
+        "110 :sp:\n"
+        "2x:spP: 1x:sp:\n"
+        ":BronzeIV::DiamondI:"
+    )
+    expected = ProfileParser(
+        MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+    ).parse(text)
+
+    assert MudaeTextParser().parse_profile(text) == expected
+
+
+def test_profile_parser_uses_injected_normalization_and_conversion_seams() -> None:
+    text = "ignored"
+    lines = Mock(
+        return_value=[
+            "account-name",
+            "**Collection size: 1,234 (100%:female: 0% :male:)**",
+            "Pokedex: 0 Pokemon",
+            "Keys: 0:BRONZEKEY:",
+            "0 :sp:",
+            "0x:spP:",
+            ":BronzeIV:",
+        ]
+    )
+    number = Mock(side_effect=lambda value: int(value.replace(",", "")))
+
+    profile = ProfileParser(MudaeParseError, lines, number).parse(text)
+
+    assert profile.profile_name == "account-name"
+    assert profile.collection_size == 1234
+    assert profile.pokedex_count == 0
+    assert profile.pokedex_pokemon == ()
+    assert profile.bronze_keys == 0
+    assert profile.sphere_stock == 0
+    assert profile.spheres == {":spP:": 0}
+    assert profile.displayed_badges == (":BronzeIV:",)
+    assert lines.call_args_list == [call(text)]
+    assert number.call_args_list == [
+        call("0"),
+        call("0"),
+        call("1,234"),
+        call("0"),
+        call("0"),
+    ]
+
+
 def test_profile_parser_characterizes_variant_without_mudapins() -> None:
     profile = MudaeTextParser().parse_profile(
         "cute_beagle_91130\n"
@@ -2944,8 +2997,10 @@ def test_profile_parser_preserves_minimal_response_absence() -> None:
 
 
 def test_profile_parser_requires_collection_section() -> None:
-    with pytest.raises(MudaeParseError):
+    with pytest.raises(MudaeParseError) as error:
         MudaeTextParser().parse_profile("moa\nReacts:")
+
+    assert str(error.value) == "Expected a complete Mudae $profile response with account totals."
 
 
 def test_profile_parser_requires_well_formed_collection_section() -> None:
@@ -2968,13 +3023,23 @@ def test_profile_parser_characterizes_identity_line_assumption() -> None:
 
 
 def test_profile_parser_known_malformed_reaction_shape_fails_closed() -> None:
-    with pytest.raises(MudaeParseError):
+    with pytest.raises(MudaeParseError) as error:
         MudaeTextParser().parse_profile(
             "moa\n"
             "Collection size: 35 (100%:female: 0% :male:)\n"
             "Reacts:\n"
             "48:kakeraP:"
         )
+
+    assert str(error.value) == "Expected a Mudae $profile reactions section with reaction counts."
+
+
+def test_profile_router_gates_success_on_profile_parser_revalidation() -> None:
+    valid = "moa\nCollection size: 0 (0%:female: 0% :male:)"
+    malformed = valid + "\nReacts:"
+
+    assert MudaeMessageRouter().detect(valid).kind == "profile"
+    assert MudaeMessageRouter().detect(malformed).kind == "unknown"
 
 
 def test_parse_mudapins_reads_pin_and_logopin_markers() -> None:
