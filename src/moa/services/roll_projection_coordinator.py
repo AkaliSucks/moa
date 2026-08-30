@@ -17,6 +17,7 @@ from moa.repositories.discord_message_repository import (
     DiscordMessageProcessingNotFoundError,
     DiscordMessageRepository,
 )
+from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.projection_authority import (
     ROLL_KEY_PROJECTION,
     ROLL_PROJECTION,
@@ -141,6 +142,8 @@ class RollProjectionCoordinator:
         def coordinate_with_connection(
             connection: sqlite3.Connection,
         ) -> RollProjectionResult:
+            projection_links = ProjectionLinkRepository(connection)
+            generation_id = projection_links.resolve_current_generation_id()
             event = self._load_source_event(connection, source_event_id)
             if str(event["status"]) == "succeeded":
                 if attempt_id is not None:
@@ -153,7 +156,13 @@ class RollProjectionCoordinator:
                     server=server,
                     account=account,
                 )
-                return self._coordinate_replay(connection, event, roll)
+                return self._coordinate_replay(
+                    connection,
+                    event,
+                    roll,
+                    projection_links=projection_links,
+                    generation_id=generation_id,
+                )
 
             if attempt_id is None:
                 raise DiscordMessageProcessingConflictError(
@@ -166,7 +175,11 @@ class RollProjectionCoordinator:
                 server=server,
                 account=account,
             )
-            links = self._load_links(connection, source_event_id)
+            links = self._load_links(
+                projection_links,
+                source_event_id=source_event_id,
+                generation_id=generation_id,
+            )
             self._validate_existing_links(
                 connection,
                 event,
@@ -180,8 +193,9 @@ class RollProjectionCoordinator:
                     f"source event {source_event_id} has completed projection links while processing"
                 )
             self._claim_missing_links(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 expected=expected,
                 claimed_at=observed_at,
             )
@@ -210,8 +224,9 @@ class RollProjectionCoordinator:
                     roll,
                 )
             self._complete_projection_links(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 expected=expected,
                 targets=targets,
                 completed_at=finished_at,
@@ -242,6 +257,9 @@ class RollProjectionCoordinator:
         connection: sqlite3.Connection,
         event: sqlite3.Row,
         roll: RollObservation,
+        *,
+        projection_links: ProjectionLinkRepository,
+        generation_id: int,
     ) -> RollProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -272,7 +290,11 @@ class RollProjectionCoordinator:
                 "durable Roll expected set has the wrong source family"
             )
         expected_set = resolve_expected_projections(durable_facts)
-        links = self._load_links(connection, int(event["id"]))
+        links = self._load_links(
+            projection_links,
+            source_event_id=int(event["id"]),
+            generation_id=generation_id,
+        )
         actual = self._validate_replay_links(
             connection,
             event,
@@ -476,13 +498,16 @@ class RollProjectionCoordinator:
 
     @staticmethod
     def _load_links(
-        connection: sqlite3.Connection, source_event_id: int
+        repository: ProjectionLinkRepository,
+        *,
+        source_event_id: int,
+        generation_id: int,
     ) -> dict[tuple[str, str], sqlite3.Row]:
         links: dict[tuple[str, str], sqlite3.Row] = {}
-        for link in connection.execute(
-            "SELECT * FROM discord_projection_links WHERE source_event_id = ?",
-            (source_event_id,),
-        ).fetchall():
+        for link in repository.load_links(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+        ):
             key = (str(link["projection_kind"]), str(link["projection_slot"]))
             if key in links:
                 raise RollProjectionIntegrityError(
@@ -661,54 +686,46 @@ class RollProjectionCoordinator:
 
     def _claim_missing_links(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         expected: tuple[_ProjectionSpec, ...],
         claimed_at: datetime,
     ) -> None:
-        value = claimed_at.isoformat()
         for spec in expected:
-            connection.execute(
-                """
-                INSERT INTO discord_projection_links (
-                    source_event_id, projection_kind, projection_slot,
-                    projection_table, projection_row_id, state,
-                    claimed_at, completed_at, created_at, updated_at
-                ) VALUES (?, ?, ?, NULL, NULL, 'claimed', ?, NULL, ?, ?)
-                """,
-                (source_event_id, spec.kind, spec.slot, value, value, value),
+            repository.claim_link(
+                source_event_id=source_event_id,
+                generation_id=generation_id,
+                projection_kind=spec.kind,
+                projection_slot=spec.slot,
+                claimed_at=claimed_at,
             )
 
     def _complete_projection_links(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         expected: tuple[_ProjectionSpec, ...],
         targets: tuple[tuple[str, int], ...],
         completed_at: datetime,
     ) -> None:
-        value = completed_at.isoformat()
         for spec, (table, row_id) in zip(expected, targets, strict=True):
             if table != spec.table or row_id <= 0:
                 raise RollProjectionIntegrityError(
                     f"import result did not provide the expected target for {spec.kind}"
                 )
-            updated = connection.execute(
-                """
-                UPDATE discord_projection_links
-                SET projection_table = ?, projection_row_id = ?, state = 'completed',
-                    completed_at = ?, updated_at = ?
-                WHERE source_event_id = ? AND projection_kind = ? AND projection_slot = ?
-                  AND state = 'claimed'
-                """,
-                (table, row_id, value, value, source_event_id, spec.kind, spec.slot),
+            repository.complete_claimed_link(
+                source_event_id=source_event_id,
+                generation_id=generation_id,
+                projection_kind=spec.kind,
+                projection_slot=spec.slot,
+                projection_table=table,
+                projection_row_id=row_id,
+                completed_at=completed_at,
             )
-            if updated.rowcount != 1:
-                raise RollProjectionIntegrityError(
-                    f"projection link {spec.kind} could not be completed"
-                )
 
     @staticmethod
     def _targets_from_import(

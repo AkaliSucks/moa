@@ -187,6 +187,39 @@ def _event_and_attempt(connection: sqlite3.Connection):
     return event, attempt
 
 
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_roll_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.roll', '{"historical":true}',
+                  'roll_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (source_event_id, value, value, value, value),
+    )
+
+
 def _coordinate_roll(coordinator, source_event_id: int, attempt_id: int | None, roll=ROLL_ALL):
     return coordinator.coordinate_roll(
         source_event_id=source_event_id,
@@ -254,20 +287,68 @@ def test_first_processing_coordinates_all_roll_projections_and_success(tmp_path)
         }
         links = connection.execute(
             """
-            SELECT projection_kind, projection_table, projection_row_id, state, completed_at
+            SELECT generation_id, projection_kind, projection_table,
+                   projection_row_id, state, completed_at
             FROM discord_projection_links ORDER BY id
             """
         ).fetchall()
-        assert [(row[0], row[1], row[3]) for row in links] == [
-            ("catalog.roll", "roll_observations", "completed"),
-            ("catalog.roll_key", "harem_key_observations", "completed"),
-            ("catalog.roll_rank", "rank_snapshots", "completed"),
-            ("catalog.roll_server_character", "server_character_observations", "completed"),
+        assert [(row[0], row[1], row[2], row[4]) for row in links] == [
+            (1, "catalog.roll", "roll_observations", "completed"),
+            (1, "catalog.roll_key", "harem_key_observations", "completed"),
+            (1, "catalog.roll_rank", "rank_snapshots", "completed"),
+            (1, "catalog.roll_server_character", "server_character_observations", "completed"),
         ]
-        assert all(row[2] > 0 and row[4] == FINISHED_AT.isoformat() for row in links)
+        assert all(row[3] > 0 and row[5] == FINISHED_AT.isoformat() for row in links)
         event, attempt = _event_and_attempt(connection)
         assert event[0:2] == ("succeeded", result.import_event_id)
         assert attempt[0:2] == ("succeeded", FINISHED_AT.isoformat())
+
+
+def test_historical_roll_links_do_not_satisfy_or_suppress_current_generation(
+    tmp_path,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_roll_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate_roll(coordinator, source_event_id, attempt_id)
+    replay = _coordinate_roll(coordinator, source_event_id, None)
+
+    assert first.imported_count == 1
+    assert replay.imported_count == 0
+    assert replay.replay_skipped is True
+    assert replay.projection_targets == first.projection_targets
+    with connect(database_path) as connection:
+        historical_after = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+        current_links = connection.execute(
+            """
+            SELECT generation_id, state, projection_row_id
+            FROM discord_projection_links
+            WHERE source_event_id = ? AND generation_id = 2
+            ORDER BY id
+            """,
+            (source_event_id,),
+        ).fetchall()
+        assert historical_after == historical_before
+        assert len(current_links) == 4
+        assert all(
+            row[0] == 2 and row[1] == "completed" and row[2] > 0
+            for row in current_links
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE kind = 'roll'"
+        ).fetchone()[0] == 1
 
 
 def test_first_processing_key_persistence_is_governed_by_shared_authority(
@@ -562,6 +643,39 @@ def test_first_processing_validates_optional_target_before_completion(
         assert counts["rank_snapshots"] == 0
         assert counts["server_character_observations"] == 0
         assert counts["discord_projection_links"] == 0
+        assert _event_and_attempt(connection)[0][0:2] == ("processing", None)
+        assert _event_and_attempt(connection)[1][0] == "processing"
+
+
+def test_current_generation_roll_target_validation_failure_rolls_back(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_roll_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    _corrupt_server_character_value(catalog, monkeypatch)
+
+    with pytest.raises(RollProjectionIntegrityError, match="mismatched Kakera value"):
+        _coordinate_roll(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM roll_observations").fetchone()[0] == 0
         assert _event_and_attempt(connection)[0][0:2] == ("processing", None)
         assert _event_and_attempt(connection)[1][0] == "processing"
 
