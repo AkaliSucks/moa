@@ -1185,6 +1185,64 @@ def test_catalog_bonus_cli_distinguishes_empty_snapshot_from_no_matching_snapsho
     assert "player bonuses" not in no_snapshot_result.stdout
 
 
+def test_catalog_infokl_cli_renders_zero_values_and_distinguishes_missing_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                server_name="Lake",
+                loot_cost=0,
+                quantity_quality_base_cost=0,
+                quantity_quality_level_increment=0,
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+    events: list[object] = []
+
+    def resolve_server(server):
+        events.append(("server-resolve", server))
+        return "Lake"
+
+    def read_settings(server):
+        events.append(("settings-read", server))
+        return next(snapshots)
+
+    monkeypatch.setattr(main, "_resolve_server_context", resolve_server)
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(kakeraloot_settings=read_settings),
+    )
+
+    runner = CliRunner()
+    populated_result = runner.invoke(main.app, ["catalog", "infokl", "--server", "ignored"])
+    missing_result = runner.invoke(main.app, ["catalog", "infokl", "--server", "ignored"])
+
+    assert populated_result.exit_code == 0
+    populated_output = " ".join(populated_result.stdout.split())
+    assert "Lake - Kakeraloot configuration" in populated_output
+    assert "Each $kl: 0 Kakera" in populated_output
+    assert "Quantity/Quality next-level cost: 0 + 0 per current level" in populated_output
+    assert "Observed: 2026-07-12 23:45 UTC" in populated_output
+    assert (
+        "Provenance: values are the latest locally imported `$infokl` capture for the selected "
+        "server; they are observed price details only and do not establish live/current "
+        "availability or entitlement, fresh/stale status, or complete loot state."
+    ) in populated_output
+    assert missing_result.exit_code == 0
+    assert "No $infokl configuration imported for this server yet." in missing_result.stdout
+    assert "Kakeraloot configuration" not in missing_result.stdout
+    assert "Provenance:" not in missing_result.stdout
+    assert events == [
+        ("server-resolve", "ignored"),
+        ("settings-read", "Lake"),
+        ("server-resolve", "ignored"),
+        ("settings-read", "Lake"),
+    ]
+
+
 def test_catalog_kakera_cli_distinguishes_zero_empty_snapshot_from_missing_snapshot(monkeypatch) -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     snapshots = iter(

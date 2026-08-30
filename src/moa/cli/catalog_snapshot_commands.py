@@ -321,6 +321,12 @@ def build_catalog_snapshot_app(
             f"{settings.quantity_quality_level_increment:,} per current level\n"
             f"[dim]Observed: {settings.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
         )
+        console.print(
+            "[dim]Provenance: values are the latest locally imported `$infokl` capture for the "
+            "selected server; they are observed price details only and do not establish "
+            "live/current availability or entitlement, fresh/stale status, or complete loot "
+            "state.[/dim]"
+        )
 
     @catalog_snapshot_app.command("settings")
     def catalog_settings(
