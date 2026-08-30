@@ -1541,7 +1541,13 @@ def test_catalog_operational_commands_preserve_resolution_order_and_rendering(mo
         "construct",
         ("history", "Power", "Chainsaw Man", 3),
     ]
+    assert "Local import time (UTC)" in reactions.stdout
+    assert "Observed (UTC)" not in reactions.stdout
     assert "2026-07-12 23:45" in reactions.stdout
+    assert (
+        "Provenance: rows are up to 20 locally stored Mudae-reported receipt observations, newest stored first; "
+        "they do not establish current reaction state, freshness/completeness, ownership, or successful causal action."
+    ) in " ".join(reactions.stdout.split())
     assert "Yes" in spheres.stdout and "No" in spheres.stdout
     assert "Stock: unknown" in spheres.stdout
     assert "2026-07-12 23:45 UTC" in spheres.stdout
@@ -1575,6 +1581,9 @@ def test_catalog_operational_commands_keep_command_specific_empty_exits(
 
     assert result.exit_code == 0
     assert message in result.stdout
+    if command == "reactions":
+        assert "Provenance:" not in result.stdout
+        assert "Kakera reaction payouts" not in result.stdout
 
 
 def test_catalog_imports_preserves_red_value_error_boundary(monkeypatch) -> None:

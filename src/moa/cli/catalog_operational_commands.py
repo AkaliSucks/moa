@@ -68,12 +68,17 @@ def build_catalog_operational_app(
             console.print("[yellow]No reaction receipts imported for this server/account yet.[/yellow]")
             raise typer.Exit()
         table = Table(title=f"{account} - Kakera reaction payouts")
-        table.add_column("Observed (UTC)")
+        table.add_column("Local import time (UTC)")
         table.add_column("Reaction")
         table.add_column("Kakera", justify="right", style="cyan")
         for reaction in reactions:
             table.add_row(reaction.observed_at.strftime("%Y-%m-%d %H:%M"), reaction.reaction_label, f"+{reaction.kakera_earned:,}")
         console.print(table)
+        console.print(
+            "[dim]Provenance: rows are up to 20 locally stored Mudae-reported receipt observations, newest stored "
+            "first; they do not establish current reaction state, freshness/completeness, ownership, or successful "
+            "causal action.[/dim]"
+        )
 
     @catalog_operational_app.command("spheres")
     def catalog_spheres(
