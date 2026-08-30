@@ -1070,7 +1070,7 @@ def test_cli_impossible_identities_healthy_database_succeeds(tmp_path, monkeypat
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "impossible-identities"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "No data-health findings."
+    assert result.stdout.strip() == "No audited impossible-identity findings in this read-only scan."
 
 
 def test_cli_impossible_identities_reports_findings_in_order(tmp_path, monkeypatch):
