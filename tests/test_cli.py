@@ -1549,12 +1549,55 @@ def test_catalog_operational_commands_preserve_resolution_order_and_rendering(mo
         "they do not establish current reaction state, freshness/completeness, ownership, or successful causal action."
     ) in " ".join(reactions.stdout.split())
     assert "Yes" in spheres.stdout and "No" in spheres.stdout
-    assert "Stock: unknown" in spheres.stdout
-    assert "2026-07-12 23:45 UTC" in spheres.stdout
+    spheres_output = " ".join(spheres.stdout.split())
+    assert "Mudae-reported stock: unknown" in spheres_output
+    assert "Recorded observation: 2026-07-12 23:45 UTC" in spheres_output
+    assert (
+        "Provenance: this is the latest locally stored `$oq` observation for the selected server/account; it does "
+        "not establish current stock/sphere state, freshness, availability/enabled state, ownership, completeness, "
+        "successful action, or causality."
+    ) in spheres_output
     assert "Receipts: 2" in summary.stdout
     assert "#1,200" in history.stdout
     assert "-" in history.stdout
     assert "2026-07-12 23:45" in history.stdout
+
+
+def test_catalog_spheres_distinguishes_empty_observation_from_no_history(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    observations = iter(
+        (
+            SimpleNamespace(
+                snapshot=SimpleNamespace(gains=(), total_gained=0, stock=0),
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+    monkeypatch.setattr(
+        catalog_operational_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(sphere_result=lambda *_args: next(observations)),
+    )
+    runner = CliRunner()
+
+    empty_observation = runner.invoke(main.app, ["catalog", "spheres", "--server", "Lake", "--account", "ernieuuu"])
+    no_history = runner.invoke(main.app, ["catalog", "spheres", "--server", "Lake", "--account", "ernieuuu"])
+
+    assert empty_observation.exit_code == 0
+    empty_output = " ".join(empty_observation.stdout.split())
+    assert "Sphere" in empty_observation.stdout
+    assert "Total gained: +0 spheres" in empty_output
+    assert "Mudae-reported stock: 0" in empty_output
+    assert "Recorded observation: 2026-07-12 23:45 UTC" in empty_output
+    assert "Provenance: this is the latest locally stored `$oq` observation" in empty_output
+
+    assert no_history.exit_code == 0
+    assert "No $oq sphere result imported for this server/account yet." in no_history.stdout
+    assert "Recorded observation:" not in no_history.stdout
+    assert "Provenance:" not in no_history.stdout
 
 
 @pytest.mark.parametrize(

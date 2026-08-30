@@ -101,8 +101,13 @@ def build_catalog_operational_app(
         console.print(table)
         stock = f"{snapshot.stock:,}" if snapshot.stock is not None else "unknown"
         console.print(
-            f"Total gained: [cyan]+{snapshot.total_gained:,}[/cyan] spheres · Stock: [cyan]{stock}[/cyan] · "
-            f"Observed: {observation.observed_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            f"Total gained: [cyan]+{snapshot.total_gained:,}[/cyan] spheres · Mudae-reported stock: "
+            f"[cyan]{stock}[/cyan] · Recorded observation: {observation.observed_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+        console.print(
+            "[dim]Provenance: this is the latest locally stored `$oq` observation for the selected server/account; "
+            "it does not establish current stock/sphere state, freshness, availability/enabled state, ownership, "
+            "completeness, successful action, or causality.[/dim]"
         )
 
     @catalog_operational_app.command("reaction-summary")
