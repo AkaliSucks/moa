@@ -2464,7 +2464,7 @@ def test_cli_duplicates_healthy_database_succeeds(tmp_path, monkeypatch):
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "duplicates"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "No data-health findings."
+    assert result.stdout.strip() == "No audited duplicate findings in this read-only scan."
 
 
 def test_cli_duplicates_reports_deterministic_findings_and_total(tmp_path, monkeypatch):
