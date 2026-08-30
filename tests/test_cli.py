@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1617,6 +1618,68 @@ def test_catalog_disablelist_cli_distinguishes_empty_snapshot_from_missing_snaps
     assert "No $dl snapshot imported for this server/account yet." in missing_snapshot_result.stdout
     assert "2026-07-12 23:45 UTC" not in missing_snapshot_result.stdout
     assert "Provenance:" not in missing_snapshot_result.stdout
+
+
+def test_catalog_unavailable_cli_renders_observation_timestamps_and_separates_rank_from_reason(
+    monkeypatch,
+) -> None:
+    observations = (
+        SimpleNamespace(
+            character=SimpleNamespace(name="Power", series="Chainsaw Man"),
+            claim_rank=42,
+            reason="$togglewestern",
+            observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+        ),
+        SimpleNamespace(
+            character=SimpleNamespace(name="Albedo", series="Overlord"),
+            claim_rank=7,
+            reason=None,
+            observed_at=datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc),
+        ),
+    )
+    calls: list[tuple[str, str]] = []
+
+    class RecordingCatalogService:
+        def unavailable_characters(self, server, account):
+            calls.append((server, account))
+            return observations
+
+    monkeypatch.setattr(catalog_snapshot_commands_module, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "Account"))
+    monkeypatch.setattr(main.console, "_width", 120)
+
+    result = CliRunner().invoke(main.app, ["catalog", "unavailable"])
+
+    assert result.exit_code == 0
+    output = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", result.stdout)
+    output = " ".join(output.split())
+    assert calls == [("Lake", "Account")]
+    assert "#42" in output
+    assert "$togglewestern" in output
+    assert "#7" in output
+    assert "Not specified in observed $topx row" in output
+    assert "2026-07-12 23:45 UTC" in output
+    assert "2026-07-13 00:15 UTC" in output
+    assert (
+        "Provenance: rows are latest locally retained positive `$topx` evidence for the selected "
+        "server/account; no row establishes that a character is available or rollable, and "
+        "freshness/currentness is not classified."
+    ) in output
+
+
+def test_catalog_unavailable_cli_preserves_no_observations_message(monkeypatch) -> None:
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(unavailable_characters=lambda *_: ()),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "Account"))
+
+    result = CliRunner().invoke(main.app, ["catalog", "unavailable"])
+
+    assert result.exit_code == 0
+    assert "No unavailable-character observations imported yet." in result.stdout
+    assert "Provenance:" not in result.stdout
 
 
 def test_account_activity_shows_latest_imported_activity_with_utc_timestamps(monkeypatch) -> None:

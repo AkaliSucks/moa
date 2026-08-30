@@ -122,15 +122,22 @@ def build_catalog_snapshot_app(
         table.add_column("Claim rank", justify="right", style="cyan")
         table.add_column("Character", style="green")
         table.add_column("Series")
-        table.add_column("Reason")
+        table.add_column("Reason", overflow="fold")
+        table.add_column("Observed", overflow="fold", no_wrap=True)
         for observation in observations:
             table.add_row(
                 f"#{observation.claim_rank:,}",
                 observation.character.name,
                 observation.character.series,
-                observation.reason or "Disabled bundle/pool",
+                observation.reason or "Not specified in observed $topx row",
+                observation.observed_at.strftime("%Y-%m-%d %H:%M UTC"),
             )
         console.print(table)
+        console.print(
+            "[dim]Provenance: rows are latest locally retained positive `$topx` evidence for the "
+            "selected server/account; no row establishes that a character is available or rollable, "
+            "and freshness/currentness is not classified.[/dim]"
+        )
 
     @catalog_snapshot_app.command("kakera")
     def catalog_kakera(
