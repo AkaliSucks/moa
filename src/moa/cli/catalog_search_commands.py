@@ -381,9 +381,11 @@ def build_catalog_search_app(
         server, account = resolve_account_context(server, account)
         observations = CatalogService().recent_key_gains(server, account, limit)
         if not observations:
-            console.print("[yellow]No key gains imported from rolls for this server/account yet.[/yellow]")
+            console.print(
+                "[yellow]No observed roll key states imported from rolls for this server/account yet.[/yellow]"
+            )
             raise typer.Exit()
-        table = Table(title=f"{account} - recent key gains")
+        table = Table(title=f"{account} - observed roll key states")
         table.add_column("Observed (UTC)")
         table.add_column("Character", style="green")
         table.add_column("Keys", justify="right", style="cyan")
@@ -396,5 +398,9 @@ def build_catalog_search_app(
                 format_mudae_kakera(observation.kakera_value),
             )
         console.print(table)
+        console.print(
+            "[dim]Each row is a directly displayed roll key marker/count and Kakera value, ordered by "
+            "newest stored observation; it is not a calculated gain or a current/fresh/stale key state.[/dim]"
+        )
 
     return catalog_search_app

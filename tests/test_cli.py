@@ -2240,6 +2240,99 @@ def test_catalog_keyprogress_cli_discloses_provenance_and_honors_limit(monkeypat
     ) in result.stdout
 
 
+def test_catalog_key_gains_cli_discloses_observed_roll_key_states_and_honors_limit(
+    monkeypatch,
+) -> None:
+    observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+    observations = (
+        SimpleNamespace(
+            character_name="Power",
+            key_type="gold",
+            key_count=7,
+            kakera_value=0,
+            observed_at=observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Saber",
+            key_type="silver",
+            key_count=2,
+            kakera_value=None,
+            observed_at=observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Miku",
+            key_type="bronze",
+            key_count=1,
+            kakera_value=125,
+            observed_at=observed_at,
+        ),
+    )
+    calls: list[tuple[str, str, int]] = []
+
+    class RecordingCatalogService:
+        def recent_key_gains(self, server, account, limit):
+            calls.append((server, account, limit))
+            return observations[:limit]
+
+    monkeypatch.setattr(
+        main,
+        "_resolve_account_context",
+        lambda _server, _account: ("Lake", "ernieuuu"),
+    )
+    monkeypatch.setattr(catalog_search_commands_module, "CatalogService", RecordingCatalogService)
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "key-gains",
+            "--server",
+            "ignored",
+            "--account",
+            "ignored",
+            "--limit",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [("Lake", "ernieuuu", 2)]
+    assert "ernieuuu - observed roll key states" in result.stdout
+    assert "Power" in result.stdout
+    assert "Saber" in result.stdout
+    assert "Miku" not in result.stdout
+    assert ":goldkey: (7)" in result.stdout
+    assert ":silverkey: (2)" in result.stdout
+    power_row = next(line for line in result.stdout.splitlines() if "Power" in line)
+    saber_row = next(line for line in result.stdout.splitlines() if "Saber" in line)
+    assert "0:kakera:" in power_row
+    assert " - " in saber_row
+    assert "2026-07-13 00:15" in result.stdout
+    assert (
+        "Each row is a directly displayed roll key marker/count and Kakera value, ordered by newest "
+        "stored observation; it is not a calculated gain or a current/fresh/stale key state."
+    ) in result.stdout
+
+
+def test_catalog_key_gains_cli_empty_state_uses_observation_wording(monkeypatch) -> None:
+    monkeypatch.setattr(main, "_resolve_account_context", lambda _server, _account: ("Lake", "ernieuuu"))
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(recent_key_gains=lambda _server, _account, _limit: ()),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "key-gains", "--server", "Lake", "--account", "ernieuuu"],
+    )
+
+    assert result.exit_code == 0
+    assert "No observed roll key states imported from rolls for this server/account yet." in result.stdout
+    assert "No key gains imported" not in result.stdout
+
+
 def test_catalog_harem_cli_clarifies_key_observation_status(monkeypatch) -> None:
     first_observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     second_observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
