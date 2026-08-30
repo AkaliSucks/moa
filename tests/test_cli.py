@@ -1691,6 +1691,58 @@ def test_catalog_lootstate_renders_unknown_values_without_integer_formatting(
     assert "0 /" not in result.stdout
     assert "Rolls stacked" in result.stdout
     assert "Wishprotect" in result.stdout
+    assert (
+        "Provenance: this is the latest locally imported `$lk` evidence for the selected "
+        "server/account; values and status do not establish live/current, fresh/stale, "
+        "available, or complete state."
+    ) in " ".join(result.stdout.split())
+
+
+def test_catalog_lootstate_renders_explicit_no_loots_with_provenance(monkeypatch) -> None:
+    state = SimpleNamespace(
+        has_kakeraloots=False,
+        status_note="No Kakeraloots bought in this capture.",
+        observed_at=datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(kakeraloot_state=lambda *_: state),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "lootstate", "--server", "Lake", "--account", "Account"],
+    )
+
+    output = " ".join(result.stdout.split())
+    assert result.exit_code == 0
+    assert "No Kakeraloots bought in this capture." in result.stdout
+    assert "Observed: 2026-07-12 23:45 UTC" in result.stdout
+    assert (
+        "Provenance: this is the latest locally imported `$lk` evidence for the selected "
+        "server/account; values and status do not establish live/current, fresh/stale, "
+        "available, or complete state."
+    ) in output
+    assert "Kakeraloot state" not in result.stdout
+
+
+def test_catalog_lootstate_distinguishes_no_snapshot_from_no_loots(monkeypatch) -> None:
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(kakeraloot_state=lambda *_: None),
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "lootstate", "--server", "Lake", "--account", "Account"],
+    )
+
+    assert result.exit_code == 0
+    assert "No $lk snapshot imported for this server/account yet." in result.stdout
+    assert "Observed:" not in result.stdout
+    assert "Provenance:" not in result.stdout
 
 
 @pytest.mark.parametrize(

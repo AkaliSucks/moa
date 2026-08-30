@@ -249,6 +249,11 @@ def build_catalog_snapshot_app(
         if not state.has_kakeraloots:
             console.print(f"[yellow]{state.status_note}[/yellow]")
             console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+            console.print(
+                "[dim]Provenance: this is the latest locally imported `$lk` evidence for the "
+                "selected server/account; values and status do not establish live/current, "
+                "fresh/stale, available, or complete state.[/dim]"
+            )
             return
         table = Table(title=f"{state.account_name} - Kakeraloot state")
         table.add_column("Metric", style="green")
@@ -293,6 +298,11 @@ def build_catalog_snapshot_app(
         )
         console.print(table)
         console.print(f"[dim]Observed: {state.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: this is the latest locally imported `$lk` evidence for the "
+            "selected server/account; values and status do not establish live/current, "
+            "fresh/stale, available, or complete state.[/dim]"
+        )
 
     @catalog_snapshot_app.command("infokl")
     def catalog_infokl(
