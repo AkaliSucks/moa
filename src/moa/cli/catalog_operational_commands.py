@@ -129,6 +129,12 @@ def build_catalog_operational_app(
         for label, count, total in summary.by_reaction:
             table.add_row(label, str(count), f"+{total:,}")
         console.print(table)
+        console.print(
+            "[dim]Provenance: values are descriptive aggregates of all currently stored Mudae-reported receipt rows "
+            "for the selected server/account; no displayed time window or timestamps are provided. They do not "
+            "establish current reaction state, freshness, complete history, ownership, successful action, causality, "
+            "or dedup/replay assurance.[/dim]"
+        )
 
     @catalog_operational_app.command("rank-history")
     def catalog_rank_history(

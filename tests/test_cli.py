@@ -1558,6 +1558,15 @@ def test_catalog_operational_commands_preserve_resolution_order_and_rendering(mo
         "successful action, or causality."
     ) in spheres_output
     assert "Receipts: 2" in summary.stdout
+    summary_output = " ".join(summary.stdout.split())
+    assert (
+        "Provenance: values are descriptive aggregates of all currently stored Mudae-reported receipt rows for the "
+        "selected server/account; no displayed time window or timestamps are provided. They do not establish "
+        "current reaction state, freshness, complete history, ownership, successful action, causality, or "
+        "dedup/replay assurance."
+    ) in summary_output
+    assert "Observed (UTC)" not in summary.stdout
+    assert "Recorded observation:" not in summary.stdout
     assert "#1,200" in history.stdout
     assert "-" in history.stdout
     assert "2026-07-12 23:45" in history.stdout
