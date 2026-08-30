@@ -47,6 +47,7 @@ from moa.parser.kakera_reaction_receipt import KakeraReactionReceiptParser
 from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.kakeraloot_state import KakeralootStateParser
 from moa.parser.kakeraloot_settings import KakeralootSettingsParser
+from moa.parser.mudapins import MudapinsParser
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -68,12 +69,6 @@ class MudaeParseError(ValueError):
 
 class MudaeTextParser:
     """Parse stable, high-value fields from common Mudae message formats."""
-
-    _MUDAPIN_MARKER = re.compile(r":(?:pin|logopin)\d+:", re.IGNORECASE)
-
-    _NO_MUDAPINS = re.compile(
-        r"No mudapins found!.*kakeraloots", re.IGNORECASE
-    )
 
     _KAKERA_BALANCE = re.compile(
         r"^You have\s+(?P<value>[\d,]+)\s*:kakera:\s*!?$", re.IGNORECASE
@@ -232,12 +227,7 @@ class MudaeTextParser:
 
     def parse_mudapins(self, text: str) -> MudapinSnapshot:
         """Parse a `$mp` inventory, including Mudae's empty response."""
-        if self._NO_MUDAPINS.search(text):
-            return MudapinSnapshot(pin_markers=())
-        markers = tuple(match.group(0) for match in self._MUDAPIN_MARKER.finditer(text))
-        if not markers:
-            raise MudaeParseError("Expected a Mudae `$mp` Mudapin inventory response.")
-        return MudapinSnapshot(pin_markers=markers)
+        return MudapinsParser(MudaeParseError).parse(text)
 
     def parse_server_settings(self, text: str) -> ServerSettingsSnapshot:
         """Parse core server rules and retain all visible `$settings` options."""

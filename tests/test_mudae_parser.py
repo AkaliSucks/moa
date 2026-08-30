@@ -21,6 +21,7 @@ from moa.parser.kakera_state import KakeraStateParser
 from moa.parser.kakeraloot_state import KakeralootStateParser
 from moa.parser.kakeraloot_settings import KakeralootSettingsParser
 from moa.parser.message_router import MudaeMessageRouter
+from moa.parser.mudapins import MudapinsParser
 from moa.parser.personal_rare import PersonalRareParser
 from moa.parser.player_bonus import PlayerBonusParser
 from moa.parser.primitives import comma_int, first_named_rank, normalize_custom_emojis
@@ -3042,18 +3043,70 @@ def test_profile_router_gates_success_on_profile_parser_revalidation() -> None:
     assert MudaeMessageRouter().detect(malformed).kind == "unknown"
 
 
-def test_parse_mudapins_reads_pin_and_logopin_markers() -> None:
-    snapshot = MudaeTextParser().parse_mudapins(
-        ":pin139::pin182::pin2157::logopin6::logopin141:"
-    )
+def test_mudapins_parser_reads_raw_static_animated_markers_in_order_with_duplicates() -> None:
+    text = "<:pin139:123><a:logopin6:456>:PIN139::pin182::pin139:"
+    snapshot = MudapinsParser(MudaeParseError).parse(text)
 
     assert snapshot.pin_markers == (
         ":pin139:",
-        ":pin182:",
-        ":pin2157:",
         ":logopin6:",
-        ":logopin141:",
+        ":PIN139:",
+        ":pin182:",
+        ":pin139:",
     )
+
+
+def test_parse_mudapins_facade_matches_dedicated_parser() -> None:
+    text = "<:pin139:123><a:logopin6:456>:pin139:"
+
+    assert MudaeTextParser().parse_mudapins(text) == MudapinsParser(
+        MudaeParseError
+    ).parse(text)
+
+
+def test_mudapins_parser_explicit_empty_response_precedes_marker_scanning() -> None:
+    snapshot = MudapinsParser(MudaeParseError).parse(
+        "No MUDAPINS found! :pin139: Collect them with KAKERALOOTS"
+    )
+
+    assert snapshot.pin_markers == ()
+
+
+def test_mudapins_parser_explicit_empty_marker_requires_same_line() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudapinsParser(MudaeParseError).parse(
+            "No mudapins found!\nCollect them with kakeraloots"
+        )
+
+    assert str(error.value) == "Expected a Mudae `$mp` Mudapin inventory response."
+
+
+def test_mudapins_parser_preserves_exact_error_for_unparseable_text() -> None:
+    with pytest.raises(MudaeParseError) as error:
+        MudapinsParser(MudaeParseError).parse("not a Mudapin response")
+
+    assert str(error.value) == "Expected a Mudae `$mp` Mudapin inventory response."
+
+
+def test_mudapin_registry_aliases_have_one_unmodified_response_profile() -> None:
+    for token in ("$mp", "$mudapins", "$mudapin"):
+        match = COMMAND_REGISTRY.lookup(token)
+        assert match is not None
+        assert match.canonical_name == "mudapins"
+        assert match.expected_response == "mudapins"
+        assert match.modifier_text == ""
+        assert match.spec.argument_policy is ArgumentPolicy.NONE
+
+    assert COMMAND_REGISTRY.lookup("$mpr") is None
+
+
+def test_mudapin_help_router_precedes_inventory_parser() -> None:
+    response = (
+        "Mudapins are collectable badges you can display on your profile.\n"
+        "Type $mp to see your mudapin inventory."
+    )
+
+    assert MudaeMessageRouter().detect(response).kind == "help"
 
 
 def test_parse_mudapins_accepts_empty_inventory() -> None:
