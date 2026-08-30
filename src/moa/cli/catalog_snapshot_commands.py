@@ -69,6 +69,11 @@ def build_catalog_snapshot_app(
         for entry in wishlist.entries:
             table.add_row(entry.name, "Starwish" if entry.is_starwish else "Wish")
         console.print(table)
+        console.print(f"[dim]Observed: {wishlist.observed_at.strftime('%Y-%m-%d %H:%M UTC')}[/dim]")
+        console.print(
+            "[dim]Provenance: counts, rows, and Starwish/Wish markers are captured evidence only; "
+            "they do not establish current, fresh, or stale state, and snapshot completeness is not established.[/dim]"
+        )
 
     @catalog_snapshot_app.command("disablelist")
     def catalog_disablelist(

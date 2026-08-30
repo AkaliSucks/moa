@@ -1184,6 +1184,82 @@ def test_catalog_bonus_cli_distinguishes_empty_snapshot_from_no_matching_snapsho
     assert "player bonuses" not in no_snapshot_result.stdout
 
 
+def test_catalog_wishlist_cli_preserves_duplicate_rows_zero_counts_and_evidence_wording(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    wishlist = SimpleNamespace(
+        account_name="ernieuuu",
+        wishlist_count=0,
+        wishlist_capacity=0,
+        starwish_count=0,
+        starwish_capacity=0,
+        entries=(
+            SimpleNamespace(name="Repeated character", is_starwish=True),
+            SimpleNamespace(name="Repeated character", is_starwish=False),
+        ),
+        observed_at=observed_at,
+    )
+
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(wishlist=lambda *_: wishlist),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+
+    result = CliRunner().invoke(main.app, ["catalog", "wishlist"])
+
+    assert result.exit_code == 0
+    output = " ".join(result.stdout.split())
+    assert "ernieuuu - wishlist 0/0 · Starwish 0/0" in output
+    assert output.count("Repeated character") == 2
+    first_character = output.index("Repeated character")
+    second_character = output.index("Repeated character", first_character + 1)
+    assert output.index("Starwish", first_character, second_character) < output.index("Wish", second_character)
+    assert "2026-07-12 23:45 UTC" in output
+    assert (
+        "Provenance: counts, rows, and Starwish/Wish markers are captured evidence only; "
+        "they do not establish current, fresh, or stale state, and snapshot completeness is not established."
+    ) in output
+
+
+def test_catalog_wishlist_cli_distinguishes_empty_snapshot_from_missing_snapshot(monkeypatch) -> None:
+    observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    snapshots = iter(
+        (
+            SimpleNamespace(
+                account_name="ernieuuu",
+                wishlist_count=0,
+                wishlist_capacity=13,
+                starwish_count=0,
+                starwish_capacity=2,
+                entries=(),
+                observed_at=observed_at,
+            ),
+            None,
+        )
+    )
+
+    monkeypatch.setattr(
+        catalog_snapshot_commands_module,
+        "CatalogService",
+        lambda: SimpleNamespace(wishlist=lambda *_: next(snapshots)),
+    )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "ernieuuu"))
+
+    empty_snapshot_result = CliRunner().invoke(main.app, ["catalog", "wishlist"])
+    missing_snapshot_result = CliRunner().invoke(main.app, ["catalog", "wishlist"])
+
+    assert empty_snapshot_result.exit_code == 0
+    empty_snapshot_output = " ".join(empty_snapshot_result.stdout.split())
+    assert "ernieuuu - wishlist 0/13 · Starwish 0/2" in empty_snapshot_output
+    assert "2026-07-12 23:45 UTC" in empty_snapshot_output
+    assert "Provenance: counts, rows, and Starwish/Wish markers are captured evidence only" in empty_snapshot_output
+    assert missing_snapshot_result.exit_code == 0
+    assert "No $wl snapshot imported for this server/account yet." in missing_snapshot_result.stdout
+    assert "2026-07-12 23:45 UTC" not in missing_snapshot_result.stdout
+    assert "Provenance:" not in missing_snapshot_result.stdout
+
+
 def test_catalog_operational_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
     child_command = get_command(main.catalog_operational_app)
     assert set(child_command.commands) == {
