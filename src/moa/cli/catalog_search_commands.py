@@ -257,6 +257,11 @@ def build_catalog_search_app(
                 entry.observed_at.strftime("%Y-%m-%d %H:%M"),
             )
         console.print(table)
+        console.print(
+            "[dim]Each Observed value is the latest local key observation for that row; it does not "
+            "establish current state and has no fresh/stale age classification. `Needs $im` means "
+            "unresolved identity evidence; scan completeness is not shown.[/dim]"
+        )
         if any(entry.character is None for entry in entries):
             console.print(
                 "[dim]Unresolved entries cannot be matched by series until a matching $im import provides identity data.[/dim]"

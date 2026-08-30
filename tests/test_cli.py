@@ -2180,6 +2180,64 @@ def test_catalog_account_search_commands_use_late_bound_resolver(monkeypatch) ->
     ]
 
 
+def test_catalog_harem_cli_clarifies_key_observation_status(monkeypatch) -> None:
+    first_observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
+    second_observed_at = datetime(2026, 7, 13, 0, 15, tzinfo=timezone.utc)
+    entries = (
+        SimpleNamespace(
+            character_name="Power",
+            character=CatalogCharacter(
+                id=1, name="Power", series="Chainsaw Man", gender=None, roulette=None
+            ),
+            key_type="gold",
+            key_count=7,
+            kakera_value=1448,
+            observed_at=first_observed_at,
+        ),
+        SimpleNamespace(
+            character_name="Unresolved Name",
+            character=None,
+            key_type="silver",
+            key_count=2,
+            kakera_value=None,
+            observed_at=second_observed_at,
+        ),
+    )
+    monkeypatch.setattr(
+        main,
+        "_resolve_account_context",
+        lambda server, account: (server, account),
+    )
+    monkeypatch.setattr(
+        catalog_search_commands_module,
+        "HaremSearchService",
+        lambda: SimpleNamespace(search=lambda *_args, **_kwargs: entries),
+    )
+    monkeypatch.setattr(main.console, "width", 240)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "harem", "--server", "Lake", "--account", "ernieuuu"],
+    )
+
+    assert result.exit_code == 0
+    assert "Power" in result.stdout
+    assert "Chainsaw Man" in result.stdout
+    assert "Unresolved Name" in result.stdout
+    assert "Needs $im" in result.stdout
+    assert ":goldkey: (7)" in result.stdout
+    assert ":silverkey: (2)" in result.stdout
+    assert "1,448:kakera:" in result.stdout
+    assert "-" in result.stdout
+    assert "2026-07-12 23:45" in result.stdout
+    assert "2026-07-13 00:15" in result.stdout
+    assert (
+        "Each Observed value is the latest local key observation for that row; it does not establish "
+        "current state and has no fresh/stale age classification. `Needs $im` means unresolved "
+        "identity evidence; scan completeness is not shown."
+    ) in result.stdout
+
+
 def test_catalog_top_displays_unavailable_reasons() -> None:
     observed_at = datetime(2026, 7, 12, 23, 45, tzinfo=timezone.utc)
     entries = (
