@@ -32,7 +32,7 @@ def build_data_health_app(
             raise typer.Exit(1) from error
 
         if not findings:
-            console.print("No data-health findings.")
+            console.print("No audited orphan findings in this read-only scan.")
             return
 
         table = Table(title="Data-health orphan findings")

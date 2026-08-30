@@ -136,7 +136,7 @@ def test_data_health_cli_characterizes_schema_laziness_and_late_bound_path(
     result = runner.invoke(main.app, ["catalog", "data-health", "orphans"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "No data-health findings."
+    assert result.stdout.strip() == "No audited orphan findings in this read-only scan."
 
 
 def test_recommend_keyfarm_resolves_context_and_constructs_service_at_callback_time(

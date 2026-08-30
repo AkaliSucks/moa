@@ -867,7 +867,7 @@ def test_cli_healthy_database_succeeds(tmp_path, monkeypatch):
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "orphans"])
 
     assert result.exit_code == 0
-    assert "No data-health findings." in result.stdout
+    assert "No audited orphan findings in this read-only scan." in result.stdout
 
 
 def test_cli_findings_database_reports_findings_and_total(tmp_path, monkeypatch):
