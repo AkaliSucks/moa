@@ -2513,7 +2513,20 @@ def test_cli_projection_gaps_healthy_database_succeeds(tmp_path, monkeypatch):
     result = CliRunner().invoke(main.app, ["catalog", "data-health", "projection-gaps"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "No data-health findings."
+    assert result.stdout.strip() == "No audited projection-gap findings in this read-only scan."
+
+
+def test_cli_projection_gaps_help_describes_audited_findings(tmp_path, monkeypatch):
+    database_path = tmp_path / "catalog.db"
+    _initialize(database_path)
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    result = CliRunner().invoke(
+        main.app, ["catalog", "data-health", "projection-gaps", "--help"]
+    )
+
+    assert result.exit_code == 0
+    assert "Report audited projection-gap findings without repairs." in result.stdout
 
 
 def test_cli_projection_gaps_renders_pg008_missing_expected_identity(tmp_path, monkeypatch):

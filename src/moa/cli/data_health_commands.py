@@ -116,7 +116,7 @@ def build_data_health_app(
 
     @data_health_app.command("projection-gaps")
     def catalog_data_health_projection_gaps() -> None:
-        """Report completed projection links owned by non-succeeded source events."""
+        """Report audited projection-gap findings without repairs."""
         try:
             findings = DataHealthService(
                 Path(database_path_provider())
@@ -126,7 +126,7 @@ def build_data_health_app(
             raise typer.Exit(1) from error
 
         if not findings:
-            console.print("No data-health findings.")
+            console.print("No audited projection-gap findings in this read-only scan.")
             return
 
         table = Table(title="Data-health projection-gap findings")
