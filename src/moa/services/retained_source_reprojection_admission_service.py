@@ -316,16 +316,23 @@ class RetainedSourceReprojectionAdmissionService:
                 ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
                 "source must own exactly one succeeded attempt and only finished attempts",
             )
+        for row in rows:
+            try:
+                started = datetime.fromisoformat(str(row["started_at"]))
+                finished = datetime.fromisoformat(str(row["finished_at"]))
+                lifecycle_inconsistent = finished < started
+            except (TypeError, ValueError):
+                self._reject(
+                    ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
+                    "attempt timestamps are malformed",
+                )
+            if lifecycle_inconsistent:
+                self._reject(
+                    ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
+                    "attempt lifecycle is inconsistent",
+                )
         success = successes[0]
-        try:
-            started = datetime.fromisoformat(str(success["started_at"]))
-            finished = datetime.fromisoformat(str(success["finished_at"]))
-        except ValueError:
-            self._reject(
-                ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
-                "successful attempt timestamps are malformed",
-            )
-        if finished < started or int(success["retryable"]) != 0:
+        if int(success["retryable"]) != 0:
             self._reject(
                 ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
                 "successful attempt lifecycle is inconsistent",

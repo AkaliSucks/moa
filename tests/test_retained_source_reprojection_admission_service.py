@@ -341,6 +341,27 @@ def test_rejects_expired_unresolved_partial_conflicting_and_malformed_facts(
         connection.rollback()
 
 
+@pytest.mark.parametrize("terminal_status", ["failed", "unresolved_attribution"])
+def test_rejects_malformed_finished_non_successful_attempt(database_path, terminal_status):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection)
+        connection.execute(
+            "UPDATE discord_processing_attempts SET attempt_number = 2 WHERE source_event_id = ?",
+            (source_id,),
+        )
+        connection.execute(
+            "INSERT INTO discord_processing_attempts (source_event_id, attempt_number, status, retryable, parser_version, router_version, started_at, finished_at, created_at) VALUES (?, 1, ?, 1, 'p', 'r', ?, 'not-a-timestamp', ?)",
+            (source_id, terminal_status, NOW, NOW),
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT
+        assert connection.total_changes == before
+        connection.rollback()
+
+
 def test_rejects_unknown_roll_assessment_and_antidisable(database_path):
     with connect(database_path) as connection:
         connection.execute("BEGIN")
