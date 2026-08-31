@@ -13,7 +13,13 @@ from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.repositories.retention_eligibility_repository import RetentionEligibilityDataError
 from moa.services.retention_eligibility_service import RetentionEligibilityService
-from moa.services.projection_expectations import server_account_projection_slot
+from moa.services.projection_expectations import (
+    Expectedness,
+    ExpectedProjectionIdentity,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+    server_account_projection_slot,
+)
 
 
 AS_OF = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
@@ -99,7 +105,9 @@ def _report(path, *, clock=lambda: AS_OF):
     return RetentionEligibilityService(path, clock=clock).report()
 
 
-def _new_linked_profile_source(path, suffix: str = "linked") -> int:
+def _new_linked_profile_source(
+    path, suffix: str = "linked", *, account_resolved: bool = True
+) -> int:
     _insert_import(path, 1, observed_at=OLD, raw="linked import")
     source_event_id, attempt_id = _new_source(path, suffix)
     _succeed_source(path, source_event_id, attempt_id, OLD)
@@ -117,9 +125,9 @@ def _new_linked_profile_source(path, suffix: str = "linked") -> int:
     )
     repository.record_account_attribution(
         source_event_id,
-        status="resolved",
-        server_name="Server",
-        account_name="Account",
+        status="resolved" if account_resolved else "unresolved",
+        server_name="Server" if account_resolved else None,
+        account_name="Account" if account_resolved else None,
         recorded_at=AS_OF,
     )
     return source_event_id
@@ -417,6 +425,35 @@ def test_linked_source_ignores_corrupt_historical_links_when_current_set_complet
             (source_event_id,),
         ).fetchone()
     assert historical == ("claimed", None, None)
+
+
+def test_unknown_expectation_blocks_completed_current_link(tmp_path) -> None:
+    path = tmp_path / "retention-generations-unknown-expectation.db"
+    _initialize(path)
+    source_event_id = _new_linked_profile_source(
+        path, "unknown-expectation", account_resolved=False
+    )
+    _activate_generation(path)
+    _insert_projection_link(
+        path,
+        source_event_id,
+        generation_id=2,
+        projection_slot=_profile_slot(),
+    )
+
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        expected_set = resolve_expected_projections(
+            load_durable_projection_expectation_facts(connection, source_event_id)
+        )
+    assert expected_set.expectedness_for(
+        ExpectedProjectionIdentity("catalog.profile", _profile_slot())
+    ) is Expectedness.UNKNOWN
+
+    category = _report(path).category("discord_source_raw_evidence")
+    assert category.eligible_count == 0
+    assert category.retained_blocked_count == 1
+    assert category.blocked_reasons == {"incomplete-projection": 1}
 
 
 @pytest.mark.parametrize("invalid_state", ["zero", "multiple", "invalid"])

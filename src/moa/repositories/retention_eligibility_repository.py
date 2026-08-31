@@ -386,7 +386,7 @@ class RetentionEligibilityRepository:
         ):
             return False
         return all(
-            expected_set.expectedness_for(identity) is not Expectedness.NOT_EXPECTED
+            expected_set.expectedness_for(identity) is Expectedness.EXPECTED
             for identity in observed
         )
 
