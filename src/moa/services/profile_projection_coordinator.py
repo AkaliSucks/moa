@@ -14,6 +14,7 @@ from moa.models.character import ProfileSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.repositories.profile_repository import ProfileRepository
+from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.projection_authority import PROFILE_PROJECTION
 from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
@@ -60,9 +61,7 @@ class ProfileProjectionCoordinator:
     """Own one SQLite transaction for a Discord profile and its projection."""
 
     _PROJECTION_AUTHORITY = PROFILE_PROJECTION
-    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES[
-        "profile"
-    ].possible_projection_kinds[0]
+    _PROJECTION_KIND = PROJECTION_EXPECTATION_POLICIES["profile"].possible_projection_kinds[0]
     _PROJECTION_TABLE = _PROJECTION_AUTHORITY.target_table
     _TARGET_TABLES = frozenset({_PROJECTION_TABLE})
 
@@ -100,15 +99,19 @@ class ProfileProjectionCoordinator:
             self._validate_identity(attempt_id, "attempt_id")
         observed_at = self._normalize_datetime(observed_at, "observed_at")
         finished_at = self._normalize_datetime(finished_at, "finished_at")
-        projection_slot = resolve_expected_projections(
-            build_projection_expectation_facts(
-                "profile", server=server, account=account
+        projection_slot = (
+            resolve_expected_projections(
+                build_projection_expectation_facts("profile", server=server, account=account)
             )
-        ).known_expected_identities[0].projection_slot
+            .known_expected_identities[0]
+            .projection_slot
+        )
 
         def coordinate_with_connection(
             connection: sqlite3.Connection,
         ) -> ProfileProjectionResult:
+            projection_links = ProjectionLinkRepository(connection)
+            generation_id = projection_links.resolve_current_generation_id()
             event = self._load_source_event(connection, source_event_id)
             if str(event["status"]) == "succeeded":
                 if attempt_id is not None:
@@ -132,7 +135,12 @@ class ProfileProjectionCoordinator:
                     ).known_expected_identities
                 except DurableProjectionExpectationFactsError:
                     return self._coordinate_replay(
-                        connection, event, projection_slot, profile
+                        connection,
+                        event,
+                        projection_slot,
+                        profile,
+                        projection_links=projection_links,
+                        generation_id=generation_id,
                     )
                 if len(durable) != 1:
                     raise ProfileProjectionIntegrityError(
@@ -143,6 +151,8 @@ class ProfileProjectionCoordinator:
                     event,
                     durable[0].projection_slot,
                     profile,
+                    projection_links=projection_links,
+                    generation_id=generation_id,
                 )
 
             if attempt_id is None:
@@ -161,7 +171,11 @@ class ProfileProjectionCoordinator:
                 account=account,
                 persisted_account=persisted_account,
             )
-            links = self._load_links(connection, source_event_id)
+            links = self._load_links(
+                projection_links,
+                source_event_id=source_event_id,
+                generation_id=generation_id,
+            )
             expected_key = (self._PROJECTION_KIND, projection_slot)
             unexpected = set(links) - {expected_key}
             if unexpected:
@@ -179,8 +193,9 @@ class ProfileProjectionCoordinator:
                     f"source event {source_event_id} already has a completed profile projection"
                 )
             self._claim_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 claimed_at=observed_at,
             )
@@ -204,8 +219,9 @@ class ProfileProjectionCoordinator:
                 observed_at=observed_at,
             )
             self._complete_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 target=target,
                 completed_at=finished_at,
@@ -308,6 +324,9 @@ class ProfileProjectionCoordinator:
         event: sqlite3.Row,
         projection_slot: str,
         profile: ProfileSnapshot,
+        *,
+        projection_links: ProjectionLinkRepository,
+        generation_id: int,
     ) -> ProfileProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -322,7 +341,11 @@ class ProfileProjectionCoordinator:
                 f"legacy profile import event {import_event_id} for source event {event['id']} is missing or wrong"
             )
 
-        links = self._load_links(connection, int(event["id"]))
+        links = self._load_links(
+            projection_links,
+            source_event_id=int(event["id"]),
+            generation_id=generation_id,
+        )
         key = (self._PROJECTION_KIND, projection_slot)
         if set(links) != {key}:
             raise ProfileProjectionIntegrityError(
@@ -402,13 +425,16 @@ class ProfileProjectionCoordinator:
 
     @staticmethod
     def _load_links(
-        connection: sqlite3.Connection, source_event_id: int
+        repository: ProjectionLinkRepository,
+        *,
+        source_event_id: int,
+        generation_id: int,
     ) -> dict[tuple[str, str], sqlite3.Row]:
         links: dict[tuple[str, str], sqlite3.Row] = {}
-        for link in connection.execute(
-            "SELECT * FROM discord_projection_links WHERE source_event_id = ?",
-            (source_event_id,),
-        ).fetchall():
+        for link in repository.load_links(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+        ):
             key = (str(link["projection_kind"]), str(link["projection_slot"]))
             if key in links:
                 raise ProfileProjectionIntegrityError(
@@ -419,57 +445,45 @@ class ProfileProjectionCoordinator:
 
     def _claim_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         claimed_at: datetime,
     ) -> None:
-        value = claimed_at.isoformat()
-        connection.execute(
-            """
-            INSERT INTO discord_projection_links (
-                source_event_id, projection_kind, projection_slot,
-                projection_table, projection_row_id, state,
-                claimed_at, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, NULL, NULL, 'claimed', ?, NULL, ?, ?)
-            """,
-            (source_event_id, self._PROJECTION_KIND, projection_slot, value, value, value),
+        repository.claim_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            claimed_at=claimed_at,
         )
 
     def _complete_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         target: tuple[str, int],
         completed_at: datetime,
     ) -> None:
         table, row_id = target
-        if table not in self._TARGET_TABLES or row_id <= 0:
-            raise ProfileProjectionIntegrityError("profile import returned an invalid projection target")
-        value = completed_at.isoformat()
-        updated = connection.execute(
-            """
-            UPDATE discord_projection_links
-            SET projection_table = ?, projection_row_id = ?, state = 'completed',
-                completed_at = ?, updated_at = ?
-            WHERE source_event_id = ? AND projection_kind = ? AND projection_slot = ?
-              AND state = 'claimed'
-            """,
-            (
-                table,
-                row_id,
-                value,
-                value,
-                source_event_id,
-                self._PROJECTION_KIND,
-                projection_slot,
-            ),
+        if table not in self._TARGET_TABLES or isinstance(row_id, bool) or row_id <= 0:
+            raise ProfileProjectionIntegrityError(
+                "profile import returned an invalid projection target"
+            )
+        repository.complete_claimed_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            projection_table=table,
+            projection_row_id=row_id,
+            completed_at=completed_at,
         )
-        if updated.rowcount != 1:
-            raise ProfileProjectionIntegrityError("profile projection link could not be completed")
 
     def _validate_profile_target(
         self,

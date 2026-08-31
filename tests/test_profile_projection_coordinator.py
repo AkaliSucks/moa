@@ -11,6 +11,7 @@ from moa.repositories.catalog_repository import (
     ImportEventDeletionBlockedError,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkIntegrityError
 from moa.services.profile_projection_coordinator import (
     ProfileProjectionCoordinator,
     ProfileProjectionDatabasePathError,
@@ -82,9 +83,7 @@ def _receive_and_begin(discord, *, suffix="one"):
     )
     received = discord.receive_message(
         aggregate_key=aggregate_key,
-        revision_key=MessageRevisionKey.versioned(
-            aggregate_key, f"payload-{suffix}", "revision-1"
-        ),
+        revision_key=MessageRevisionKey.versioned(aggregate_key, f"payload-{suffix}", "revision-1"),
         event_key=f"event-{suffix}",
         event_kind="message_create",
         raw_text="profile payload",
@@ -113,6 +112,44 @@ def _receive_and_begin(discord, *, suffix="one"):
         recorded_at=OBSERVED_AT,
     )
     return received.source_event_id, attempt.attempt_id
+
+
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(connection: sqlite3.Connection, source_event_id: int) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.profile', ?,
+                  'profile_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            _slot("Server", "Account"),
+            value,
+            value,
+            value,
+            value,
+        ),
+    )
 
 
 def _counts(connection: sqlite3.Connection) -> dict[str, int]:
@@ -212,7 +249,29 @@ def _durable_state(connection: sqlite3.Connection):
     )
 
 
-def test_first_processing_coordinates_profile_and_success(tmp_path) -> None:
+def _snapshot(database_path) -> dict[str, tuple[tuple[object, ...], ...]]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "profile_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_processing_attempts",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+    )
+    with connect(database_path) as connection:
+        return {
+            table: tuple(
+                tuple(row)
+                for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            )
+            for table in tables
+        }
+
+
+def test_generation_one_processing_coordinates_profile_and_success(tmp_path) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
 
@@ -233,9 +292,11 @@ def test_first_processing_coordinates_profile_and_success(tmp_path) -> None:
             "discord_projection_links": 1,
         }
         link = connection.execute(
-            "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state FROM discord_projection_links"
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state FROM discord_projection_links"
         ).fetchone()
         assert tuple(link) == (
+            1,
             "catalog.profile",
             '{"account":"account","server":"server"}',
             "profile_observations",
@@ -245,14 +306,154 @@ def test_first_processing_coordinates_profile_and_success(tmp_path) -> None:
         event = connection.execute(
             "SELECT status, legacy_import_event_id FROM discord_source_events"
         ).fetchone()
-        attempt = connection.execute(
-            "SELECT status FROM discord_processing_attempts"
-        ).fetchone()
+        attempt = connection.execute("SELECT status FROM discord_processing_attempts").fetchone()
         assert tuple(event) == ("succeeded", result.import_event_id)
         assert tuple(attempt) == ("succeeded",)
 
 
-def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_path, monkeypatch) -> None:
+def test_generation_two_processing_preserves_generation_one_history_and_replays_no_write(
+    tmp_path,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay == ProfileProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        profile_observation_id=first.profile_observation_id,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    assert _snapshot(database_path) == before_replay
+    with connect(database_path) as connection:
+        assert (
+            tuple(
+                connection.execute(
+                    "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+                ).fetchone()
+            )
+            == historical_before
+        )
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT generation_id, projection_table, projection_row_id, state
+                FROM discord_projection_links
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (source_event_id,),
+            ).fetchall()
+        ] == [(2, "profile_observations", first.profile_observation_id, "completed")]
+
+
+def test_generation_two_replay_fails_when_only_generation_one_link_exists(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _snapshot(database_path)
+
+    with pytest.raises(
+        ProfileProjectionIntegrityError,
+        match="inconsistent profile projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _snapshot(database_path) == before
+
+
+def test_generation_two_target_validation_failure_preserves_history_and_processing(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_profile_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ProfileProjectionTargetError("forced target-validation failure")
+        ),
+    )
+
+    with pytest.raises(ProfileProjectionTargetError, match="target-validation"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert (
+            tuple(
+                connection.execute(
+                    "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+                ).fetchone()
+            )
+            == historical_before
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+            ).fetchone()[0]
+            == 0
+        )
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert (
+            connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0]
+            == "processing"
+        )
+
+
+def test_projection_link_integrity_failure_is_propagated_fail_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    failure = ProjectionLinkIntegrityError("forced generation integrity failure")
+    monkeypatch.setattr(
+        "moa.repositories.projection_link_repository.ProjectionLinkRepository.resolve_current_generation_id",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(ProjectionLinkIntegrityError, match="forced generation integrity failure"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert (
+            connection.execute("SELECT status FROM discord_source_events").fetchone()[0]
+            == "processing"
+        )
+
+
+def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(
+    tmp_path, monkeypatch
+) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
 
@@ -272,11 +473,16 @@ def test_failure_after_catalog_writes_rolls_back_every_coordinator_write(tmp_pat
             "roll_observations": 0,
             "discord_projection_links": 0,
         }
-        assert connection.execute("SELECT status, legacy_import_event_id FROM discord_source_events").fetchone()[:2] == (
+        assert connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()[:2] == (
             "processing",
             None,
         )
-        assert connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0] == "processing"
+        assert (
+            connection.execute("SELECT status FROM discord_processing_attempts").fetchone()[0]
+            == "processing"
+        )
 
 
 def test_retry_after_rollback_succeeds_once_without_duplicates(tmp_path, monkeypatch) -> None:
@@ -311,9 +517,7 @@ def test_retry_after_rollback_succeeds_once_without_duplicates(tmp_path, monkeyp
     [PROFILE, ABSENT_REACTIONS_PROFILE, EMPTY_REACTIONS_PROFILE, ZERO_BRONZE_KEY_PROFILE],
     ids=["present", "absent", "observed-empty", "observed-zero"],
 )
-def test_successful_replay_validates_exact_new_value_and_presence(
-    tmp_path, profile
-) -> None:
+def test_successful_replay_validates_exact_new_value_and_presence(tmp_path, profile) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     first = _coordinate(coordinator, source_event_id, attempt_id, profile=profile)
@@ -332,7 +536,10 @@ def test_successful_replay_validates_exact_new_value_and_presence(
     )
     with connect(database_path) as connection:
         assert _counts(connection) == before
-        assert connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM discord_processing_attempts").fetchone()[0]
+            == 1
+        )
 
 
 def test_new_profile_replay_rejects_presence_mismatch_with_same_storage_value(
@@ -377,23 +584,20 @@ def test_legacy_empty_reaction_replay_uses_old_serialization_without_mutation(
         profile=EMPTY_REACTIONS_PROFILE,
     )
     with connect(database_path) as connection:
-        connection.execute(
-            "UPDATE profile_observations SET reactions_observed = NULL"
-        )
+        connection.execute("UPDATE profile_observations SET reactions_observed = NULL")
 
     if compatible:
-        replay = _coordinate(
-            coordinator, source_event_id, None, profile=replay_profile
-        )
+        replay = _coordinate(coordinator, source_event_id, None, profile=replay_profile)
         assert replay.replay_skipped is True
     else:
         with pytest.raises(ProfileProjectionTargetError, match="values or presence"):
             _coordinate(coordinator, source_event_id, None, profile=replay_profile)
 
     with connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT reactions_observed FROM profile_observations"
-        ).fetchone()[0] is None
+        assert (
+            connection.execute("SELECT reactions_observed FROM profile_observations").fetchone()[0]
+            is None
+        )
 
 
 @pytest.mark.parametrize(
@@ -413,9 +617,7 @@ def test_legacy_zero_key_replay_uses_marker_serialization_without_mutation(
         profile=ZERO_BRONZE_KEY_PROFILE,
     )
     with connect(database_path) as connection:
-        connection.execute(
-            "UPDATE profile_observations SET bronze_keys_observed = NULL"
-        )
+        connection.execute("UPDATE profile_observations SET bronze_keys_observed = NULL")
     replay_profile = ZERO_BRONZE_KEY_PROFILE.model_copy(
         update={
             "bronze_keys": bronze_keys,
@@ -432,9 +634,12 @@ def test_legacy_zero_key_replay_uses_marker_serialization_without_mutation(
             _coordinate(coordinator, source_event_id, None, profile=replay_profile)
 
     with connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT bronze_keys_observed FROM profile_observations"
-        ).fetchone()[0] is None
+        assert (
+            connection.execute("SELECT bronze_keys_observed FROM profile_observations").fetchone()[
+                0
+            ]
+            is None
+        )
 
 
 @pytest.mark.parametrize(
@@ -454,9 +659,7 @@ def test_legacy_null_balance_replay_requires_old_nullable_serialization(
         profile=ABSENT_BALANCE_PROFILE,
     )
     with connect(database_path) as connection:
-        connection.execute(
-            "UPDATE profile_observations SET kakera_balance_observed = NULL"
-        )
+        connection.execute("UPDATE profile_observations SET kakera_balance_observed = NULL")
     replay_profile = ABSENT_BALANCE_PROFILE.model_copy(
         update={"kakera_balance": balance, "kakera_balance_observed": observed}
     )
@@ -470,18 +673,19 @@ def test_legacy_null_balance_replay_requires_old_nullable_serialization(
             _coordinate(coordinator, source_event_id, None, profile=replay_profile)
 
     with connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT kakera_balance_observed FROM profile_observations"
-        ).fetchone()[0] is None
+        assert (
+            connection.execute(
+                "SELECT kakera_balance_observed FROM profile_observations"
+            ).fetchone()[0]
+            is None
+        )
 
 
 def test_unlinked_profile_import_deletion_exposes_previous_snapshot(tmp_path) -> None:
     database_path, catalog, _discord, _coordinator = _repositories(tmp_path)
     previous_snapshot = PROFILE.model_copy(update={"collection_size": 10})
     deleted_snapshot = PROFILE.model_copy(update={"collection_size": 20})
-    unrelated_snapshot = PROFILE.model_copy(
-        update={"profile_name": "Other", "collection_size": 30}
-    )
+    unrelated_snapshot = PROFILE.model_copy(update={"profile_name": "Other", "collection_size": 30})
     previous = catalog.import_profile(
         previous_snapshot, "Server", "Account", "previous profile", "clipboard"
     )
@@ -498,17 +702,26 @@ def test_unlinked_profile_import_deletion_exposes_previous_snapshot(tmp_path) ->
     assert catalog.profile("Server", "Account").snapshot == previous_snapshot
     assert catalog.profile("Other Server", "Other Account").snapshot == unrelated_snapshot
     with connect(database_path) as connection:
-        assert connection.execute(
-            "SELECT 1 FROM import_events WHERE id = ?", (deleted.import_event_id,)
-        ).fetchone() is None
-        assert connection.execute(
-            "SELECT COUNT(*) FROM profile_observations WHERE import_event_id = ?",
-            (deleted.import_event_id,),
-        ).fetchone()[0] == 0
-        assert connection.execute(
-            "SELECT COUNT(*) FROM profile_observations WHERE import_event_id IN (?, ?)",
-            (previous.import_event_id, unrelated.import_event_id),
-        ).fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT 1 FROM import_events WHERE id = ?", (deleted.import_event_id,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM profile_observations WHERE import_event_id = ?",
+                (deleted.import_event_id,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM profile_observations WHERE import_event_id IN (?, ?)",
+                (previous.import_event_id, unrelated.import_event_id),
+            ).fetchone()[0]
+            == 2
+        )
         assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 2
 
@@ -568,7 +781,9 @@ def test_edited_profile_revision_gets_independent_projection(tmp_path) -> None:
     with connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 2
         assert connection.execute("SELECT COUNT(*) FROM profile_observations").fetchone()[0] == 2
-        assert connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0] == 2
+        assert (
+            connection.execute("SELECT COUNT(*) FROM discord_projection_links").fetchone()[0] == 2
+        )
 
 
 def test_completed_link_with_missing_target_fails_closed(tmp_path) -> None:
@@ -576,7 +791,9 @@ def test_completed_link_with_missing_target_fails_closed(tmp_path) -> None:
     source_event_id, attempt_id = _receive_and_begin(discord)
     first = _coordinate(coordinator, source_event_id, attempt_id)
     with connect(database_path) as connection:
-        connection.execute("DELETE FROM profile_observations WHERE id = ?", (first.profile_observation_id,))
+        connection.execute(
+            "DELETE FROM profile_observations WHERE id = ?", (first.profile_observation_id,)
+        )
 
     with pytest.raises(ProfileProjectionTargetError, match="missing"):
         _coordinate(coordinator, source_event_id, None)
@@ -591,7 +808,9 @@ def test_completed_link_with_wrong_target_table_fails_closed(tmp_path) -> None:
             "UPDATE discord_projection_links SET projection_table = 'roll_observations'"
         )
 
-    with pytest.raises(ProfileProjectionIntegrityError, match="inconsistent profile projection link"):
+    with pytest.raises(
+        ProfileProjectionIntegrityError, match="inconsistent profile projection link"
+    ):
         _coordinate(coordinator, source_event_id, None)
 
 
@@ -602,7 +821,8 @@ def test_completed_link_with_mismatched_import_event_fails_closed(tmp_path) -> N
     second = catalog.import_profile(PROFILE, "Server", "Account", "second profile", "discord")
     with connect(database_path) as connection:
         second_observation_id = connection.execute(
-            "SELECT id FROM profile_observations WHERE import_event_id = ?", (second.import_event_id,)
+            "SELECT id FROM profile_observations WHERE import_event_id = ?",
+            (second.import_event_id,),
         ).fetchone()[0]
         connection.execute(
             "UPDATE discord_projection_links SET projection_row_id = ?", (second_observation_id,)
@@ -625,7 +845,13 @@ def test_unexpected_claimed_link_fails_closed(tmp_path) -> None:
                 claimed_at, created_at, updated_at
             ) VALUES (?, 'catalog.profile', ?, 'claimed', ?, ?, ?)
             """,
-            (source_event_id, slot, OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat(), OBSERVED_AT.isoformat()),
+            (
+                source_event_id,
+                slot,
+                OBSERVED_AT.isoformat(),
+                OBSERVED_AT.isoformat(),
+                OBSERVED_AT.isoformat(),
+            ),
         )
 
     with pytest.raises(ProfileProjectionIntegrityError, match="still claimed"):
@@ -728,9 +954,12 @@ def test_first_processing_requires_matching_persisted_attribution_before_writes(
 
     with connect(database_path) as connection:
         assert _durable_state(connection) == before
-        assert connection.execute(
-            "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
-        ).fetchone()[0] == "processing"
+        assert (
+            connection.execute(
+                "SELECT status FROM discord_processing_attempts WHERE id = ?", (attempt_id,)
+            ).fetchone()[0]
+            == "processing"
+        )
 
 
 @pytest.mark.parametrize(
@@ -806,14 +1035,18 @@ def test_first_processing_requires_valid_typed_profile_owner_before_writes(
     with connect(database_path) as connection:
         before = _durable_state(connection)
 
-    with pytest.raises(ProfileProjectionIntegrityError, match="typed profile owner|valid typed owner"):
+    with pytest.raises(
+        ProfileProjectionIntegrityError, match="typed profile owner|valid typed owner"
+    ):
         _coordinate(coordinator, source_event_id, attempt_id, profile=profile)
 
     with connect(database_path) as connection:
         assert _durable_state(connection) == before
 
 
-def test_matching_succeeded_replay_validates_attribution_before_returning_existing_ids(tmp_path) -> None:
+def test_matching_succeeded_replay_validates_attribution_before_returning_existing_ids(
+    tmp_path,
+) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     first = _coordinate(coordinator, source_event_id, attempt_id)
