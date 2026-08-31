@@ -12,6 +12,7 @@ from moa.repositories.catalog_repository import (
     ImportEventDeletionBlockedError,
 )
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkIntegrityError
 from moa.services.mudapins_projection_coordinator import (
     MudapinsProjectionCoordinator,
     MudapinsProjectionDatabasePathError,
@@ -178,6 +179,263 @@ def _set_attribution_failure(database_path, failure: str) -> None:
     }
     with connect(database_path) as connection:
         connection.execute(statements[failure])
+
+
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.mudapins', ?,
+                  'mudapin_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (source_event_id, _slot("Server", "Account"), value, value, value, value),
+    )
+
+
+def _projection_snapshot(connection: sqlite3.Connection):
+    return (
+        tuple(tuple(row) for row in connection.execute(
+            "SELECT * FROM projection_generations ORDER BY id"
+        )),
+        tuple(tuple(row) for row in connection.execute(
+            "SELECT * FROM discord_projection_links ORDER BY id"
+        )),
+        tuple(tuple(row) for row in connection.execute(
+            "SELECT * FROM import_events ORDER BY id"
+        )),
+        tuple(tuple(row) for row in connection.execute(
+            "SELECT * FROM mudapin_observations ORDER BY id"
+        )),
+        _durable_state(connection),
+    )
+
+
+def test_generation_one_compatibility_persists_generation_qualified_mudapins(
+    tmp_path,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        link = connection.execute(
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state FROM discord_projection_links"
+        ).fetchone()
+    assert tuple(link) == (
+        1,
+        "catalog.mudapins",
+        _slot("Server", "Account"),
+        "mudapin_observations",
+        result.mudapin_observation_id,
+        "completed",
+    )
+
+
+def test_generation_two_isolates_history_and_current_replay_is_no_write(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(connection.execute(
+            "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+        ).fetchone())
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        before_replay = _projection_snapshot(connection)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay == MudapinsProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        mudapin_observation_id=first.mudapin_observation_id,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    with connect(database_path) as connection:
+        assert _projection_snapshot(connection) == before_replay
+        assert tuple(connection.execute(
+            "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+        ).fetchone()) == historical_before
+        assert tuple(connection.execute(
+            "SELECT generation_id, projection_table, projection_row_id, state "
+            "FROM discord_projection_links WHERE source_event_id = ? AND generation_id = 2",
+            (source_event_id,),
+        ).fetchone()) == (
+            2,
+            "mudapin_observations",
+            first.mudapin_observation_id,
+            "completed",
+        )
+
+
+def test_generation_two_replay_fails_when_only_historical_link_exists(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        before = _projection_snapshot(connection)
+
+    with pytest.raises(
+        MudapinsProjectionIntegrityError,
+        match="inconsistent Mudapins projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    with connect(database_path) as connection:
+        assert _projection_snapshot(connection) == before
+
+
+@pytest.mark.parametrize("corruption", ("malformed", "ownership", "scope"))
+def test_generation_two_replay_rejects_current_link_corruption_without_writes(
+    tmp_path, corruption
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, suffix=corruption)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+
+    if corruption == "malformed":
+        with connect(database_path) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(
+                "UPDATE discord_projection_links SET projection_row_id = NULL "
+                "WHERE source_event_id = ? AND generation_id = 2",
+                (source_event_id,),
+            )
+    else:
+        other = catalog.import_mudapins(
+            SNAPSHOT,
+            "Other Server" if corruption == "scope" else "Server",
+            "Other Account" if corruption == "scope" else "Account",
+            "other",
+            "discord",
+        )
+        with connect(database_path) as connection:
+            if corruption == "ownership":
+                target = connection.execute(
+                    "SELECT id FROM mudapin_observations WHERE import_event_id = ?",
+                    (other.import_event_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE discord_projection_links SET projection_row_id = ? "
+                    "WHERE source_event_id = ? AND generation_id = 2",
+                    (target, source_event_id),
+                )
+            else:
+                other_context = connection.execute(
+                    """
+                    SELECT ac.id
+                    FROM account_contexts AS ac
+                    JOIN server_contexts AS sc ON sc.id = ac.server_context_id
+                    WHERE sc.normalized_name = 'other server'
+                      AND ac.normalized_name = 'other account'
+                    """
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE mudapin_observations SET account_context_id = ? "
+                    "WHERE id = ?",
+                    (other_context, first.mudapin_observation_id),
+                )
+
+    with connect(database_path) as connection:
+        before = _projection_snapshot(connection)
+    with pytest.raises(MudapinsProjectionIntegrityError):
+        _coordinate(coordinator, source_event_id, None)
+    with connect(database_path) as connection:
+        assert _projection_snapshot(connection) == before
+
+
+def test_generation_two_failure_rolls_back_new_writes_and_retains_history(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(connection.execute(
+            "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+        ).fetchone())
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_mudapins_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced generation-two rollback")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="generation-two rollback"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(connection.execute(
+            "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+        ).fetchone()) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM mudapin_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert tuple(connection.execute(
+            "SELECT status, legacy_import_event_id FROM discord_source_events"
+        ).fetchone()) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "processing"
+
+
+def test_projection_link_completion_rowcount_failure_rolls_back_fail_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    failure = ProjectionLinkIntegrityError(
+        "exactly one matching claimed projection link must be completed"
+    )
+    monkeypatch.setattr(
+        "moa.repositories.projection_link_repository.ProjectionLinkRepository.complete_claimed_link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(ProjectionLinkIntegrityError, match="exactly one matching"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert _counts(connection)["mudapin_observations"] == 0
+        assert _counts(connection)["discord_projection_links"] == 0
 
 
 def test_first_processing_coordinates_mudapins_and_preserves_snapshot(tmp_path) -> None:
