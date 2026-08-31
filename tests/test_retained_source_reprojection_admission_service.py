@@ -362,6 +362,32 @@ def test_rejects_malformed_finished_non_successful_attempt(database_path, termin
         connection.rollback()
 
 
+def test_rejects_timezone_mismatch_on_failed_attempt_before_unresolved_attribution(
+    database_path,
+):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection)
+        connection.execute(
+            "UPDATE discord_processing_attempts SET attempt_number = 2 WHERE source_event_id = ?",
+            (source_id,),
+        )
+        connection.execute(
+            "INSERT INTO discord_processing_attempts (source_event_id, attempt_number, status, retryable, parser_version, router_version, started_at, finished_at, created_at) VALUES (?, 1, 'failed', 1, 'p', 'r', ?, ?, ?)",
+            (source_id, NOW, "2026-08-31T12:01:00", NOW),
+        )
+        connection.execute(
+            "UPDATE discord_source_event_account_attributions SET status = 'unresolved', server_name = NULL, account_name = NULL WHERE source_event_id = ?",
+            (source_id,),
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT
+        assert connection.total_changes == before
+        connection.rollback()
+
+
 def test_rejects_unknown_roll_assessment_and_antidisable(database_path):
     with connect(database_path) as connection:
         connection.execute("BEGIN")

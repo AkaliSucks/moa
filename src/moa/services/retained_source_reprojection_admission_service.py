@@ -320,11 +320,24 @@ class RetainedSourceReprojectionAdmissionService:
             try:
                 started = datetime.fromisoformat(str(row["started_at"]))
                 finished = datetime.fromisoformat(str(row["finished_at"]))
-                lifecycle_inconsistent = finished < started
-            except (TypeError, ValueError):
+            except ValueError:
                 self._reject(
                     ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
                     "attempt timestamps are malformed",
+                )
+            started_is_aware = started.utcoffset() is not None
+            finished_is_aware = finished.utcoffset() is not None
+            if started_is_aware != finished_is_aware:
+                self._reject(
+                    ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
+                    "attempt timestamp timezone awareness is inconsistent",
+                )
+            try:
+                lifecycle_inconsistent = finished < started
+            except TypeError:
+                self._reject(
+                    ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
+                    "attempt timestamps are not comparable",
                 )
             if lifecycle_inconsistent:
                 self._reject(
