@@ -8,6 +8,7 @@ from moa.models.character import AntidisablePage
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.antidisable_page_projection_coordinator import (
     AntidisablePageProjectionCoordinator,
     AntidisablePageProjectionDatabasePathError,
@@ -223,16 +224,14 @@ def _activate_test_projection_generation(
     connection, generation_id: int
 ) -> None:
     """Move an isolated temporary database to a later projection generation."""
-    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
-    connection.execute(
-        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
-        (generation_id,),
-    )
-    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
-    connection.execute(
-        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
-        (generation_id,),
-    )
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        assert ProjectionLinkRepository(connection).switch_current_generation() == generation_id
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
 
 
 def _insert_historical_completed_link(
