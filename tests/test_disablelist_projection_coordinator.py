@@ -9,11 +9,13 @@ from moa.models.character import DisableListEntry, DisableListSnapshot
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkIntegrityError
 from moa.services.disablelist_projection_coordinator import (
     DisableListProjectionCoordinator,
     DisableListProjectionCoordinatorError,
     DisableListProjectionDatabasePathError,
     DisableListProjectionIntegrityError,
+    DisableListProjectionResult,
     DisableListProjectionStateError,
     DisableListProjectionTargetError,
 )
@@ -70,6 +72,56 @@ def _attribute(discord, source_event_id, server="Server", account="Account"):
     discord.record_account_attribution(source_event_id, status="resolved", server_name=server, account_name=account, recorded_at=OBSERVED_AT)
 
 
+def _activate_test_projection_generation(connection: sqlite3.Connection, generation_id: int) -> None:
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(connection: sqlite3.Connection, source_event_id: int) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.disablelist', ?,
+                  'disablelist_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (source_event_id, _slot("Server", "Account"), value, value, value, value),
+    )
+
+
+def _snapshot(database_path) -> dict[str, tuple[tuple[object, ...], ...]]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "disablelist_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_processing_attempts",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+    )
+    with connect(database_path) as connection:
+        return {
+            table: tuple(
+                tuple(row)
+                for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid")
+            )
+            for table in tables
+        }
+
+
 def _coordinate(coordinator, source_event_id, attempt_id, state=STATE, server=" Server ", account=" Account "):
     return coordinator.coordinate_disablelist(
         source_event_id=source_event_id, attempt_id=attempt_id, state=state, server=server, account=account,
@@ -95,14 +147,213 @@ def test_first_processing_is_atomic_and_preserves_disablelist_snapshot(tmp_path)
         assert _counts(connection) == {key: 1 for key in _counts(connection)}
         event = connection.execute("SELECT kind, source, raw_message, observed_at FROM import_events WHERE id = ?", (result.import_event_id,)).fetchone()
         row = connection.execute("SELECT slots_used, slots_capacity, total_disabled, disabled_wa, disabled_ha, disabled_wg, disabled_hg, wa_pool_limit, ha_pool_limit, western_disabled, irl_disabled, western_disabled_observed, irl_disabled_observed, entries_json, import_event_id FROM disablelist_observations WHERE id = ?", (result.disablelist_observation_id,)).fetchone()
-        link = connection.execute("SELECT projection_kind, projection_slot, projection_table, projection_row_id, state FROM discord_projection_links").fetchone()
+        link = connection.execute("SELECT generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state FROM discord_projection_links").fetchone()
         assert tuple(event) == ("disablelist", "discord", "disablelist payload", OBSERVED_AT.isoformat())
         assert tuple(row[:13]) == (13, 16, 107_529, 41_247, 42_438, 20_996, 14_789, 40_861, 42_213, 1, 0, 1, 1)
         assert row["entries_json"] == json.dumps([entry.model_dump() for entry in STATE.entries])
         assert row["import_event_id"] == result.import_event_id
-        assert tuple(link) == ("catalog.disablelist", '{"account":"account","server":"server"}', "disablelist_observations", result.disablelist_observation_id, "completed")
+        assert tuple(link) == (1, "catalog.disablelist", '{"account":"account","server":"server"}', "disablelist_observations", result.disablelist_observation_id, "completed")
         assert tuple(connection.execute("SELECT status, legacy_import_event_id FROM discord_source_events").fetchone()) == ("succeeded", result.import_event_id)
         assert tuple(connection.execute("SELECT status, finished_at FROM discord_processing_attempts").fetchone()) == ("succeeded", FINISHED_AT.isoformat())
+
+
+def test_generation_two_processing_preserves_generation_one_history_and_replays_no_write(tmp_path):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, "generation-two")
+    _attribute(discord, source_event_id)
+    with connect(path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _snapshot(path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay == DisableListProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        disablelist_observation_id=first.disablelist_observation_id,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    assert _snapshot(path) == before_replay
+    with connect(path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT generation_id, projection_table, projection_row_id, state
+                FROM discord_projection_links
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (source_event_id,),
+            ).fetchall()
+        ] == [(2, "disablelist_observations", first.disablelist_observation_id, "completed")]
+
+
+def test_generation_two_replay_fails_when_only_generation_one_link_exists(tmp_path):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, "historical-only")
+    _attribute(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _snapshot(path)
+
+    with pytest.raises(
+        DisableListProjectionIntegrityError,
+        match="inconsistent disablelist projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _snapshot(path) == before
+
+
+@pytest.mark.parametrize("corruption", ("malformed", "ownership", "scope"))
+def test_generation_two_replay_rejects_current_link_corruption_without_writes(
+    tmp_path, corruption
+):
+    path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, corruption)
+    _attribute(discord, source_event_id)
+    with connect(path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+
+    if corruption == "malformed":
+        with connect(path) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(
+                "UPDATE discord_projection_links SET projection_row_id = NULL "
+                "WHERE source_event_id = ? AND generation_id = 2",
+                (source_event_id,),
+            )
+    else:
+        other = catalog.import_disablelist(
+            STATE,
+            "Other Server" if corruption == "scope" else "Server",
+            "Other Account" if corruption == "scope" else "Account",
+            "other",
+            "discord",
+        )
+        with connect(path) as connection:
+            if corruption == "ownership":
+                target = connection.execute(
+                    "SELECT id FROM disablelist_observations WHERE import_event_id = ?",
+                    (other.import_event_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE discord_projection_links SET projection_row_id = ? "
+                    "WHERE source_event_id = ? AND generation_id = 2",
+                    (target, source_event_id),
+                )
+            else:
+                other_context = connection.execute(
+                    """
+                    SELECT ac.id
+                    FROM account_contexts AS ac
+                    JOIN server_contexts AS sc ON sc.id = ac.server_context_id
+                    WHERE sc.normalized_name = 'other server'
+                      AND ac.normalized_name = 'other account'
+                    """
+                ).fetchone()[0]
+                connection.execute(
+                    "UPDATE disablelist_observations SET account_context_id = ? "
+                    "WHERE id = ?",
+                    (other_context, first.disablelist_observation_id),
+                )
+
+    before = _snapshot(path)
+    expected_error = (
+        DisableListProjectionIntegrityError
+        if corruption == "malformed"
+        else DisableListProjectionTargetError
+    )
+    with pytest.raises(expected_error):
+        _coordinate(coordinator, source_event_id, None)
+    assert _snapshot(path) == before
+
+
+def test_generation_two_failure_rolls_back_new_writes_and_retains_history(
+    tmp_path, monkeypatch
+):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, "generation-two-rollback")
+    _attribute(discord, source_event_id)
+    with connect(path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_disablelist_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("forced generation-two rollback")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="generation-two rollback"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM disablelist_observations"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM server_contexts").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM account_contexts").fetchone()[0] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "processing"
+
+
+def test_projection_link_completion_rowcount_failure_rolls_back_fail_closed(
+    tmp_path, monkeypatch
+):
+    path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, "completion-rowcount")
+    _attribute(discord, source_event_id)
+    failure = ProjectionLinkIntegrityError("forced completion rowcount failure")
+    monkeypatch.setattr(
+        "moa.repositories.projection_link_repository.ProjectionLinkRepository.complete_claimed_link",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(ProjectionLinkIntegrityError, match="completion rowcount"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert _counts(connection)["disablelist_observations"] == 0
+        assert _counts(connection)["discord_projection_links"] == 0
 
 
 def test_boundary_state_and_normalized_slot_preserve_zero_null_false_and_empty_entries(tmp_path):
@@ -120,7 +371,7 @@ def test_failure_rolls_back_and_retry_creates_one_projection(tmp_path, monkeypat
     path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     _attribute(discord, source_event_id)
-    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args: (_ for _ in ()).throw(RuntimeError("forced failure")))
+    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced failure")))
     with pytest.raises(RuntimeError, match="forced failure"):
         _coordinate(coordinator, source_event_id, attempt_id)
     with connect(path) as connection:
@@ -153,7 +404,7 @@ def test_replay_reconstructs_without_inserts(tmp_path):
         )
         before_link = tuple(
             connection.execute(
-                "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
+                "SELECT generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
                 (source_event_id,),
             ).fetchone()
         )
@@ -181,7 +432,7 @@ def test_replay_reconstructs_without_inserts(tmp_path):
         ) == before_attempt
         assert tuple(
             connection.execute(
-                "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
+                "SELECT generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at FROM discord_projection_links WHERE source_event_id = ?",
                 (source_event_id,),
             ).fetchone()
         ) == before_link
@@ -329,7 +580,7 @@ def test_rollback_preserves_preexisting_contexts(tmp_path, monkeypatch):
     catalog.import_disablelist(STATE, "Server", "Account", "existing", "discord")
     source_event_id, attempt_id = _receive_and_begin(discord, "preexisting")
     _attribute(discord, source_event_id)
-    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args: (_ for _ in ()).throw(RuntimeError("rollback")))
+    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rollback")))
     with pytest.raises(RuntimeError, match="rollback"):
         _coordinate(coordinator, source_event_id, attempt_id)
     with connect(path) as connection:
@@ -397,7 +648,7 @@ def _insert_link(connection, source_event_id, kind, slot, state="claimed"):
     projection_row_id = 1 if state == "completed" else None
     completed_at = value if state == "completed" else None
     connection.execute(
-        "INSERT INTO discord_projection_links (source_event_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO discord_projection_links (source_event_id, generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (source_event_id, kind, slot, projection_table, projection_row_id, state, value, completed_at, value, value),
     )
 
@@ -512,7 +763,7 @@ def test_retry_has_exactly_one_final_projection_and_excludes_adl(tmp_path, monke
     path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord, "retry-cardinality")
     _attribute(discord, source_event_id)
-    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args: (_ for _ in ()).throw(RuntimeError("retry")))
+    monkeypatch.setattr(coordinator, "_complete_projection_link", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("retry")))
     with pytest.raises(RuntimeError):
         _coordinate(coordinator, source_event_id, attempt_id)
     monkeypatch.undo()
