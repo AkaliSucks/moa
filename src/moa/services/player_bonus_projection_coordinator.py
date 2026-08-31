@@ -13,6 +13,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import PlayerBonusSnapshot
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.projection_authority import PLAYER_BONUS_PROJECTION
 from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
@@ -109,6 +110,8 @@ class PlayerBonusProjectionCoordinator:
         def coordinate_with_connection(
             connection: sqlite3.Connection,
         ) -> PlayerBonusProjectionResult:
+            projection_links = ProjectionLinkRepository(connection)
+            generation_id = projection_links.resolve_current_generation_id()
             event = self._load_source_event(connection, source_event_id)
             self._validate_attribution(
                 connection,
@@ -123,7 +126,14 @@ class PlayerBonusProjectionCoordinator:
                         load_durable_projection_expectation_facts(connection, source_event_id)
                     ).known_expected_identities
                 except DurableProjectionExpectationFactsError:
-                    return self._coordinate_replay(connection, event, projection_slot, state=state)
+                    return self._coordinate_replay(
+                        connection,
+                        event,
+                        projection_slot,
+                        state=state,
+                        projection_links=projection_links,
+                        generation_id=generation_id,
+                    )
                 if len(durable) != 1:
                     raise PlayerBonusProjectionIntegrityError(
                         "durable player-bonus expected identity is unresolved"
@@ -133,9 +143,15 @@ class PlayerBonusProjectionCoordinator:
                     event,
                     durable[0].projection_slot,
                     state=state,
+                    projection_links=projection_links,
+                    generation_id=generation_id,
                 )
 
-            links = self._load_links(connection, source_event_id)
+            links = self._load_links(
+                projection_links,
+                source_event_id=source_event_id,
+                generation_id=generation_id,
+            )
             expected_key = (self._PROJECTION_KIND, projection_slot)
             if set(links) - {expected_key}:
                 raise PlayerBonusProjectionIntegrityError(
@@ -152,8 +168,9 @@ class PlayerBonusProjectionCoordinator:
                 )
 
             self._claim_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 claimed_at=observed_at,
             )
@@ -180,8 +197,9 @@ class PlayerBonusProjectionCoordinator:
                 state=state,
             )
             self._complete_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 target=target,
                 completed_at=finished_at,
@@ -215,6 +233,8 @@ class PlayerBonusProjectionCoordinator:
         projection_slot: str,
         *,
         state: PlayerBonusSnapshot,
+        projection_links: ProjectionLinkRepository,
+        generation_id: int,
     ) -> PlayerBonusProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -230,7 +250,11 @@ class PlayerBonusProjectionCoordinator:
                 f"legacy player-bonus import event {import_event_id} for source event {event['id']} is missing or wrong"
             )
 
-        links = self._load_links(connection, int(event["id"]))
+        links = self._load_links(
+            projection_links,
+            source_event_id=int(event["id"]),
+            generation_id=generation_id,
+        )
         key = (self._PROJECTION_KIND, projection_slot)
         if set(links) != {key}:
             raise PlayerBonusProjectionIntegrityError(
@@ -369,13 +393,16 @@ class PlayerBonusProjectionCoordinator:
 
     @staticmethod
     def _load_links(
-        connection: sqlite3.Connection, source_event_id: int
+        repository: ProjectionLinkRepository,
+        *,
+        source_event_id: int,
+        generation_id: int,
     ) -> dict[tuple[str, str], sqlite3.Row]:
         links: dict[tuple[str, str], sqlite3.Row] = {}
-        for link in connection.execute(
-            "SELECT * FROM discord_projection_links WHERE source_event_id = ?",
-            (source_event_id,),
-        ).fetchall():
+        for link in repository.load_links(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+        ):
             key = (str(link["projection_kind"]), str(link["projection_slot"]))
             if key in links:
                 raise PlayerBonusProjectionIntegrityError(
@@ -386,29 +413,27 @@ class PlayerBonusProjectionCoordinator:
 
     def _claim_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         claimed_at: datetime,
     ) -> None:
-        value = claimed_at.isoformat()
-        connection.execute(
-            """
-            INSERT INTO discord_projection_links (
-                source_event_id, projection_kind, projection_slot,
-                projection_table, projection_row_id, state,
-                claimed_at, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, NULL, NULL, 'claimed', ?, NULL, ?, ?)
-            """,
-            (source_event_id, self._PROJECTION_KIND, projection_slot, value, value, value),
+        repository.claim_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            claimed_at=claimed_at,
         )
 
     def _complete_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         target: tuple[str, int],
         completed_at: datetime,
@@ -418,29 +443,15 @@ class PlayerBonusProjectionCoordinator:
             raise PlayerBonusProjectionIntegrityError(
                 "player-bonus import returned an invalid projection target"
             )
-        value = completed_at.isoformat()
-        updated = connection.execute(
-            """
-            UPDATE discord_projection_links
-            SET projection_table = ?, projection_row_id = ?, state = 'completed',
-                completed_at = ?, updated_at = ?
-            WHERE source_event_id = ? AND projection_kind = ? AND projection_slot = ?
-              AND state = 'claimed'
-            """,
-            (
-                table,
-                row_id,
-                value,
-                value,
-                source_event_id,
-                self._PROJECTION_KIND,
-                projection_slot,
-            ),
+        repository.complete_claimed_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            projection_table=table,
+            projection_row_id=row_id,
+            completed_at=completed_at,
         )
-        if updated.rowcount != 1:
-            raise PlayerBonusProjectionIntegrityError(
-                "player-bonus projection link could not be completed"
-            )
 
     def _validate_player_bonus_target(
         self,

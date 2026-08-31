@@ -112,6 +112,39 @@ def _record_attribution(discord, source_event_id, *, server="Server", account="A
     )
 
 
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.player_bonus', ?,
+                  'player_bonus_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (source_event_id, _slot("Server", "Account"), value, value, value, value),
+    )
+
+
 def _coordinate(
     coordinator,
     source_event_id,
@@ -262,12 +295,13 @@ def test_first_processing_writes_one_player_bonus_projection_and_preserves_value
         ) == ("Account", "account")
         link = connection.execute(
             """
-            SELECT projection_kind, projection_slot, projection_table,
+            SELECT generation_id, projection_kind, projection_slot, projection_table,
                    projection_row_id, state, completed_at
             FROM discord_projection_links
             """
         ).fetchone()
         assert tuple(link) == (
+            1,
             "catalog.player_bonus",
             '{"account":"account","server":"server"}',
             "player_bonus_observations",
@@ -285,6 +319,92 @@ def test_first_processing_writes_one_player_bonus_projection_and_preserves_value
                 "SELECT status, finished_at FROM discord_processing_attempts"
             ).fetchone()
         ) == ("succeeded", FINISHED_AT.isoformat())
+
+
+def test_historical_player_bonus_link_is_isolated_from_current_generation_and_replay(
+    tmp_path,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay.replay_skipped is True
+    assert replay.projection_target == first.projection_target
+    assert _snapshot(database_path) == before_replay
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        current_link = connection.execute(
+            """
+            SELECT generation_id, projection_table, projection_row_id, state
+            FROM discord_projection_links
+            WHERE source_event_id = ? AND generation_id = 2
+            """,
+            (source_event_id,),
+        ).fetchall()
+        assert [tuple(row) for row in current_link] == [
+            (2, "player_bonus_observations", first.player_bonus_observation_id, "completed")
+        ]
+        assert connection.execute(
+            "SELECT COUNT(*) FROM player_bonus_observations"
+        ).fetchone()[0] == 1
+
+
+def test_current_generation_target_validation_failure_preserves_history_and_processing(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_player_bonus_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PlayerBonusProjectionTargetError("forced target-validation failure")
+        ),
+    )
+
+    with pytest.raises(PlayerBonusProjectionTargetError, match="target-validation"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM player_bonus_observations"
+        ).fetchone()[0] == 0
+        assert _snapshot(database_path)["event"][:2] == ("processing", None)
+        assert _snapshot(database_path)["attempt"][:1] == ("processing",)
 
 
 def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
