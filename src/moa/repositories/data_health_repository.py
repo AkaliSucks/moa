@@ -80,9 +80,11 @@ class DataHealthRepository:
 
     def scan_projection_gaps(self) -> tuple[DataHealthFinding, ...]:
         """Return projection-gap findings for completed and claimed links."""
+        current_generation_id = self._resolve_current_generation_id()
         completed_rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    source.status AS source_status,
                    COUNT(link.id) AS completed_link_count
             FROM discord_projection_links AS link
@@ -90,8 +92,8 @@ class DataHealthRepository:
                 ON source.id = link.source_event_id
             WHERE link.state = 'completed'
               AND source.status != 'succeeded'
-            GROUP BY source.id, source.status
-            ORDER BY source.id
+            GROUP BY source.id, link.generation_id, source.status
+            ORDER BY source.id, link.generation_id
             """
         )
         findings = [
@@ -99,9 +101,12 @@ class DataHealthRepository:
                 check_id="DH-PG-001",
                 category="projection-gap",
                 entity="discord_source_events",
-                local_identifier=int(row["source_event_id"]),
+                local_identifier=self._source_event_identifier(
+                    row["generation_id"], row["source_event_id"]
+                ),
                 reason=(
-                    f"source event status {row['source_status']!r} owns "
+                    f"projection generation {row['generation_id']}: source event status "
+                    f"{row['source_status']!r} owns "
                     f"{int(row['completed_link_count'])} completed projection link(s)"
                 ),
             )
@@ -110,13 +115,14 @@ class DataHealthRepository:
         claimed_rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    COUNT(link.id) AS claimed_link_count
             FROM discord_projection_links AS link
             JOIN discord_source_events AS source
                 ON source.id = link.source_event_id
             WHERE link.state = 'claimed'
-            GROUP BY source.id
-            ORDER BY source.id
+            GROUP BY source.id, link.generation_id
+            ORDER BY source.id, link.generation_id
             """
         )
         findings.extend(
@@ -124,9 +130,12 @@ class DataHealthRepository:
                 check_id="DH-PG-002",
                 category="projection-gap",
                 entity="discord_source_events",
-                local_identifier=int(row["source_event_id"]),
+                local_identifier=self._source_event_identifier(
+                    row["generation_id"], row["source_event_id"]
+                ),
                 reason=(
-                    f"source event owns {int(row['claimed_link_count'])} "
+                    f"projection generation {row['generation_id']}: source event owns "
+                    f"{int(row['claimed_link_count'])} "
                     "durably claimed projection link(s)"
                 ),
             )
@@ -135,6 +144,7 @@ class DataHealthRepository:
         provenance_rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    COUNT(link.id) AS completed_link_count
             FROM discord_projection_links AS link
             JOIN discord_source_events AS source
@@ -142,8 +152,8 @@ class DataHealthRepository:
             WHERE source.status = 'succeeded'
               AND source.legacy_import_event_id IS NULL
               AND link.state = 'completed'
-            GROUP BY source.id
-            ORDER BY source.id
+            GROUP BY source.id, link.generation_id
+            ORDER BY source.id, link.generation_id
             """
         )
         findings.extend(
@@ -151,9 +161,11 @@ class DataHealthRepository:
                 check_id="DH-PG-003",
                 category="projection-gap",
                 entity="discord_source_events",
-                local_identifier=int(row["source_event_id"]),
+                local_identifier=self._source_event_identifier(
+                    row["generation_id"], row["source_event_id"]
+                ),
                 reason=(
-                    "succeeded source event owns "
+                    f"projection generation {row['generation_id']}: succeeded source event owns "
                     f"{int(row['completed_link_count'])} completed projection link(s) "
                     "but has no recorded import event provenance"
                 ),
@@ -164,10 +176,27 @@ class DataHealthRepository:
         findings.extend(self._projection_target_findings())
         findings.extend(self._projection_ownership_findings())
         findings.extend(self._projection_context_findings())
-        findings.extend(self._projection_expectation_findings())
+        findings.extend(self._projection_expectation_findings(current_generation_id))
         return tuple(findings)
 
-    def _projection_expectation_findings(self) -> tuple[DataHealthFinding, ...]:
+    def _resolve_current_generation_id(self) -> int:
+        rows = self._connection.execute(
+            "SELECT id FROM projection_generations WHERE is_current = 1"
+        ).fetchall()
+        if len(rows) != 1:
+            raise DataHealthSchemaError(
+                "projection-gap reporting requires exactly one positive current generation"
+            )
+        generation_id = rows[0]["id"]
+        if not isinstance(generation_id, int) or generation_id <= 0:
+            raise DataHealthSchemaError(
+                "projection-gap reporting requires exactly one positive current generation"
+            )
+        return generation_id
+
+    def _projection_expectation_findings(
+        self, current_generation_id: int
+    ) -> tuple[DataHealthFinding, ...]:
         """Compare authoritative expected identities with completed link identities."""
         sources = self._connection.execute(
             """
@@ -184,12 +213,13 @@ class DataHealthRepository:
             links = tuple(
                 self._connection.execute(
                     """
-                    SELECT projection_kind, projection_slot, projection_table, state
+                    SELECT generation_id, projection_kind, projection_slot,
+                           projection_table, state
                     FROM discord_projection_links
-                    WHERE source_event_id = ?
+                    WHERE source_event_id = ? AND generation_id = ?
                     ORDER BY projection_kind, projection_slot
                     """,
-                    (source_event_id,),
+                    (source_event_id, current_generation_id),
                 )
             )
             if any(link["state"] != "completed" for link in links):
@@ -228,7 +258,7 @@ class DataHealthRepository:
                 if identity in observed:
                     continue
                 local_identifier = self._projection_identity_identifier(
-                    source_event_id, identity
+                    current_generation_id, source_event_id, identity
                 )
                 findings.append(
                     DataHealthFinding(
@@ -237,6 +267,7 @@ class DataHealthRepository:
                         entity="discord_source_events",
                         local_identifier=local_identifier,
                         reason=(
+                            f"projection generation {current_generation_id}: "
                             "expected projection identity is missing: "
                             f"projection kind {identity.projection_kind!r}, "
                             f"projection slot {identity.projection_slot!r}"
@@ -251,7 +282,7 @@ class DataHealthRepository:
                 if expected_set.expectedness_for(identity) is not Expectedness.NOT_EXPECTED:
                     continue
                 local_identifier = self._projection_identity_identifier(
-                    source_event_id, identity
+                    current_generation_id, source_event_id, identity
                 )
                 findings.append(
                     DataHealthFinding(
@@ -260,6 +291,7 @@ class DataHealthRepository:
                         entity="discord_projection_links",
                         local_identifier=local_identifier,
                         reason=(
+                            f"projection generation {current_generation_id}: "
                             "observed projection identity is not expected: "
                             f"projection kind {identity.projection_kind!r}, "
                             f"projection slot {identity.projection_slot!r}"
@@ -269,10 +301,15 @@ class DataHealthRepository:
         return tuple(findings)
 
     @staticmethod
+    def _source_event_identifier(generation_id: int, source_event_id: int) -> str:
+        return f"generation_id={generation_id}; source_event_id={source_event_id}"
+
+    @staticmethod
     def _projection_identity_identifier(
-        source_event_id: int, identity: ExpectedProjectionIdentity
+        generation_id: int, source_event_id: int, identity: ExpectedProjectionIdentity
     ) -> str:
         return (
+            f"generation_id={generation_id}; "
             f"source_event_id={source_event_id}; "
             f"projection_kind={identity.projection_kind!r}; "
             f"projection_slot={identity.projection_slot!r}"
@@ -282,6 +319,7 @@ class DataHealthRepository:
         rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    link.projection_kind,
                    link.projection_slot,
                    link.projection_table
@@ -291,13 +329,14 @@ class DataHealthRepository:
             WHERE link.state = 'completed'
               AND source.status = 'succeeded'
               AND source.legacy_import_event_id IS NOT NULL
-            ORDER BY source.id, link.projection_kind, link.projection_slot
+            ORDER BY source.id, link.generation_id, link.projection_kind, link.projection_slot
             """
         )
         findings = []
         for row in rows:
             projection_kind = row["projection_kind"]
             local_identifier = (
+                f"generation_id={row['generation_id']}; "
                 f"source_event_id={row['source_event_id']}; "
                 f"projection_kind={projection_kind!r}; "
                 f"projection_slot={row['projection_slot']!r}"
@@ -312,7 +351,8 @@ class DataHealthRepository:
                         entity="discord_projection_links",
                         local_identifier=local_identifier,
                         reason=(
-                            f"projection kind {projection_kind!r} is unknown to the "
+                            f"projection generation {row['generation_id']}: projection kind "
+                            f"{projection_kind!r} is unknown to the "
                             "shared projection authority"
                         ),
                     )
@@ -328,7 +368,8 @@ class DataHealthRepository:
                         entity="discord_projection_links",
                         local_identifier=local_identifier,
                         reason=(
-                            f"projection kind {projection_kind!r} authorizes target "
+                            f"projection generation {row['generation_id']}: projection kind "
+                            f"{projection_kind!r} authorizes target "
                             f"table {authority.target_table!r}, but stored projection "
                             f"table is {stored_table!r}"
                         ),
@@ -340,6 +381,7 @@ class DataHealthRepository:
         rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    link.projection_kind,
                    link.projection_slot,
                    link.projection_table,
@@ -350,7 +392,7 @@ class DataHealthRepository:
             WHERE link.state = 'completed'
               AND source.status = 'succeeded'
               AND source.legacy_import_event_id IS NOT NULL
-            ORDER BY source.id, link.projection_kind, link.projection_slot
+            ORDER BY source.id, link.generation_id, link.projection_kind, link.projection_slot
             """
         )
         findings = []
@@ -372,6 +414,7 @@ class DataHealthRepository:
                 continue
 
             local_identifier = (
+                f"generation_id={row['generation_id']}; "
                 f"source_event_id={row['source_event_id']}; "
                 f"projection_kind={projection_kind!r}; "
                 f"projection_slot={row['projection_slot']!r}"
@@ -383,6 +426,7 @@ class DataHealthRepository:
                     entity="discord_projection_links",
                     local_identifier=local_identifier,
                     reason=(
+                        f"projection generation {row['generation_id']}: "
                         "completed projection references missing authorized target "
                         f"table {authority.target_table!r} row "
                         f"{row['projection_row_id']}"
@@ -395,6 +439,7 @@ class DataHealthRepository:
         rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    source.legacy_import_event_id,
                    link.projection_kind,
                    link.projection_slot,
@@ -406,7 +451,7 @@ class DataHealthRepository:
             WHERE link.state = 'completed'
               AND source.status = 'succeeded'
               AND source.legacy_import_event_id IS NOT NULL
-            ORDER BY source.id, link.projection_kind, link.projection_slot
+            ORDER BY source.id, link.generation_id, link.projection_kind, link.projection_slot
             """
         )
         findings = []
@@ -442,18 +487,21 @@ class DataHealthRepository:
                 continue
 
             local_identifier = (
+                f"generation_id={row['generation_id']}; "
                 f"source_event_id={row['source_event_id']}; "
                 f"projection_kind={projection_kind!r}; "
                 f"projection_slot={row['projection_slot']!r}"
             )
             if authority.target_table == "import_events":
                 reason = (
+                    f"projection generation {row['generation_id']}: "
                     "completed Antidisable target import-event row "
                     f"{row['projection_row_id']} does not match source import event "
                     f"{row['legacy_import_event_id']}"
                 )
             else:
                 reason = (
+                    f"projection generation {row['generation_id']}: "
                     "completed projection target table "
                     f"{authority.target_table!r} row {row['projection_row_id']} "
                     f"is owned by import event {target_import_event_id}, but source "
@@ -475,6 +523,7 @@ class DataHealthRepository:
         rows = self._connection.execute(
             """
             SELECT source.id AS source_event_id,
+                   link.generation_id,
                    source.legacy_import_event_id,
                    link.projection_kind,
                    link.projection_slot,
@@ -495,7 +544,7 @@ class DataHealthRepository:
             WHERE link.state = 'completed'
               AND source.status = 'succeeded'
               AND source.legacy_import_event_id IS NOT NULL
-            ORDER BY source.id, link.projection_kind, link.projection_slot
+            ORDER BY source.id, link.generation_id, link.projection_kind, link.projection_slot
             """
         )
         findings = []
@@ -546,6 +595,7 @@ class DataHealthRepository:
             if target_pair == source_pair:
                 continue
             local_identifier = (
+                f"generation_id={row['generation_id']}; "
                 f"source_event_id={row['source_event_id']}; "
                 f"projection_kind={row['projection_kind']!r}; "
                 f"projection_slot={row['projection_slot']!r}"
@@ -557,6 +607,7 @@ class DataHealthRepository:
                     entity="discord_projection_links",
                     local_identifier=local_identifier,
                     reason=(
+                        f"projection generation {row['generation_id']}: "
                         "completed projection target account context differs from "
                         f"resolved source attribution: expected server/account "
                         f"{source_pair!r}, actual {target_pair!r}"
@@ -782,14 +833,19 @@ class DataHealthRepository:
         return self._grouped_duplicate_findings(
             "DH-DUP-009",
             "discord_projection_links",
-            ("source_event_id", "projection_kind", "projection_slot"),
+            (
+                "source_event_id",
+                "generation_id",
+                "projection_kind",
+                "projection_slot",
+            ),
             """
-            SELECT source_event_id, projection_kind, projection_slot,
+            SELECT source_event_id, generation_id, projection_kind, projection_slot,
                    COUNT(*) AS duplicate_count
             FROM discord_projection_links
-            GROUP BY source_event_id, projection_kind, projection_slot
+            GROUP BY source_event_id, generation_id, projection_kind, projection_slot
             HAVING COUNT(*) > 1
-            ORDER BY source_event_id, projection_kind, projection_slot
+            ORDER BY source_event_id, generation_id, projection_kind, projection_slot
             """,
             "projection-link identity",
         )
