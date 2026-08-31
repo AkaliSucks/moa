@@ -12,6 +12,7 @@ from moa.database.sqlite import DEFAULT_DATABASE_PATH, run_write_transaction
 from moa.models.character import AntidisablePage
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.projection_authority import ANTIDISABLE_PAGE_PROJECTION
 from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
@@ -113,6 +114,8 @@ class AntidisablePageProjectionCoordinator:
         def coordinate_with_connection(
             connection: sqlite3.Connection,
         ) -> AntidisablePageProjectionResult:
+            projection_links = ProjectionLinkRepository(connection)
+            generation_id = projection_links.resolve_current_generation_id()
             event = self._load_source_event(connection, source_event_id)
             self._validate_lifecycle(connection, event, source_event_id, attempt_id)
             self._validate_source_payload(event, raw)
@@ -158,6 +161,8 @@ class AntidisablePageProjectionCoordinator:
                     source=source,
                     observed_at=observed_at,
                     projection_slot=durable[0].projection_slot,
+                    projection_links=projection_links,
+                    generation_id=generation_id,
                 )
 
             self._validate_scan_for_import(
@@ -169,13 +174,15 @@ class AntidisablePageProjectionCoordinator:
                 page_number=page_number,
             )
             self._require_new_projection_slot(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
             )
             self._claim_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 claimed_at=observed_at,
             )
@@ -209,8 +216,9 @@ class AntidisablePageProjectionCoordinator:
             )
             target = (self._PROJECTION_TABLE, import_event_id)
             self._complete_projection_link(
-                connection,
+                projection_links,
                 source_event_id=source_event_id,
+                generation_id=generation_id,
                 projection_slot=projection_slot,
                 target=target,
                 completed_at=finished_at,
@@ -252,6 +260,8 @@ class AntidisablePageProjectionCoordinator:
         source: str,
         observed_at: datetime,
         projection_slot: str,
+        projection_links: ProjectionLinkRepository,
+        generation_id: int,
     ) -> AntidisablePageProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -259,7 +269,11 @@ class AntidisablePageProjectionCoordinator:
                 f"succeeded source event {event['id']} has no legacy import event"
             )
         import_event_id = self._positive_id(import_event_id, "legacy_import_event_id")
-        links = self._load_links(connection, int(event["id"]))
+        links = self._load_links(
+            projection_links,
+            source_event_id=int(event["id"]),
+            generation_id=generation_id,
+        )
         key = (self._PROJECTION_KIND, projection_slot)
         if set(links) != {key}:
             raise AntidisablePageProjectionIntegrityError(
@@ -600,13 +614,16 @@ class AntidisablePageProjectionCoordinator:
 
     @staticmethod
     def _load_links(
-        connection: sqlite3.Connection, source_event_id: int
+        repository: ProjectionLinkRepository,
+        *,
+        source_event_id: int,
+        generation_id: int,
     ) -> dict[tuple[str, str], sqlite3.Row]:
         links: dict[tuple[str, str], sqlite3.Row] = {}
-        for link in connection.execute(
-            "SELECT * FROM discord_projection_links WHERE source_event_id = ?",
-            (source_event_id,),
-        ).fetchall():
+        for link in repository.load_links(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+        ):
             key = (str(link["projection_kind"]), str(link["projection_slot"]))
             if key in links:
                 raise AntidisablePageProjectionIntegrityError(
@@ -617,12 +634,17 @@ class AntidisablePageProjectionCoordinator:
 
     def _require_new_projection_slot(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
     ) -> None:
-        links = self._load_links(connection, source_event_id)
+        links = self._load_links(
+            repository,
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+        )
         expected_key = (self._PROJECTION_KIND, projection_slot)
         if set(links) - {expected_key}:
             raise AntidisablePageProjectionIntegrityError(
@@ -636,29 +658,27 @@ class AntidisablePageProjectionCoordinator:
 
     def _claim_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         claimed_at: datetime,
     ) -> None:
-        value = claimed_at.isoformat()
-        connection.execute(
-            """
-            INSERT INTO discord_projection_links (
-                source_event_id, projection_kind, projection_slot,
-                projection_table, projection_row_id, state,
-                claimed_at, completed_at, created_at, updated_at
-            ) VALUES (?, ?, ?, NULL, NULL, 'claimed', ?, NULL, ?, ?)
-            """,
-            (source_event_id, self._PROJECTION_KIND, projection_slot, value, value, value),
+        repository.claim_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            claimed_at=claimed_at,
         )
 
     def _complete_projection_link(
         self,
-        connection: sqlite3.Connection,
+        repository: ProjectionLinkRepository,
         *,
         source_event_id: int,
+        generation_id: int,
         projection_slot: str,
         target: tuple[str, int],
         completed_at: datetime,
@@ -668,29 +688,15 @@ class AntidisablePageProjectionCoordinator:
             raise AntidisablePageProjectionIntegrityError(
                 "antidisable page import returned an invalid projection target"
             )
-        value = completed_at.isoformat()
-        updated = connection.execute(
-            """
-            UPDATE discord_projection_links
-            SET projection_table = ?, projection_row_id = ?, state = 'completed',
-                completed_at = ?, updated_at = ?
-            WHERE source_event_id = ? AND projection_kind = ? AND projection_slot = ?
-              AND state = 'claimed'
-            """,
-            (
-                table,
-                row_id,
-                value,
-                value,
-                source_event_id,
-                self._PROJECTION_KIND,
-                projection_slot,
-            ),
+        repository.complete_claimed_link(
+            source_event_id=source_event_id,
+            generation_id=generation_id,
+            projection_kind=self._PROJECTION_KIND,
+            projection_slot=projection_slot,
+            projection_table=table,
+            projection_row_id=row_id,
+            completed_at=completed_at,
         )
-        if updated.rowcount != 1:
-            raise AntidisablePageProjectionIntegrityError(
-                "antidisable page projection link could not be completed"
-            )
 
     @classmethod
     def _validate_projection_slot(

@@ -219,6 +219,75 @@ def _insert_projection_link(
         connection.commit()
 
 
+def _activate_test_projection_generation(
+    connection, generation_id: int
+) -> None:
+    """Move an isolated temporary database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection,
+    *,
+    source_event_id: int,
+    projection_slot: str,
+    projection_row_id: int = 999_999,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.antidisable_page', ?, 'import_events', ?,
+                  'completed', ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            projection_slot,
+            projection_row_id,
+            OBSERVED_AT.isoformat(),
+            FINISHED_AT.isoformat(),
+            OBSERVED_AT.isoformat(),
+            FINISHED_AT.isoformat(),
+        ),
+    )
+
+
+def _projection_snapshot(database_path):
+    tables = (
+        "projection_generations",
+        "discord_projection_links",
+        "import_events",
+        "harem_scans",
+        "harem_scan_pages",
+        "antidisable_series_observations",
+        "discord_source_events",
+        "discord_processing_attempts",
+        "discord_antidisable_workflows",
+        "discord_antidisable_response_bindings",
+    )
+    with connect(database_path) as connection:
+        return {
+            table: tuple(
+                tuple(row)
+                for row in connection.execute(
+                    f"SELECT * FROM {table} ORDER BY rowid"
+                ).fetchall()
+            )
+            for table in tables
+        }
+
+
 def _swap_series_observation_positions(connection, import_event_id, left_index, right_index):
     rows = connection.execute(
         "SELECT id FROM antidisable_series_observations "
@@ -262,7 +331,8 @@ def test_successful_first_page_and_durable_target(tmp_path):
             "SELECT harem_scan_id, page_number, import_event_id FROM harem_scan_pages"
         ).fetchone()
         link = connection.execute(
-            "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state "
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state "
             "FROM discord_projection_links WHERE source_event_id = ?",
             (source_event_id,),
         ).fetchone()
@@ -272,9 +342,9 @@ def test_successful_first_page_and_durable_target(tmp_path):
         ).fetchone()
     assert tuple(event) == ("antidisable", "discord", OBSERVED_AT.isoformat(), "adl payload")
     assert tuple(page_row) == (result.scan_id, 1, result.import_event_id)
-    assert tuple(link)[0] == "catalog.antidisable_page"
-    assert tuple(link)[2:] == ("import_events", result.import_event_id, "completed")
-    slot = json.loads(link[1])
+    assert tuple(link)[0:2] == (1, "catalog.antidisable_page")
+    assert tuple(link)[3:] == ("import_events", result.import_event_id, "completed")
+    slot = json.loads(link[2])
     assert slot == {
         "account": "account",
         "page_number": 1,
@@ -285,6 +355,62 @@ def test_successful_first_page_and_durable_target(tmp_path):
     progress = catalog.harem_scan_progress(result.scan_id)
     assert progress is not None and progress.completed_at is None
     assert discord.get_server_attribution(source_event_id).status == "resolved"
+
+
+def test_generation_two_isolates_history_and_current_replay_is_no_write(tmp_path):
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, suffix="generation-two")
+    _record_attribution(discord, source_event_id)
+    scan = _begin_scan(catalog)
+    slot = antidisable_page_projection_slot("server", "account", scan.id, 1)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(
+            connection,
+            source_event_id=source_event_id,
+            projection_slot=slot,
+        )
+
+    result = _coordinate(
+        coordinator,
+        source_event_id,
+        attempt_id,
+        scan_id=scan.id,
+    )
+    before_replay = _projection_snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None, scan_id=scan.id)
+
+    assert replay.replay_skipped is True
+    assert replay.import_event_id == result.import_event_id
+    assert _projection_snapshot(database_path) == before_replay
+    with connect(database_path) as connection:
+        links = connection.execute(
+            "SELECT generation_id, projection_slot, projection_table, projection_row_id, state "
+            "FROM discord_projection_links WHERE source_event_id = ? ORDER BY generation_id",
+            (source_event_id,),
+        ).fetchall()
+    assert [tuple(link) for link in links] == [
+        (1, slot, "import_events", 999_999, "completed"),
+        (2, slot, "import_events", result.import_event_id, "completed"),
+    ]
+    assert result.import_event_id != 999_999
+
+
+def test_generation_two_replay_fails_when_only_historical_link_exists(tmp_path):
+    database_path, _catalog, _discord, coordinator, source_event_id, result = _setup(
+        tmp_path
+    )
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _projection_snapshot(database_path)
+
+    with pytest.raises(
+        AntidisablePageProjectionIntegrityError,
+        match="inconsistent antidisable projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None, scan_id=result.scan_id)
+
+    assert _projection_snapshot(database_path) == before
 
 
 def test_continuation_and_out_of_order_pages_preserve_page_identity(tmp_path):
@@ -1247,6 +1373,135 @@ def test_prior_page_workflow_and_bindings_survive_later_page_rollback(
         (first_event, "succeeded", first.import_event_id),
         (second_event, "processing", None),
     ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("post_claim", "post_import", "completion", "lifecycle"),
+)
+def test_generation_two_rollback_retains_history_page_workflow_and_processing(
+    tmp_path, monkeypatch, failure
+):
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    _receive_and_begin(discord, suffix="rollback-request", raw="adl request")
+    scan = _begin_scan(catalog)
+    discord.create_antidisable_workflow(
+        scan_id=scan.id,
+        request_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD, "guild", "channel", "message-rollback-request"
+        ),
+        requesting_user_id="known-user",
+        created_at=OBSERVED_AT,
+        expires_at=FINISHED_AT,
+    )
+
+    first_event, first_attempt = _receive_and_begin(discord, suffix="rollback-first")
+    _record_attribution(discord, first_event)
+    discord.bind_antidisable_response(
+        scan_id=scan.id,
+        response_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD, "guild", "channel", "message-rollback-first"
+        ),
+        bound_at=OBSERVED_AT,
+    )
+    first = _coordinate(
+        coordinator,
+        first_event,
+        first_attempt,
+        page=_page(number=1),
+        scan_id=scan.id,
+    )
+
+    second_event, second_attempt = _receive_and_begin(
+        discord, suffix=f"rollback-second-{failure}"
+    )
+    _record_attribution(discord, second_event)
+    discord.bind_antidisable_response(
+        scan_id=scan.id,
+        response_message_aggregate_key=MessageAggregateKey(
+            SourcePlatform.DISCORD,
+            "guild",
+            "channel",
+            f"message-rollback-second-{failure}",
+        ),
+        bound_at=OBSERVED_AT,
+    )
+    second_slot = antidisable_page_projection_slot("server", "account", scan.id, 2)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(
+            connection,
+            source_event_id=second_event,
+            projection_slot=second_slot,
+        )
+    before = _projection_snapshot(database_path)
+
+    original_import = catalog._import_antidisable_page_with_connection
+    if failure == "post_claim":
+        monkeypatch.setattr(
+            catalog,
+            "_import_antidisable_page_with_connection",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced post-claim rollback")
+            ),
+        )
+    elif failure == "post_import":
+
+        def fail_after_import(*args, **kwargs):
+            original_import(*args, **kwargs)
+            raise RuntimeError("forced post-import rollback")
+
+        monkeypatch.setattr(
+            catalog, "_import_antidisable_page_with_connection", fail_after_import
+        )
+    elif failure == "completion":
+        monkeypatch.setattr(
+            coordinator,
+            "_complete_projection_link",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced completion rollback")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            discord,
+            "_mark_processing_success_with_connection",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced lifecycle rollback")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match=f"forced {failure.replace('_', '-')} rollback"):
+        _coordinate(
+            coordinator,
+            second_event,
+            second_attempt,
+            page=_page(number=2),
+            scan_id=scan.id,
+        )
+
+    assert _projection_snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT page_number, import_event_id FROM harem_scan_pages "
+                "WHERE harem_scan_id = ?",
+                (scan.id,),
+            ).fetchone()
+        ) == (1, first.import_event_id)
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events "
+                "WHERE id = ?",
+                (second_event,),
+            ).fetchone()
+        ) == ("processing", None)
+        assert tuple(
+            connection.execute(
+                "SELECT status, finished_at FROM discord_processing_attempts WHERE id = ?",
+                (second_attempt,),
+            ).fetchone()
+        ) == ("processing", None)
 
 
 def test_runner_replay_commit_is_durable_noop_with_other_page_present(tmp_path):
