@@ -9,6 +9,7 @@ from moa.models.character import TimerStateSnapshot
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
+from moa.repositories.projection_link_repository import ProjectionLinkIntegrityError
 from moa.services.timer_projection_coordinator import (
     TimerProjectionCoordinator,
     TimerProjectionDatabasePathError,
@@ -107,6 +108,46 @@ def _record_attribution(discord, source_event_id, *, server="Server", account="A
     )
 
 
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.timer_state', ?,
+                  'timer_state_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            _slot("Server", "Account"),
+            value,
+            value,
+            value,
+            value,
+        ),
+    )
+
+
 def _coordinate(coordinator, source_event_id, attempt_id, *, server=" Server ", account=" Account ", state=TIMER_STATE):
     return coordinator.coordinate_timer_state(
         source_event_id=source_event_id,
@@ -198,10 +239,11 @@ def test_first_processing_writes_one_timer_projection_and_preserves_snapshot(tmp
             "kakeraloot_settings_observations": 0,
         }
         link = connection.execute(
-            "SELECT projection_kind, projection_slot, projection_table, projection_row_id, state, completed_at "
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, completed_at "
             "FROM discord_projection_links"
         ).fetchone()
         assert tuple(link) == (
+            1,
             "catalog.timer_state",
             '{"account":"account","server":"server"}',
             "timer_state_observations",
@@ -227,6 +269,192 @@ def test_first_processing_writes_one_timer_projection_and_preserves_snapshot(tmp
         ) == ("succeeded", FINISHED_AT.isoformat())
     assert discord.get_server_attribution(source_event_id).server_name == "Server"
     assert discord.get_account_attribution(source_event_id).account_name == "Account"
+
+
+def test_generation_two_processing_ignores_and_preserves_generation_one_history(
+    tmp_path,
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay.replay_skipped is True
+    assert replay.projection_target == first.projection_target
+    assert _snapshot(database_path) == before_replay
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT generation_id, projection_table, projection_row_id, state
+                FROM discord_projection_links
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (source_event_id,),
+            ).fetchall()
+        ] == [(2, "timer_state_observations", first.timer_state_observation_id, "completed")]
+
+
+def test_generation_two_replay_fails_when_only_historical_link_exists(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _snapshot(database_path)
+
+    with pytest.raises(
+        TimerProjectionIntegrityError,
+        match="inconsistent timer projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _snapshot(database_path) == before
+
+
+def test_generation_two_target_validation_failure_rolls_back_and_retains_history(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_timer_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            TimerProjectionTargetError("forced target-validation failure")
+        ),
+    )
+
+    with pytest.raises(TimerProjectionTargetError, match="target-validation"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM timer_state_observations"
+        ).fetchone()[0] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "processing"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("missing_target", "missing"),
+        ("foreign_import_event", "another import event"),
+        ("wrong_kind", "missing or wrong"),
+        ("wrong_scope", "mismatched timer scope"),
+    ),
+)
+def test_generation_two_replay_validates_current_target_ownership_and_scope(
+    tmp_path, mutation: str, message: str
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+
+    if mutation == "missing_target":
+        with connect(database_path) as connection:
+            connection.execute(
+                "DELETE FROM timer_state_observations WHERE id = ?",
+                (first.timer_state_observation_id,),
+            )
+    elif mutation == "foreign_import_event":
+        second = catalog.import_timer_state(
+            TIMER_STATE, "Server", "Account", "second payload", "discord"
+        )
+        with connect(database_path) as connection:
+            second_observation_id = connection.execute(
+                "SELECT id FROM timer_state_observations WHERE import_event_id = ?",
+                (second.import_event_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                UPDATE discord_projection_links SET projection_row_id = ?
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (second_observation_id, source_event_id),
+            )
+    elif mutation == "wrong_kind":
+        with connect(database_path) as connection:
+            connection.execute(
+                "UPDATE import_events SET kind = 'profile' WHERE id = ?",
+                (first.import_event_id,),
+            )
+    else:
+        with connect(database_path) as connection:
+            connection.execute(
+                "UPDATE account_contexts SET normalized_name = 'other account'"
+            )
+
+    with pytest.raises(TimerProjectionTargetError, match=message):
+        _coordinate(coordinator, source_event_id, None)
+
+
+def test_projection_link_integrity_failure_is_propagated_fail_closed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    failure = ProjectionLinkIntegrityError("forced generation integrity failure")
+    monkeypatch.setattr(
+        "moa.repositories.projection_link_repository.ProjectionLinkRepository.resolve_current_generation_id",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(ProjectionLinkIntegrityError, match="forced generation integrity failure"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert _counts(connection)["import_events"] == 0
+        assert connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchone()[0] == "processing"
 
 
 def test_projection_slot_is_deterministic_and_normalized(tmp_path) -> None:
