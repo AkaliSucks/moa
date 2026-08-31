@@ -119,7 +119,7 @@ def _restore_generationless_projection_links(connection):
     )
     connection.execute("DROP TABLE discord_projection_links_generation_13")
     connection.execute("DROP TABLE projection_generations")
-    connection.execute("DELETE FROM schema_migrations WHERE version = 13")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 13")
 
 
 def _make_baseline_database(database_path):
@@ -148,6 +148,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 11")
         connection.execute("DELETE FROM schema_migrations WHERE version = 12")
         connection.execute("DELETE FROM schema_migrations WHERE version = 13")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 14")
 
 
 def _make_version_5_database(database_path):
@@ -573,6 +574,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
+        (14, "projection-generation-switchover"),
     ]
     with _open_database(database_path) as connection:
         assert connection.execute(
@@ -849,6 +851,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
+        (14, "projection-generation-switchover"),
     ]
 
 
@@ -948,7 +951,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 14))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 15))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -1100,8 +1103,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            13,
-            "projection-generation-foundation",
+            14,
+            "projection-generation-switchover",
         )
 
 
@@ -1306,6 +1309,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
+        (14, "projection-generation-switchover"),
     ]
 
 
@@ -1763,8 +1767,8 @@ def test_projection_generation_upgrade_backfills_and_preserves_source_and_link_r
             (link_id,),
         ).fetchone() == (1,)
         assert _migration_rows(database_path)[-1] == (
-            13,
-            "projection-generation-foundation",
+            14,
+            "projection-generation-switchover",
         )
 
 
@@ -1792,7 +1796,7 @@ def test_projection_link_identity_is_generation_qualified(tmp_path) -> None:
         ).fetchall() == [(1,), (2,)]
 
 
-def test_projection_generations_require_positive_ids_and_exactly_one_current(
+def test_projection_generation_switchover_replaces_immutable_current_contract(
     tmp_path,
 ) -> None:
     database_path = tmp_path / "catalog.db"
@@ -1810,21 +1814,98 @@ def test_projection_generations_require_positive_ids_and_exactly_one_current(
             connection.execute(
                 "INSERT INTO projection_generations (id, is_current) VALUES (2, 1)"
             )
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE projection_generations SET is_current = 0 WHERE id = 1"
-            )
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                "UPDATE projection_generations SET id = 2 WHERE id = 1"
-            )
-        with pytest.raises(sqlite3.IntegrityError):
-            connection.execute(
-                "DELETE FROM projection_generations WHERE id = 1"
-            )
+        connection.execute(
+            "INSERT INTO projection_generations (id, is_current) VALUES (2, 0)"
+        )
+        connection.execute(
+            "INSERT INTO projection_generations (id, is_current) VALUES (3, 0)"
+        )
+        connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+        connection.execute("UPDATE projection_generations SET is_current = 1 WHERE id = 3")
         assert connection.execute(
-            "SELECT id, is_current FROM projection_generations"
-        ).fetchall() == [(1, 1)]
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall() == [(1, 0), (2, 0), (3, 1)]
+        objects = {
+            (row[0], row[1])
+            for row in connection.execute(
+                "SELECT name, type FROM sqlite_master "
+                "WHERE tbl_name = 'projection_generations'"
+            )
+        }
+        assert ("uq_projection_generations_one_current", "index") in objects
+        assert not {
+            "uq_projection_generations_current",
+            "projection_generations_keep_current_on_update",
+            "projection_generations_keep_initial_id",
+            "projection_generations_keep_current_on_delete",
+        } & {name for name, _object_type in objects}
+
+
+def test_projection_generation_switchover_migration_retains_generation_one_history(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "catalog.db"
+    _make_baseline_database(database_path)
+
+    with _open_database(database_path) as connection:
+        run_migrations(connection, CATALOG_MIGRATIONS[:13])
+        source_event_id = _insert_source_event(
+            connection,
+            _insert_revision(connection, _insert_aggregate(connection)),
+        )
+        target_id = connection.execute(
+            """
+            INSERT INTO characters (
+                name, series, normalized_name, normalized_series, created_at, updated_at
+            ) VALUES ('Character', 'Series', 'character', 'series', 'now', 'now')
+            """
+        ).lastrowid
+        generation_one_link_id = _insert_projection_link(
+            connection,
+            source_event_id,
+            generation_id=1,
+            state="completed",
+            projection_table="characters",
+            projection_row_id=target_id,
+            completed_at="2026-08-31T00:00:00+00:00",
+        )
+        connection.execute(
+            "INSERT INTO projection_generations (id, is_current) VALUES (2, 0)"
+        )
+        generation_two_link_id = _insert_projection_link(
+            connection,
+            source_event_id,
+            generation_id=2,
+            projection_slot="historical-generation-two",
+        )
+        connection.commit()
+        retained = {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in (
+                "projection_generations",
+                "discord_projection_links",
+                "discord_source_events",
+                "characters",
+            )
+        }
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        assert {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in retained
+        } == retained
+        assert connection.execute(
+            "SELECT id, generation_id, projection_row_id "
+            "FROM discord_projection_links ORDER BY id"
+        ).fetchall() == [
+            (generation_one_link_id, 1, target_id),
+            (generation_two_link_id, 2, None),
+        ]
+        assert _migration_rows(database_path)[-1] == (
+            14,
+            "projection-generation-switchover",
+        )
 
 
 def test_failed_projection_generation_migration_rolls_back_schema_data_and_metadata(
@@ -2239,6 +2320,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
+        (14, "projection-generation-switchover"),
     ]
 
 
@@ -2272,6 +2354,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (11, "disablelist-toggle-presence"),
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
+        (14, "projection-generation-switchover"),
     ]
 
 
@@ -3473,11 +3556,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (14, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (15, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(14,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(15,)]

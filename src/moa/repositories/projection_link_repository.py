@@ -32,6 +32,70 @@ class ProjectionLinkRepository:
             )
         return generation_id
 
+    def switch_current_generation(self) -> int:
+        """Create and select a new generation inside the caller's transaction."""
+        if not self._connection.in_transaction:
+            raise ProjectionLinkIntegrityError(
+                "projection generation switchover requires a caller-owned transaction"
+            )
+
+        savepoint = "projection_generation_switchover"
+        self._connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            current_generation_id = self.resolve_current_generation_id()
+            maximum_id = self._connection.execute(
+                "SELECT MAX(id) FROM projection_generations"
+            ).fetchone()[0]
+            if maximum_id is None:
+                raise ProjectionLinkIntegrityError(
+                    "projection generation switchover requires an existing generation"
+                )
+            new_generation_id = int(maximum_id) + 1
+            if new_generation_id <= 0:
+                raise ProjectionLinkIntegrityError(
+                    "the new projection generation must have a positive id"
+                )
+
+            inserted = self._connection.execute(
+                "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+                (new_generation_id,),
+            )
+            if inserted.rowcount != 1:
+                raise ProjectionLinkIntegrityError(
+                    "exactly one new projection generation must be inserted"
+                )
+
+            retired = self._connection.execute(
+                "UPDATE projection_generations SET is_current = 0 "
+                "WHERE id = ? AND is_current = 1",
+                (current_generation_id,),
+            )
+            if retired.rowcount != 1:
+                raise ProjectionLinkIntegrityError(
+                    "exactly one current projection generation must be retired"
+                )
+
+            activated = self._connection.execute(
+                "UPDATE projection_generations SET is_current = 1 "
+                "WHERE id = ? AND is_current = 0",
+                (new_generation_id,),
+            )
+            if activated.rowcount != 1:
+                raise ProjectionLinkIntegrityError(
+                    "exactly one new projection generation must become current"
+                )
+            if self.resolve_current_generation_id() != new_generation_id:
+                raise ProjectionLinkIntegrityError(
+                    "projection generation switchover did not select the new generation"
+                )
+
+            self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            return new_generation_id
+        except Exception:
+            self._connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self._connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            raise
+
     def load_links(self, *, source_event_id: int, generation_id: int) -> tuple[sqlite3.Row, ...]:
         """Load only links belonging to one source event and generation."""
         return tuple(

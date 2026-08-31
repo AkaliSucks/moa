@@ -101,19 +101,167 @@ def test_generation_one_compatibility_and_caller_owned_rollback(tmp_path) -> Non
 def test_current_generation_resolution_fails_closed(tmp_path, current_state: str) -> None:
     path = _new_database(tmp_path)
     with _open_database(path) as connection:
-        connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
         if current_state == "zero":
             connection.execute("UPDATE projection_generations SET is_current = 0")
         elif current_state == "multiple":
-            connection.execute("DROP INDEX uq_projection_generations_current")
+            connection.execute("DROP INDEX uq_projection_generations_one_current")
             connection.execute("INSERT INTO projection_generations (id, is_current) VALUES (2, 1)")
         else:
-            connection.execute("DROP TRIGGER projection_generations_keep_initial_id")
             connection.execute("PRAGMA ignore_check_constraints = ON")
             connection.execute("UPDATE projection_generations SET id = -1 WHERE id = 1")
 
+        repository = ProjectionLinkRepository(connection)
+        before = connection.execute(
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall()
         with pytest.raises(ProjectionLinkIntegrityError):
-            ProjectionLinkRepository(connection).resolve_current_generation_id()
+            repository.resolve_current_generation_id()
+        with pytest.raises(ProjectionLinkIntegrityError):
+            repository.switch_current_generation()
+        assert connection.execute(
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall() == before
+
+
+def test_switchover_requires_a_caller_owned_transaction(tmp_path) -> None:
+    path = _new_database(tmp_path)
+    with _open_database(path) as connection:
+        with pytest.raises(ProjectionLinkIntegrityError, match="caller-owned transaction"):
+            ProjectionLinkRepository(connection).switch_current_generation()
+
+
+def test_switchover_retains_durable_evidence_links_and_targets(tmp_path) -> None:
+    path = _new_database(tmp_path)
+    with _open_database(path) as connection:
+        repository = ProjectionLinkRepository(connection)
+        source_event_id = _make_source_event(connection)
+        character_id = int(
+            connection.execute(
+                """
+                INSERT INTO characters (
+                    name, series, normalized_name, normalized_series, created_at, updated_at
+                ) VALUES ('Character', 'Series', 'character', 'series', ?, ?)
+                """,
+                (NOW.isoformat(), NOW.isoformat()),
+            ).lastrowid
+        )
+        connection.execute(
+            """
+            INSERT INTO discord_processing_attempts (
+                source_event_id, attempt_number, status, retryable,
+                parser_version, router_version, started_at, finished_at, created_at
+            ) VALUES (?, 1, 'succeeded', 0, 'parser-1', 'router-1', ?, ?, ?)
+            """,
+            (source_event_id, NOW.isoformat(), NOW.isoformat(), NOW.isoformat()),
+        )
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_server_attributions (
+                source_event_id, status, server_name, created_at, updated_at
+            ) VALUES (?, 'resolved', 'server', ?, ?)
+            """,
+            (source_event_id, NOW.isoformat(), NOW.isoformat()),
+        )
+        connection.execute(
+            """
+            INSERT INTO discord_source_event_account_attributions (
+                source_event_id, status, server_name, account_name, created_at, updated_at
+            ) VALUES (?, 'resolved', 'server', 'account', ?, ?)
+            """,
+            (source_event_id, NOW.isoformat(), NOW.isoformat()),
+        )
+        _claim(repository, source_event_id, 1)
+        repository.complete_claimed_link(
+            source_event_id=source_event_id,
+            generation_id=1,
+            projection_kind="catalog.profile",
+            projection_slot='{"account":"account","server":"server"}',
+            projection_table="characters",
+            projection_row_id=character_id,
+            completed_at=NOW,
+        )
+        connection.commit()
+
+        retained_tables = (
+            "discord_message_aggregates",
+            "discord_message_revisions",
+            "discord_source_events",
+            "discord_processing_attempts",
+            "discord_source_event_server_attributions",
+            "discord_source_event_account_attributions",
+            "discord_projection_links",
+            "characters",
+        )
+        before = {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in retained_tables
+        }
+
+        connection.execute("BEGIN IMMEDIATE")
+        assert repository.switch_current_generation() == 2
+        assert repository.switch_current_generation() == 3
+        assert connection.in_transaction is True
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT id, is_current FROM projection_generations ORDER BY id"
+            )
+        ] == [(1, 0), (2, 0), (3, 1)]
+        assert {
+            table: connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in retained_tables
+        } == before
+        connection.commit()
+
+        assert repository.resolve_current_generation_id() == 3
+        assert repository.load_links(
+            source_event_id=source_event_id, generation_id=1
+        )[0]["projection_row_id"] == character_id
+
+
+@pytest.mark.parametrize("failure", ["allocation", "transition"])
+def test_switchover_failure_rolls_back_to_the_prior_current_generation(
+    tmp_path, failure: str
+) -> None:
+    path = _new_database(tmp_path)
+    with _open_database(path) as connection:
+        repository = ProjectionLinkRepository(connection)
+        connection.execute("BEGIN IMMEDIATE")
+        if failure == "allocation":
+            connection.execute(
+                """
+                CREATE TRIGGER force_projection_generation_collision
+                BEFORE INSERT ON projection_generations
+                WHEN NEW.id = 2
+                BEGIN
+                    INSERT INTO projection_generations (id, is_current) VALUES (NEW.id, 0);
+                END
+                """
+            )
+        else:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_projection_generation_activation
+                BEFORE UPDATE OF is_current ON projection_generations
+                WHEN NEW.id = 2 AND NEW.is_current = 1
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced activation failure');
+                END
+                """
+            )
+
+        before = connection.execute(
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall()
+        with pytest.raises(sqlite3.IntegrityError):
+            repository.switch_current_generation()
+
+        assert connection.in_transaction is True
+        after = connection.execute(
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall()
+        assert after == before
+        assert [tuple(row) for row in after] == [(1, 1)]
 
 
 def test_loads_are_isolated_by_source_event_and_generation(tmp_path) -> None:

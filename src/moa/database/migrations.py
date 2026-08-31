@@ -1013,6 +1013,39 @@ def _apply_projection_generation_foundation(connection: sqlite3.Connection) -> N
     )
 
 
+def _apply_projection_generation_switchover(connection: sqlite3.Connection) -> None:
+    """Permit transactional generation switches while retaining one current row."""
+    generation_count = connection.execute(
+        "SELECT COUNT(*) FROM projection_generations"
+    ).fetchone()[0]
+    positive_generation_count = connection.execute(
+        "SELECT COUNT(*) FROM projection_generations WHERE id > 0"
+    ).fetchone()[0]
+    current_rows = connection.execute(
+        "SELECT id FROM projection_generations WHERE is_current = 1"
+    ).fetchall()
+    if (
+        generation_count != positive_generation_count
+        or len(current_rows) != 1
+        or int(current_rows[0][0]) <= 0
+    ):
+        raise MigrationError(
+            "Projection generation switchover requires exactly one positive current generation."
+        )
+
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute("DROP TRIGGER projection_generations_keep_initial_id")
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_delete")
+    connection.execute("DROP INDEX uq_projection_generations_current")
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX uq_projection_generations_one_current
+        ON projection_generations(is_current)
+        WHERE is_current = 1
+        """
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -1078,5 +1111,10 @@ CATALOG_MIGRATIONS = (
         version=13,
         name="projection-generation-foundation",
         apply=_apply_projection_generation_foundation,
+    ),
+    Migration(
+        version=14,
+        name="projection-generation-switchover",
+        apply=_apply_projection_generation_switchover,
     ),
 )
