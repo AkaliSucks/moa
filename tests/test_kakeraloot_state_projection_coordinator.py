@@ -149,6 +149,39 @@ def _record_attribution(discord, source_event_id, *, server="Server", account="A
     )
 
 
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.kakeraloot_state', ?,
+                  'kakeraloot_state_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (source_event_id, _slot("Server", "Account"), value, value, value, value),
+    )
+
+
 def _coordinate(
     coordinator,
     source_event_id,
@@ -218,7 +251,31 @@ def _snapshot(database_path):
         }
 
 
-def test_first_processing_persists_atomic_kakeraloot_state_projection(tmp_path) -> None:
+def _durable_snapshot(database_path) -> dict[str, tuple[tuple[object, ...], ...]]:
+    tables = (
+        "import_events",
+        "server_contexts",
+        "account_contexts",
+        "kakeraloot_state_observations",
+        "discord_projection_links",
+        "discord_source_events",
+        "discord_processing_attempts",
+        "discord_source_event_server_attributions",
+        "discord_source_event_account_attributions",
+    )
+    with connect(database_path) as connection:
+        return {
+            table: tuple(
+                tuple(row)
+                for row in connection.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            )
+            for table in tables
+        }
+
+
+def test_generation_one_processing_persists_atomic_kakeraloot_state_projection(
+    tmp_path,
+) -> None:
     database_path, _catalog, discord, coordinator = _repositories(tmp_path)
     source_event_id, attempt_id = _receive_and_begin(discord)
     _record_attribution(discord, source_event_id)
@@ -251,10 +308,12 @@ def test_first_processing_persists_atomic_kakeraloot_state_projection(tmp_path) 
             "kakeraloot_settings_observations": 0,
         }
         link = connection.execute(
-            "SELECT projection_kind, projection_slot, projection_table, projection_row_id, "
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, "
             "state, completed_at FROM discord_projection_links"
         ).fetchone()
         assert tuple(link) == (
+            1,
             "catalog.kakeraloot_state",
             '{"account":"account","server":"server"}',
             "kakeraloot_state_observations",
@@ -272,6 +331,157 @@ def test_first_processing_persists_atomic_kakeraloot_state_projection(tmp_path) 
                 "SELECT status, finished_at FROM discord_processing_attempts"
             ).fetchone()
         ) == ("succeeded", FINISHED_AT.isoformat())
+
+
+def test_generation_two_ignores_history_and_replay_is_durable_no_write(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _durable_snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay.replay_skipped is True
+    assert replay.projection_target == first.projection_target
+    assert _durable_snapshot(database_path) == before_replay
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                """
+                SELECT generation_id, projection_table, projection_row_id, state
+                FROM discord_projection_links
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (source_event_id,),
+            ).fetchall()
+        ] == [
+            (
+                2,
+                "kakeraloot_state_observations",
+                first.kakeraloot_state_observation_id,
+                "completed",
+            )
+        ]
+
+
+def test_generation_two_replay_fails_when_only_historical_link_exists(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _durable_snapshot(database_path)
+
+    with pytest.raises(
+        KakeralootStateProjectionIntegrityError,
+        match="inconsistent Kakeraloot-state projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _durable_snapshot(database_path) == before
+
+
+@pytest.mark.parametrize("mutation", ("wrong_import", "wrong_kind"))
+def test_current_generation_replay_rejects_target_import_ownership_corruption(
+    tmp_path, mutation: str
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+
+    if mutation == "wrong_import":
+        second = catalog.import_kakeraloot_state(
+            KAKERALOOT_STATE, "Server", "Account", "second", "test"
+        )
+        with connect(database_path) as connection:
+            second_id = connection.execute(
+                "SELECT id FROM kakeraloot_state_observations WHERE import_event_id = ?",
+                (second.import_event_id,),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                UPDATE discord_projection_links SET projection_row_id = ?
+                WHERE source_event_id = ? AND generation_id = 2
+                """,
+                (second_id, source_event_id),
+            )
+    else:
+        with connect(database_path) as connection:
+            connection.execute(
+                "UPDATE import_events SET kind = 'profile' WHERE id = ?",
+                (first.import_event_id,),
+            )
+    before = _durable_snapshot(database_path)
+
+    with pytest.raises(KakeralootStateProjectionTargetError):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _durable_snapshot(database_path) == before
+
+
+def test_generation_two_failure_rolls_back_new_writes_and_retains_history(
+    tmp_path, monkeypatch
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+    monkeypatch.setattr(
+        coordinator,
+        "_validate_kakeraloot_state_target",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("forced rollback")),
+    )
+
+    with pytest.raises(RuntimeError, match="forced rollback"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 2"
+        ).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT COUNT(*) FROM kakeraloot_state_observations"
+        ).fetchone()[0] == 0
+        assert tuple(
+            connection.execute(
+                "SELECT status, legacy_import_event_id FROM discord_source_events"
+            ).fetchone()
+        ) == ("processing", None)
+        assert connection.execute(
+            "SELECT status FROM discord_processing_attempts"
+        ).fetchone()[0] == "processing"
 
 
 def test_coordinator_uses_supplied_helper_without_public_wrapper_nesting(
