@@ -15,6 +15,18 @@ from moa.models.retention import (
     RetentionEligibilityReport,
 )
 from moa.repositories.data_health_repository import DataHealthRepository
+from moa.repositories.projection_link_repository import (
+    ProjectionLinkIntegrityError,
+    ProjectionLinkRepository,
+)
+from moa.services.projection_authority import get_projection_authority
+from moa.services.projection_expectations import (
+    DurableProjectionExpectationFactsError,
+    Expectedness,
+    ExpectedProjectionIdentity,
+    load_durable_projection_expectation_facts,
+    resolve_expected_projections,
+)
 
 
 RETENTION_DAYS = 90
@@ -116,9 +128,10 @@ class RetentionEligibilityRepository:
 
         as_of = _normalize_datetime(as_of, "as_of")
         cutoff = as_of - timedelta(days=RETENTION_DAYS)
-        import_selection = self._scan_import_messages(cutoff)
-        source_selection = self._scan_source_evidence(cutoff)
-        failure_selection = self._scan_failure_details(cutoff)
+        current_generation_id = self._resolve_current_generation_id()
+        import_selection = self._scan_import_messages(cutoff, current_generation_id)
+        source_selection = self._scan_source_evidence(cutoff, current_generation_id)
+        failure_selection = self._scan_failure_details(cutoff, current_generation_id)
         report = RetentionEligibilityReport(
             as_of=as_of,
             cutoff=cutoff,
@@ -135,7 +148,9 @@ class RetentionEligibilityRepository:
             failure_attempt_ids=failure_selection.row_ids,
         )
 
-    def _scan_source_evidence(self, cutoff: datetime) -> _CategorySelection:
+    def _scan_source_evidence(
+        self, cutoff: datetime, current_generation_id: int
+    ) -> _CategorySelection:
         result = _CategoryAccumulator()
         selected_ids: list[int] = []
         rows = self._connection.execute(
@@ -154,14 +169,16 @@ class RetentionEligibilityRepository:
                 result.already_expired_count += 1
                 continue
             row_id = int(row["id"])
-            lifecycle = self._source_lifecycle(row_id)
+            lifecycle = self._source_lifecycle(row_id, current_generation_id)
             if self._record_lifecycle(result, lifecycle, cutoff):
                 selected_ids.append(row_id)
         return _CategorySelection(
             result.finish(DISCORD_SOURCE_RAW_EVIDENCE), tuple(selected_ids)
         )
 
-    def _scan_failure_details(self, cutoff: datetime) -> _CategorySelection:
+    def _scan_failure_details(
+        self, cutoff: datetime, current_generation_id: int
+    ) -> _CategorySelection:
         result = _CategoryAccumulator()
         selected_ids: list[int] = []
         rows = self._connection.execute(
@@ -179,14 +196,18 @@ class RetentionEligibilityRepository:
             if state == "expired":
                 result.already_expired_count += 1
                 continue
-            lifecycle = self._source_lifecycle(int(row["source_event_id"]))
+            lifecycle = self._source_lifecycle(
+                int(row["source_event_id"]), current_generation_id
+            )
             if self._record_lifecycle(result, lifecycle, cutoff):
                 selected_ids.append(int(row["id"]))
         return _CategorySelection(
             result.finish(PROCESSING_ATTEMPT_FAILURE_DETAIL), tuple(selected_ids)
         )
 
-    def _scan_import_messages(self, cutoff: datetime) -> _CategorySelection:
+    def _scan_import_messages(
+        self, cutoff: datetime, current_generation_id: int
+    ) -> _CategorySelection:
         result = _CategoryAccumulator()
         selected_ids: list[int] = []
         rows = self._connection.execute(
@@ -219,7 +240,9 @@ class RetentionEligibilityRepository:
             if len(references) > 1:
                 lifecycle = _SourceLifecycle(None, AMBIGUOUS_SUCCESS_ANCHOR)
             elif references:
-                lifecycle = self._source_lifecycle(int(references[0]["id"]))
+                lifecycle = self._source_lifecycle(
+                    int(references[0]["id"]), current_generation_id
+                )
             else:
                 observed_at = _parse_timestamp(row["observed_at"])
                 lifecycle = _SourceLifecycle(
@@ -230,9 +253,18 @@ class RetentionEligibilityRepository:
                 selected_ids.append(int(row["id"]))
         return _CategorySelection(result.finish(IMPORT_RAW_MESSAGE), tuple(selected_ids))
 
-    def _source_lifecycle(self, source_event_id: int) -> _SourceLifecycle:
+    def _resolve_current_generation_id(self) -> int:
+        try:
+            return ProjectionLinkRepository(self._connection).resolve_current_generation_id()
+        except (ProjectionLinkIntegrityError, ValueError) as error:
+            raise RetentionEligibilityDataError(str(error)) from error
+
+    def _source_lifecycle(
+        self, source_event_id: int, current_generation_id: int
+    ) -> _SourceLifecycle:
         source = self._connection.execute(
-            "SELECT status FROM discord_source_events WHERE id = ?", (source_event_id,)
+            "SELECT status, legacy_import_event_id FROM discord_source_events WHERE id = ?",
+            (source_event_id,),
         ).fetchone()
         if source is None:
             return _SourceLifecycle(None, MISSING_SUCCESS_ANCHOR)
@@ -293,24 +325,70 @@ class RetentionEligibilityRepository:
         if anchor is None:
             return _SourceLifecycle(None, MISSING_SUCCESS_ANCHOR)
 
-        incomplete_link = self._connection.execute(
-            """
-            SELECT 1
-            FROM discord_projection_links
-            WHERE source_event_id = ?
-              AND (
-                  state != 'completed'
-                  OR completed_at IS NULL
-                  OR projection_table IS NULL
-                  OR projection_row_id IS NULL
-              )
-            LIMIT 1
-            """,
-            (source_event_id,),
-        ).fetchone()
-        if incomplete_link is not None:
+        if not self._projection_links_complete(
+            source_event_id,
+            current_generation_id,
+            has_import_provenance=source["legacy_import_event_id"] is not None,
+        ):
             return _SourceLifecycle(None, INCOMPLETE_PROJECTION)
         return _SourceLifecycle(anchor, None)
+
+    def _projection_links_complete(
+        self,
+        source_event_id: int,
+        current_generation_id: int,
+        *,
+        has_import_provenance: bool,
+    ) -> bool:
+        links = ProjectionLinkRepository(self._connection).load_links(
+            source_event_id=source_event_id,
+            generation_id=current_generation_id,
+        )
+        expected_set = None
+        if has_import_provenance:
+            try:
+                facts = load_durable_projection_expectation_facts(
+                    self._connection, source_event_id
+                )
+            except DurableProjectionExpectationFactsError:
+                return False
+            expected_set = resolve_expected_projections(facts)
+
+        observed: set[ExpectedProjectionIdentity] = set()
+        for link in links:
+            if (
+                link["state"] != "completed"
+                or link["completed_at"] is None
+                or link["projection_table"] is None
+                or link["projection_row_id"] is None
+            ):
+                return False
+            try:
+                authority = get_projection_authority(link["projection_kind"])
+            except (KeyError, TypeError):
+                return False
+            if link["projection_table"] != authority.target_table:
+                return False
+            observed.add(
+                ExpectedProjectionIdentity(
+                    projection_kind=str(link["projection_kind"]),
+                    projection_slot=str(link["projection_slot"]),
+                )
+            )
+
+        if len(observed) != len(links):
+            return False
+        if expected_set is None:
+            return True
+        if any(
+            identity not in observed
+            for identity in expected_set.known_expected_identities
+        ):
+            return False
+        return all(
+            expected_set.expectedness_for(identity) is not Expectedness.NOT_EXPECTED
+            for identity in observed
+        )
 
     @staticmethod
     def _record_lifecycle(
