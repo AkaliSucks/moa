@@ -136,6 +136,7 @@ def _coordinate(
     server=" Server ",
     account=" Account ",
     state=KAKERA_STATE,
+    observed_at=OBSERVED_AT,
 ):
     return coordinator.coordinate_kakera_state(
         source_event_id=source_event_id,
@@ -145,7 +146,7 @@ def _coordinate(
         account=account,
         raw="kakera payload",
         source="discord",
-        observed_at=OBSERVED_AT,
+        observed_at=observed_at,
         finished_at=FINISHED_AT,
     )
 
@@ -666,6 +667,25 @@ def test_succeeded_replay_returns_existing_ids_and_inserts_nothing(tmp_path) -> 
         projection_target=first.projection_target,
     )
     assert _snapshot(database_path) == before
+
+
+def test_succeeded_replay_observed_at_mismatch_fails_without_writes(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _record_attribution(discord, source_event_id)
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before = _snapshot(database_path)
+    replay_observed_at = datetime(2026, 7, 27, 12, 2, tzinfo=timezone.utc)
+
+    with pytest.raises(KakeraStateProjectionTargetError, match="mismatched observation time"):
+        _coordinate(coordinator, source_event_id, None, observed_at=replay_observed_at)
+
+    assert _snapshot(database_path) == before
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT observed_at FROM kakera_state_observations WHERE id = ?",
+            (first.kakera_state_observation_id,),
+        ).fetchone()[0] == OBSERVED_AT.isoformat()
 
 
 @pytest.mark.parametrize("field", ("kakera_balance", "badges_json"))

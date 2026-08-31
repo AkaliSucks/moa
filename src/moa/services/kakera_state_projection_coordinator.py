@@ -135,6 +135,7 @@ class KakeraStateProjectionCoordinator:
                         state=state,
                         projection_links=projection_links,
                         generation_id=generation_id,
+                        observed_at=observed_at,
                     )
                 if len(durable) != 1:
                     raise KakeraStateProjectionIntegrityError(
@@ -147,6 +148,7 @@ class KakeraStateProjectionCoordinator:
                     state=state,
                     projection_links=projection_links,
                     generation_id=generation_id,
+                    observed_at=observed_at,
                 )
 
             links = self._load_links(
@@ -238,6 +240,7 @@ class KakeraStateProjectionCoordinator:
         state: KakeraStateSnapshot,
         projection_links: ProjectionLinkRepository,
         generation_id: int,
+        observed_at: datetime,
     ) -> KakeraStateProjectionResult:
         import_event_id = event["legacy_import_event_id"]
         if import_event_id is None:
@@ -283,6 +286,7 @@ class KakeraStateProjectionCoordinator:
             import_event_id=int(import_event_id),
             projection_slot=projection_slot,
             state=state,
+            observed_at=observed_at,
         )
         return KakeraStateProjectionResult(
             imported_count=0,
