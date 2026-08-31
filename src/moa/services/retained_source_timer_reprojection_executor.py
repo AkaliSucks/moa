@@ -236,31 +236,32 @@ class RetainedSourceTimerReprojectionExecutor:
             raise RetainedSourceTimerReprojectionError(
                 "Timer reprojection admission has no historical evidence"
             )
-        historical_generation_id = max(int(row["generation_id"]) for row in historical)
+        groups: dict[int, list[sqlite3.Row]] = {}
+        for row in historical:
+            groups.setdefault(int(row["generation_id"]), []).append(row)
+        historical_generation_id = max(groups)
         if historical_generation_id != admission.historical_generation_id:
             raise RetainedSourceTimerReprojectionError(
                 "Timer reprojection admission has a forged historical generation"
             )
-        selected = tuple(
-            row for row in historical if int(row["generation_id"]) == historical_generation_id
-        )
-        try:
-            payloads = self._admission_service._validate_link_set(
-                connection,
-                selected,
-                admission.expected_identities,
-                admission.import_event_id,
-                admission.server,
-                admission.account,
-            )
-        except RetainedSourceReprojectionAdmissionError as error:
-            raise RetainedSourceTimerReprojectionError(
-                f"Timer reprojection historical evidence changed: {error.reason.value}"
-            ) from error
-        if payloads != admission.payloads:
-            raise RetainedSourceTimerReprojectionError(
-                "Timer reprojection admission payload changed before replay"
-            )
+        for generation_links in groups.values():
+            try:
+                payloads = self._admission_service._validate_link_set(
+                    connection,
+                    tuple(generation_links),
+                    admission.expected_identities,
+                    admission.import_event_id,
+                    admission.server,
+                    admission.account,
+                )
+            except RetainedSourceReprojectionAdmissionError as error:
+                raise RetainedSourceTimerReprojectionError(
+                    f"Timer reprojection historical evidence changed: {error.reason.value}"
+                ) from error
+            if payloads != admission.payloads:
+                raise RetainedSourceTimerReprojectionError(
+                    "Timer reprojection admission payload changed before replay"
+                )
 
     def _validate_admission_shape(self, admission):
         if not isinstance(admission, RetainedSourceReprojectionAdmission):

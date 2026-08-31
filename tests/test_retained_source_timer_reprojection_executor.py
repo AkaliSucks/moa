@@ -210,6 +210,33 @@ def test_exact_retry_is_a_no_write_replay(database_path) -> None:
         assert _dump(connection) == before
 
 
+def test_exact_retry_rejects_corrupt_earlier_historical_generation_without_writing(
+    database_path,
+) -> None:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        first_admission = _fixture(connection)
+        _execute(connection, first_admission)
+        assert ProjectionLinkRepository(connection).switch_current_generation() == 3
+        admission = RetainedSourceReprojectionAdmissionService().admit(
+            connection, first_admission.source_event_id
+        )
+        _execute(connection, admission)
+        connection.execute(
+            "UPDATE discord_projection_links SET projection_row_id = 999 "
+            "WHERE source_event_id = ? AND generation_id = 1",
+            (admission.source_event_id,),
+        )
+        before = _dump(connection)
+
+        with pytest.raises(
+            RetainedSourceTimerReprojectionError, match="historical evidence changed"
+        ):
+            _execute(connection, admission)
+
+        assert _dump(connection) == before
+
+
 def test_requires_a_caller_owned_transaction(database_path) -> None:
     with connect(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
