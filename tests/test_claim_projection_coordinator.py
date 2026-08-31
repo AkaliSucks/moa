@@ -70,6 +70,74 @@ def _receive_and_begin(discord, *, suffix="one"):
     return received.source_event_id, attempt.attempt_id
 
 
+def _activate_test_projection_generation(
+    connection: sqlite3.Connection, generation_id: int
+) -> None:
+    """Move a temporary test database to a later projection generation."""
+    connection.execute("DROP TRIGGER projection_generations_keep_current_on_update")
+    connection.execute(
+        "INSERT INTO projection_generations (id, is_current) VALUES (?, 0)",
+        (generation_id,),
+    )
+    connection.execute("UPDATE projection_generations SET is_current = 0 WHERE id = 1")
+    connection.execute(
+        "UPDATE projection_generations SET is_current = 1 WHERE id = ?",
+        (generation_id,),
+    )
+
+
+def _insert_historical_completed_link(
+    connection: sqlite3.Connection, source_event_id: int
+) -> None:
+    value = OBSERVED_AT.isoformat()
+    connection.execute(
+        """
+        INSERT INTO discord_projection_links (
+            source_event_id, generation_id, projection_kind, projection_slot,
+            projection_table, projection_row_id, state,
+            claimed_at, completed_at, created_at, updated_at
+        ) VALUES (?, 1, 'catalog.claim', ?,
+                  'claim_observations', 987, 'completed', ?, ?, ?, ?)
+        """,
+        (
+            source_event_id,
+            claim_projection_slot(
+                CatalogRepository._normalize("Server"),
+                CatalogRepository._normalize("Account"),
+                CatalogRepository._normalize(CLAIM.character_name),
+            ),
+            value,
+            value,
+            value,
+            value,
+        ),
+    )
+
+
+def _projection_snapshot(database_path) -> tuple[object, ...]:
+    with connect(database_path) as connection:
+        return (
+            tuple(tuple(row) for row in connection.execute(
+                "SELECT * FROM projection_generations ORDER BY id"
+            )),
+            tuple(tuple(row) for row in connection.execute(
+                "SELECT * FROM discord_projection_links ORDER BY id"
+            )),
+            tuple(tuple(row) for row in connection.execute(
+                "SELECT * FROM import_events ORDER BY id"
+            )),
+            tuple(tuple(row) for row in connection.execute(
+                "SELECT * FROM claim_observations ORDER BY id"
+            )),
+            tuple(connection.execute(
+                "SELECT status, legacy_import_event_id, updated_at FROM discord_source_events"
+            ).fetchone()),
+            tuple(connection.execute(
+                "SELECT status, finished_at, failure_code FROM discord_processing_attempts"
+            ).fetchone()),
+        )
+
+
 def _coordinate(coordinator, source_event_id, attempt_id, *, server=" Server ", account=" Account ", claim=CLAIM):
     return coordinator.coordinate_claim(
         source_event_id=source_event_id,
@@ -278,6 +346,168 @@ def test_first_claim_processing_and_projection_slot(tmp_path) -> None:
         assert tuple(attempt) == ("succeeded",)
 
 
+def test_generation_one_compatibility_persists_generation_qualified_claim(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+
+    result = _coordinate(coordinator, source_event_id, attempt_id)
+
+    with connect(database_path) as connection:
+        link = connection.execute(
+            "SELECT generation_id, projection_kind, projection_slot, projection_table, "
+            "projection_row_id, state FROM discord_projection_links"
+        ).fetchone()
+    assert tuple(link) == (
+        1,
+        "catalog.claim",
+        claim_projection_slot("server", "account", "claim character"),
+        "claim_observations",
+        result.claim_observation_id,
+        "completed",
+    )
+
+
+def test_generation_two_isolates_history_and_current_replay_is_no_write(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+        historical_before = tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        )
+
+    first = _coordinate(coordinator, source_event_id, attempt_id)
+    before_replay = _projection_snapshot(database_path)
+    replay = _coordinate(coordinator, source_event_id, None)
+
+    assert replay == ClaimProjectionResult(
+        imported_count=0,
+        import_event_id=first.import_event_id,
+        claim_observation_id=first.claim_observation_id,
+        character_id=None,
+        replay_skipped=True,
+        durable_success_recorded=True,
+        projection_target=first.projection_target,
+    )
+    with connect(database_path) as connection:
+        assert _projection_snapshot(database_path) == before_replay
+        assert tuple(
+            connection.execute(
+                "SELECT * FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()
+        ) == historical_before
+        assert tuple(connection.execute(
+            "SELECT generation_id, projection_table, projection_row_id, state "
+            "FROM discord_projection_links WHERE source_event_id = ? AND generation_id = 2",
+            (source_event_id,),
+        ).fetchone()) == (
+            2,
+            "claim_observations",
+            first.claim_observation_id,
+            "completed",
+        )
+
+
+def test_generation_two_replay_fails_when_only_historical_link_exists(tmp_path) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    _coordinate(coordinator, source_event_id, attempt_id)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    before = _projection_snapshot(database_path)
+
+    with pytest.raises(
+        ClaimProjectionIntegrityError,
+        match="inconsistent claim projection link",
+    ):
+        _coordinate(coordinator, source_event_id, None)
+
+    assert _projection_snapshot(database_path) == before
+
+
+@pytest.mark.parametrize("corruption", ("malformed", "ownership", "slot"))
+def test_generation_two_replay_rejects_current_link_corruption_without_writes(
+    tmp_path, corruption
+) -> None:
+    database_path, catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord, suffix=corruption)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+    _coordinate(coordinator, source_event_id, attempt_id)
+
+    if corruption == "malformed":
+        with connect(database_path) as connection:
+            connection.execute("PRAGMA ignore_check_constraints = ON")
+            connection.execute(
+                "UPDATE discord_projection_links SET projection_row_id = NULL "
+                "WHERE source_event_id = ? AND generation_id = 2",
+                (source_event_id,),
+            )
+    elif corruption == "ownership":
+        other = catalog.import_claim(
+            CLAIM, "Server", "Account", "other claim", "discord"
+        )
+        with connect(database_path) as connection:
+            target = connection.execute(
+                "SELECT id FROM claim_observations WHERE import_event_id = ?",
+                (other.import_event_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE discord_projection_links SET projection_row_id = ? "
+                "WHERE source_event_id = ? AND generation_id = 2",
+                (target, source_event_id),
+            )
+    else:
+        with connect(database_path) as connection:
+            connection.execute(
+                "UPDATE discord_projection_links SET projection_slot = ? "
+                "WHERE source_event_id = ? AND generation_id = 2",
+                (claim_projection_slot("server", "other account", "claim character"), source_event_id),
+            )
+
+    before = _projection_snapshot(database_path)
+    with pytest.raises((ClaimProjectionIntegrityError, ClaimProjectionTargetError)):
+        _coordinate(coordinator, source_event_id, None)
+    assert _projection_snapshot(database_path) == before
+
+
+@pytest.mark.parametrize("failure", ("post_import", "completion"))
+def test_generation_two_failure_rolls_back_new_writes_and_retains_history(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, failure
+) -> None:
+    database_path, _catalog, discord, coordinator = _repositories(tmp_path)
+    source_event_id, attempt_id = _receive_and_begin(discord)
+    with connect(database_path) as connection:
+        _activate_test_projection_generation(connection, 2)
+        _insert_historical_completed_link(connection, source_event_id)
+    before = _projection_snapshot(database_path)
+
+    if failure == "post_import":
+        monkeypatch.setattr(
+            coordinator,
+            "_validate_claim_target",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced post-import rollback")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            coordinator,
+            "_complete_projection_link",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("forced completion rollback")
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="forced (post-import|completion) rollback"):
+        _coordinate(coordinator, source_event_id, attempt_id)
+
+    assert _projection_snapshot(database_path) == before
+
+
 @pytest.mark.parametrize(
     ("category", "message"),
     (
@@ -470,13 +700,23 @@ def test_succeeded_replay_preserves_unknown_durable_claim_identity_without_parse
     observed_expectedness = []
     original_replay = coordinator._coordinate_replay
 
-    def capture_expected_set(connection, event, expected_set, *, target_projection_slot):
+    def capture_expected_set(
+        connection,
+        event,
+        expected_set,
+        *,
+        target_projection_slot,
+        projection_links,
+        generation_id,
+    ):
         observed_expectedness.append(expected_set.assessments[0].expectedness)
         return original_replay(
             connection,
             event,
             expected_set,
             target_projection_slot=target_projection_slot,
+            projection_links=projection_links,
+            generation_id=generation_id,
         )
 
     monkeypatch.setattr(coordinator, "_coordinate_replay", capture_expected_set)
