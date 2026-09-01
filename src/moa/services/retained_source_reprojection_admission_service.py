@@ -37,6 +37,7 @@ from moa.services.projection_expectations import (
     DurableProjectionExpectationFactsError,
     Expectedness,
     ExpectedProjectionIdentity,
+    antidisable_page_projection_slot,
     load_durable_projection_expectation_facts,
     resolve_expected_projections,
 )
@@ -125,6 +126,7 @@ _SUPPORTED_FAMILIES = frozenset(
         "sphere_result",
         "profile",
         "roll",
+        "antidisable",
     }
 )
 _SERVER_ONLY_FAMILIES = frozenset({"server_settings", "kakeraloot_settings"})
@@ -193,11 +195,6 @@ class RetainedSourceReprojectionAdmissionService:
 
         attempt_id = self._validate_attempts(connection, source_event_id)
         import_event_id, family = self._validate_provenance(connection, source_event_id, source)
-        if family == "antidisable":
-            self._reject(
-                ReprojectionAdmissionRejection.ANTIDISABLE_UNSUPPORTED,
-                "Antidisable Page is not reconstructible",
-            )
         if family not in _SUPPORTED_FAMILIES:
             self._reject(
                 ReprojectionAdmissionRejection.UNSUPPORTED_FAMILY,
@@ -510,14 +507,43 @@ class RetainedSourceReprojectionAdmissionService:
             target = connection.execute(
                 f"SELECT * FROM {authority.target_table} WHERE id = ?", (target_id,)
             ).fetchone()
-            if target is None or int(target["import_event_id"]) != import_event_id:
+            if target is None:
                 self._reject(
                     ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
                     "projection target is missing or owned by another import",
                 )
-            enriched = self._validate_and_enrich_target(
-                connection, authority.target_table, target, server, account
-            )
+            if identity.projection_kind == "catalog.antidisable_page":
+                if (
+                    authority.target_table != "import_events"
+                    or target_id != import_event_id
+                    or int(target["id"]) != import_event_id
+                    or str(target["kind"]) != "antidisable"
+                ):
+                    self._reject(
+                        ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+                        "Antidisable target does not exactly own its import event",
+                    )
+                enriched = self._validate_antidisable_target(
+                    connection,
+                    target,
+                    identity.projection_slot,
+                    import_event_id,
+                    server,
+                    account,
+                )
+            else:
+                try:
+                    target_owned = int(target["import_event_id"]) == import_event_id
+                except (IndexError, TypeError, ValueError):
+                    target_owned = False
+                if not target_owned:
+                    self._reject(
+                        ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+                        "projection target is missing or owned by another import",
+                    )
+                enriched = self._validate_and_enrich_target(
+                    connection, authority.target_table, target, server, account
+                )
             payloads.append(
                 DurableReprojectionPayload(
                     identity.projection_kind,
@@ -528,6 +554,134 @@ class RetainedSourceReprojectionAdmissionService:
                 )
             )
         return tuple(payloads)
+
+    def _validate_antidisable_target(
+        self,
+        connection: sqlite3.Connection,
+        target: sqlite3.Row,
+        projection_slot: str,
+        import_event_id: int,
+        server: str,
+        account: str | None,
+    ) -> dict[str, object]:
+        """Validate and freeze one prospective Antidisable page without writing."""
+        try:
+            if account is None:
+                raise ValueError("account attribution")
+            page_rows = connection.execute(
+                "SELECT * FROM harem_scan_pages WHERE import_event_id = ?",
+                (import_event_id,),
+            ).fetchall()
+            if len(page_rows) != 1:
+                raise ValueError("page association")
+            page = page_rows[0]
+            scan_id = self._positive_int(page["harem_scan_id"], "scan id")
+            page_number = self._positive_int(page["page_number"], "page number")
+            slots_used = self._nonnegative_int(page["slots_used"], "slots used")
+            slots_capacity = self._nonnegative_int(page["slots_capacity"], "slots capacity")
+            if slots_used > slots_capacity:
+                raise ValueError("slot usage exceeds capacity")
+            if projection_slot != antidisable_page_projection_slot(
+                server, account, scan_id, page_number
+            ):
+                raise ValueError("canonical page slot")
+
+            scan = connection.execute(
+                "SELECT hs.*, ac.normalized_name AS account, sc.normalized_name AS server "
+                "FROM harem_scans hs "
+                "JOIN account_contexts ac ON ac.id = hs.account_context_id "
+                "JOIN server_contexts sc ON sc.id = ac.server_context_id "
+                "WHERE hs.id = ?",
+                (scan_id,),
+            ).fetchone()
+            if (
+                scan is None
+                or str(scan["scan_kind"]) != "antidisable"
+                or str(scan["server"]) != server
+                or str(scan["account"]) != account
+            ):
+                raise ValueError("scan ownership")
+            page_count = self._positive_int(scan["expected_page_count"], "page count")
+            if page_number > page_count:
+                raise ValueError("page number exceeds page count")
+            started_at = datetime.fromisoformat(str(scan["started_at"]))
+            completed_at = scan["completed_at"]
+            if completed_at is not None and datetime.fromisoformat(str(completed_at)) < started_at:
+                raise ValueError("scan lifecycle")
+
+            observed_at = datetime.fromisoformat(str(target["observed_at"]))
+            series_rows = connection.execute(
+                "SELECT * FROM antidisable_series_observations "
+                "WHERE import_event_id = ? ORDER BY id",
+                (import_event_id,),
+            ).fetchall()
+            series: list[dict[str, object]] = []
+            character_count: int | None = None
+            count_initialized = False
+            for row in series_rows:
+                row_count = row["antidisabled_character_count"]
+                if row_count is not None:
+                    row_count = self._nonnegative_int(row_count, "character count")
+                if not count_initialized:
+                    character_count = row_count
+                    count_initialized = True
+                elif row_count != character_count:
+                    raise ValueError("character count fidelity")
+                name = str(row["series_name"])
+                if (
+                    int(row["account_context_id"]) != int(scan["account_context_id"])
+                    or str(row["normalized_series_name"]) != CatalogRepository._normalize(name)
+                    or datetime.fromisoformat(str(row["observed_at"])) != observed_at
+                    or int(row["import_event_id"]) != import_event_id
+                    or int(row["harem_scan_id"]) != scan_id
+                ):
+                    raise ValueError("series ownership")
+                series.append(
+                    {
+                        "series_name": name,
+                        "normalized_series_name": str(row["normalized_series_name"]),
+                        "antidisabled_character_count": row_count,
+                    }
+                )
+            if page_number == 1 and (not series_rows or character_count is None):
+                raise ValueError("first-page character count")
+
+            values = dict(target)
+            values.update(
+                {
+                    "scan_id": scan_id,
+                    "page_number": page_number,
+                    "page_count": page_count,
+                    "slots_used": slots_used,
+                    "slots_capacity": slots_capacity,
+                    "series": series,
+                }
+            )
+            return values
+        except (
+            AttributeError,
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            sqlite3.IntegrityError,
+        ) as error:
+            self._reject(
+                ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+                f"Antidisable page payload is malformed or incomplete: {error}",
+            )
+
+    @staticmethod
+    def _positive_int(value: object, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(field)
+        return value
+
+    @staticmethod
+    def _nonnegative_int(value: object, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(field)
+        return value
 
     def _validate_and_enrich_target(
         self,

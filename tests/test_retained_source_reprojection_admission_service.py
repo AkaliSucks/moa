@@ -11,6 +11,7 @@ from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.projection_link_repository import ProjectionLinkRepository
 from moa.services.projection_authority import get_projection_authority
 from moa.services.projection_expectations import (
+    antidisable_page_projection_slot,
     load_durable_projection_expectation_facts,
     resolve_expected_projections,
 )
@@ -194,7 +195,25 @@ def _fixture(connection: sqlite3.Connection, family: str = "wishlist") -> int:
             (family, NOW),
         ).lastrowid
     )
-    targets = {} if family == "antidisable" else _insert_target(connection, family, import_id)
+    if family == "antidisable":
+        connection.execute(
+            "INSERT INTO harem_scans (id, account_context_id, expected_page_count, started_at, completed_at, scan_kind) VALUES (1, 1, 2, ?, NULL, 'antidisable')",
+            (NOW,),
+        )
+        connection.execute(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id, slots_used, slots_capacity) VALUES (1, 1, ?, 2, 10)",
+            (import_id,),
+        )
+        connection.executemany(
+            "INSERT INTO antidisable_series_observations (account_context_id, series_name, normalized_series_name, antidisabled_character_count, observed_at, import_event_id, harem_scan_id) VALUES (1, ?, ?, 4, ?, ?, 1)",
+            (
+                ("Series", "series", NOW, import_id),
+                ("Series", "series", NOW, import_id),
+            ),
+        )
+        targets = {"catalog.antidisable_page": import_id}
+    else:
+        targets = _insert_target(connection, family, import_id)
     connection.execute(
         "INSERT INTO discord_message_aggregates (id, platform, guild_id, channel_id, message_id, first_received_at, last_received_at, created_at, updated_at) VALUES (1, 'discord', 'g', 'c', 'm', ?, ?, ?, ?)",
         (NOW, NOW, NOW, NOW),
@@ -222,27 +241,26 @@ def _fixture(connection: sqlite3.Connection, family: str = "wishlist") -> int:
             "INSERT INTO discord_source_event_account_attributions (source_event_id, status, server_name, account_name, created_at, updated_at) VALUES (?, 'resolved', 'Server', 'Account', ?, ?)",
             (source_id, NOW, NOW),
         )
-    if family != "antidisable":
-        expected = resolve_expected_projections(
-            load_durable_projection_expectation_facts(connection, source_id)
+    expected = resolve_expected_projections(
+        load_durable_projection_expectation_facts(connection, source_id)
+    )
+    for identity in expected.known_expected_identities:
+        authority = get_projection_authority(identity.projection_kind)
+        target_id = targets[identity.projection_kind]
+        connection.execute(
+            "INSERT INTO discord_projection_links (source_event_id, generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)",
+            (
+                source_id,
+                identity.projection_kind,
+                identity.projection_slot,
+                authority.target_table,
+                target_id,
+                NOW,
+                NOW,
+                NOW,
+                NOW,
+            ),
         )
-        for identity in expected.known_expected_identities:
-            authority = get_projection_authority(identity.projection_kind)
-            target_id = targets[identity.projection_kind]
-            connection.execute(
-                "INSERT INTO discord_projection_links (source_event_id, generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, 1, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)",
-                (
-                    source_id,
-                    identity.projection_kind,
-                    identity.projection_slot,
-                    authority.target_table,
-                    target_id,
-                    NOW,
-                    NOW,
-                    NOW,
-                    NOW,
-                ),
-            )
     assert ProjectionLinkRepository(connection).switch_current_generation() == 2
     return source_id
 
@@ -388,7 +406,7 @@ def test_rejects_timezone_mismatch_on_failed_attempt_before_unresolved_attributi
         connection.rollback()
 
 
-def test_rejects_unknown_roll_assessment_and_antidisable(database_path):
+def test_rejects_unknown_roll_assessment(database_path):
     with connect(database_path) as connection:
         connection.execute("BEGIN")
         roll_id = _fixture(connection, "roll")
@@ -400,13 +418,259 @@ def test_rejects_unknown_roll_assessment_and_antidisable(database_path):
             RetainedSourceReprojectionAdmissionService().admit(connection, roll_id)
         assert caught.value.reason is ReprojectionAdmissionRejection.EXPECTATIONS_UNKNOWN
         connection.rollback()
-    CatalogRepository(database_path)
+
+
+@pytest.mark.parametrize(("slots_used", "slots_capacity"), [(2, 10), (0, 0)])
+def test_admits_prospective_antidisable_pages_without_writes(
+    database_path, slots_used, slots_capacity
+):
     with connect(database_path) as connection:
         connection.execute("BEGIN")
         source_id = _fixture(connection, "antidisable")
+        connection.execute(
+            "UPDATE harem_scan_pages SET slots_used = ?, slots_capacity = ?",
+            (slots_used, slots_capacity),
+        )
+        before = connection.total_changes
+        admitted = RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        fields = dict(admitted.payloads[0].fields)
+        assert admitted.expected_identities[0].projection_slot == antidisable_page_projection_slot(
+            "server", "account", 1, 1
+        )
+        assert admitted.payloads[0].target_table == "import_events"
+        assert admitted.payloads[0].historical_target_id == admitted.import_event_id
+        assert fields["slots_used"] == slots_used
+        assert fields["slots_capacity"] == slots_capacity
+        assert fields["series"] == (
+            (
+                ("antidisabled_character_count", 4),
+                ("normalized_series_name", "series"),
+                ("series_name", "Series"),
+            ),
+            (
+                ("antidisabled_character_count", 4),
+                ("normalized_series_name", "series"),
+                ("series_name", "Series"),
+            ),
+        )
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+@pytest.mark.parametrize(
+    ("slots_used", "slots_capacity"),
+    [(None, None), (None, 10), (2, None), ("bad", 10), (-1, 10), (11, 10)],
+)
+def test_rejects_legacy_partial_and_invalid_antidisable_slot_evidence(
+    database_path, slots_used, slots_capacity
+):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            "UPDATE harem_scan_pages SET slots_used = ?, slots_capacity = ?",
+            (slots_used, slots_capacity),
+        )
+        before = connection.total_changes
         with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
             RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
-        assert caught.value.reason is ReprojectionAdmissionRejection.ANTIDISABLE_UNSUPPORTED
+        assert caught.value.reason is ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "UPDATE harem_scans SET scan_kind = 'keys'",
+        "UPDATE harem_scans SET expected_page_count = 0",
+        "UPDATE harem_scan_pages SET page_number = 3",
+        "UPDATE harem_scan_pages SET harem_scan_id = 2",
+        "UPDATE antidisable_series_observations SET account_context_id = 2 WHERE id = (SELECT MIN(id) FROM antidisable_series_observations)",
+        "UPDATE antidisable_series_observations SET normalized_series_name = 'wrong' WHERE id = (SELECT MIN(id) FROM antidisable_series_observations)",
+        "UPDATE antidisable_series_observations SET antidisabled_character_count = NULL WHERE id = (SELECT MIN(id) FROM antidisable_series_observations)",
+        "UPDATE antidisable_series_observations SET harem_scan_id = 2 WHERE id = (SELECT MIN(id) FROM antidisable_series_observations)",
+    ],
+)
+def test_rejects_antidisable_scan_page_context_and_series_corruption(database_path, mutation):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        connection.execute(
+            "INSERT INTO account_contexts (id, server_context_id, name, normalized_name, created_at, updated_at) VALUES (2, 1, 'Other', 'other', ?, ?)",
+            (NOW, NOW),
+        )
+        connection.execute(
+            "INSERT INTO harem_scans (id, account_context_id, expected_page_count, started_at, completed_at, scan_kind) VALUES (2, 2, 2, ?, NULL, 'antidisable')",
+            (NOW,),
+        )
+        connection.execute(mutation)
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason in {
+            ReprojectionAdmissionRejection.EXPECTATIONS_UNKNOWN,
+            ReprojectionAdmissionRejection.HISTORICAL_LINKS_INCOHERENT,
+            ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+        }
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+def test_admits_antidisable_continuation_page_with_nullable_character_count(database_path):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        connection.execute("UPDATE harem_scan_pages SET page_number = 2")
+        connection.execute(
+            "UPDATE antidisable_series_observations SET antidisabled_character_count = NULL"
+        )
+        connection.execute(
+            "UPDATE discord_projection_links SET projection_slot = ?",
+            (antidisable_page_projection_slot("server", "account", 1, 2),),
+        )
+        before = connection.total_changes
+        admitted = RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        series = dict(admitted.payloads[0].fields)["series"]
+        assert all(dict(item)["antidisabled_character_count"] is None for item in series)
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+def test_rejects_antidisable_import_owned_by_multiple_page_rows(database_path):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        import_id = connection.execute(
+            "SELECT legacy_import_event_id FROM discord_source_events WHERE id = ?", (source_id,)
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id, slots_used, slots_capacity) VALUES (1, 2, ?, 2, 10)",
+            (import_id,),
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason in {
+            ReprojectionAdmissionRejection.EXPECTATIONS_UNKNOWN,
+            ReprojectionAdmissionRejection.PROVENANCE_INCOHERENT,
+            ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+        }
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        (
+            "UPDATE discord_source_events SET raw_evidence_expired_at = '2026-09-01T00:00:00+00:00'",
+            ReprojectionAdmissionRejection.SOURCE_EXPIRED,
+        ),
+        (
+            "UPDATE import_events SET raw_message_expired_at = '2026-09-01T00:00:00+00:00'",
+            ReprojectionAdmissionRejection.SOURCE_EXPIRED,
+        ),
+        (
+            "UPDATE discord_processing_attempts SET retryable = 1",
+            ReprojectionAdmissionRejection.ATTEMPT_INCOHERENT,
+        ),
+        (
+            "UPDATE discord_source_events SET legacy_import_event_id = NULL",
+            ReprojectionAdmissionRejection.PROVENANCE_INCOHERENT,
+        ),
+        (
+            "UPDATE discord_source_event_account_attributions SET status = 'unresolved', server_name = NULL, account_name = NULL",
+            ReprojectionAdmissionRejection.ATTRIBUTION_UNRESOLVED,
+        ),
+        (
+            "DELETE FROM harem_scan_pages",
+            ReprojectionAdmissionRejection.EXPECTATIONS_UNKNOWN,
+        ),
+        (
+            "UPDATE discord_projection_links SET projection_table = 'wishlist_observations'",
+            ReprojectionAdmissionRejection.HISTORICAL_LINKS_INCOHERENT,
+        ),
+        (
+            "UPDATE discord_projection_links SET projection_row_id = projection_row_id + 1",
+            ReprojectionAdmissionRejection.PAYLOAD_INCOMPLETE,
+        ),
+    ],
+)
+def test_rejects_antidisable_lifecycle_authority_and_expectedness_failures(
+    database_path, mutation, reason
+):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        connection.execute(mutation)
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is reason
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+def test_antidisable_current_and_historical_link_divergence_fail_closed(database_path):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "antidisable")
+        historical = connection.execute(
+            "SELECT projection_kind, projection_slot, projection_table, projection_row_id "
+            "FROM discord_projection_links WHERE source_event_id = ?",
+            (source_id,),
+        ).fetchone()
+        connection.execute(
+            "INSERT INTO discord_projection_links (source_event_id, generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, 2, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)",
+            (
+                source_id,
+                historical["projection_kind"],
+                historical["projection_slot"],
+                historical["projection_table"],
+                historical["projection_row_id"],
+                NOW,
+                NOW,
+                NOW,
+                NOW,
+            ),
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is ReprojectionAdmissionRejection.CURRENT_LINKS_ALREADY_COMPLETE
+        assert connection.total_changes == before
+
+        connection.execute(
+            "UPDATE discord_projection_links SET projection_slot = '{}' WHERE generation_id = 2"
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is ReprojectionAdmissionRejection.CURRENT_LINKS_CONFLICT
+        assert connection.total_changes == before
+
+        connection.execute("DELETE FROM discord_projection_links WHERE generation_id = 2")
+        assert ProjectionLinkRepository(connection).switch_current_generation() == 3
+        connection.execute(
+            "INSERT INTO discord_projection_links (source_event_id, generation_id, projection_kind, projection_slot, projection_table, projection_row_id, state, claimed_at, completed_at, created_at, updated_at) VALUES (?, 2, ?, '{}', ?, ?, 'completed', ?, ?, ?, ?)",
+            (
+                source_id,
+                historical["projection_kind"],
+                historical["projection_table"],
+                historical["projection_row_id"],
+                NOW,
+                NOW,
+                NOW,
+                NOW,
+            ),
+        )
+        before = connection.total_changes
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
+        assert caught.value.reason is ReprojectionAdmissionRejection.HISTORICAL_LINKS_INCOHERENT
+        assert connection.total_changes == before
         connection.rollback()
 
 
