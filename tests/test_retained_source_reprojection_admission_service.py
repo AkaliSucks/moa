@@ -292,6 +292,45 @@ def test_admits_all_fourteen_reconstructible_families(database_path, family):
         connection.rollback()
 
 
+def test_hypothetical_next_generation_uses_current_links_as_read_only_history(database_path):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "wishlist")
+        connection.execute(
+            "UPDATE discord_projection_links SET generation_id = 2 WHERE source_event_id = ?",
+            (source_id,),
+        )
+        before = connection.total_changes
+        admitted = RetainedSourceReprojectionAdmissionService().admit(
+            connection, source_id, hypothetical_generation_id=3
+        )
+        assert admitted.current_generation_id == 3
+        assert admitted.historical_generation_id == 2
+        assert len(admitted.expected_identities) == 1
+        assert connection.total_changes == before
+        connection.rollback()
+
+
+@pytest.mark.parametrize("hypothetical_generation_id", [False, 0, 2, 4])
+def test_hypothetical_generation_must_be_unpersisted_exact_next(
+    database_path, hypothetical_generation_id
+):
+    with connect(database_path) as connection:
+        connection.execute("BEGIN")
+        source_id = _fixture(connection, "wishlist")
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(
+                connection,
+                source_id,
+                hypothetical_generation_id=hypothetical_generation_id,
+            )
+        assert caught.value.reason in {
+            ReprojectionAdmissionRejection.INVALID_REQUEST,
+            ReprojectionAdmissionRejection.CURRENT_GENERATION_INVALID,
+        }
+        connection.rollback()
+
+
 def test_requires_caller_owned_transaction_and_never_writes(database_path):
     with connect(database_path) as connection:
         with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:

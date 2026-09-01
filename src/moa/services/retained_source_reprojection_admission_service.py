@@ -153,7 +153,11 @@ class RetainedSourceReprojectionAdmissionService:
     """Admit one succeeded source without taking transaction ownership or writing."""
 
     def admit(
-        self, connection: sqlite3.Connection, source_event_id: int
+        self,
+        connection: sqlite3.Connection,
+        source_event_id: int,
+        *,
+        hypothetical_generation_id: int | None = None,
     ) -> RetainedSourceReprojectionAdmission:
         if (
             isinstance(source_event_id, bool)
@@ -170,9 +174,9 @@ class RetainedSourceReprojectionAdmissionService:
             )
 
         try:
-            current_generation_id = ProjectionLinkRepository(
-                connection
-            ).resolve_current_generation_id()
+            current_generation_id = self._resolve_target_generation_id(
+                connection, hypothetical_generation_id
+            )
         except (ProjectionLinkIntegrityError, ValueError) as error:
             self._reject(ReprojectionAdmissionRejection.CURRENT_GENERATION_INVALID, str(error))
 
@@ -301,6 +305,37 @@ class RetainedSourceReprojectionAdmissionService:
             identities,
             payloads,
         )
+
+    def _resolve_target_generation_id(
+        self, connection: sqlite3.Connection, hypothetical_generation_id: int | None
+    ) -> int:
+        repository = ProjectionLinkRepository(connection)
+        current_generation_id = repository.resolve_current_generation_id()
+        if hypothetical_generation_id is None:
+            return current_generation_id
+        if (
+            isinstance(hypothetical_generation_id, bool)
+            or not isinstance(hypothetical_generation_id, int)
+            or hypothetical_generation_id <= 0
+        ):
+            self._reject(
+                ReprojectionAdmissionRejection.INVALID_REQUEST,
+                "hypothetical_generation_id must be positive",
+            )
+        rows = connection.execute("SELECT id FROM projection_generations ORDER BY id").fetchall()
+        generation_ids = [int(row[0]) for row in rows]
+        if (
+            not generation_ids
+            or any(generation_id <= 0 for generation_id in generation_ids)
+            or generation_ids != sorted(set(generation_ids))
+            or hypothetical_generation_id != generation_ids[-1] + 1
+            or hypothetical_generation_id <= current_generation_id
+        ):
+            self._reject(
+                ReprojectionAdmissionRejection.CURRENT_GENERATION_INVALID,
+                "hypothetical generation must be the unpersisted exact next generation",
+            )
+        return hypothetical_generation_id
 
     def _validate_attempts(self, connection: sqlite3.Connection, source_event_id: int) -> int:
         rows = connection.execute(
