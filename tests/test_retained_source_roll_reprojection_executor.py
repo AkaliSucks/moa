@@ -15,6 +15,8 @@ from moa.services.projection_expectations import (
     resolve_expected_projections,
 )
 from moa.services.retained_source_reprojection_admission_service import (
+    ReprojectionAdmissionRejection,
+    RetainedSourceReprojectionAdmissionError,
     RetainedSourceReprojectionAdmissionService,
 )
 from moa.services.retained_source_roll_reprojection_executor import (
@@ -41,6 +43,7 @@ def _fixture(
     rank: bool = True,
     kakera: bool = True,
     generations: int = 1,
+    admit: bool = True,
 ):
     connection.execute(
         "INSERT INTO server_contexts (id, name, normalized_name, created_at, updated_at) "
@@ -172,6 +175,8 @@ def _fixture(
                 ),
             )
         assert ProjectionLinkRepository(connection).switch_current_generation() == generation_id + 1
+    if not admit:
+        return source_id
     return RetainedSourceReprojectionAdmissionService().admit(connection, source_id)
 
 
@@ -229,6 +234,22 @@ def test_executes_every_admitted_identity_combination_atomically(
         }
         for table, rows in protected.items():
             assert tuple(connection.execute(f"SELECT * FROM {table}").fetchall()) == rows
+
+
+def test_rejects_base_only_evidence_without_key_proof_as_unknown_without_writes(
+    database_path,
+) -> None:
+    with connect(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        source_event_id = _fixture(connection, key=False, rank=False, kakera=False, admit=False)
+        before = _dump(connection)
+
+        with pytest.raises(RetainedSourceReprojectionAdmissionError) as caught:
+            RetainedSourceReprojectionAdmissionService().admit(connection, source_event_id)
+
+        assert caught.value.reason is ReprojectionAdmissionRejection.EXPECTATIONS_UNKNOWN
+        assert _dump(connection) == before
+        assert connection.in_transaction
 
 
 def test_exact_multi_link_replay_is_no_write_and_revalidates_every_generation(
