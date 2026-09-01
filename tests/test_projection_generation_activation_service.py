@@ -31,6 +31,8 @@ def _certify(tmp_path: Path) -> tuple[Path, ProjectionGenerationBackupResult]:
     outputs.mkdir()
     worktree.mkdir()
     CatalogRepository(source)
+    with sqlite3.connect(source) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     evidence = create_projection_generation_backup(
         source,
         outputs / "backup.sqlite3",
@@ -142,6 +144,28 @@ def test_stale_file_or_fingerprint_evidence_rolls_back_without_generation(
     with pytest.raises(ProjectionGenerationActivationError):
         _activate(source, evidence)
 
+    assert _generations(source) == [(1, 1)]
+
+
+def test_source_changed_after_validation_is_rejected_before_generation_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, evidence = _certify(tmp_path)
+    real_runner = activation_module.run_write_transaction
+    switch = Mock(side_effect=AssertionError("generation switch was reached"))
+
+    def race_runner(path: Path, callback):
+        with source.open("ab") as file:
+            file.write(b"post-validation-source-change")
+        return real_runner(path, callback)
+
+    monkeypatch.setattr(activation_module, "run_write_transaction", race_runner)
+    monkeypatch.setattr(ProjectionLinkRepository, "switch_current_generation", switch)
+
+    with pytest.raises(ProjectionGenerationActivationError, match="source digest or size"):
+        _activate(source, evidence)
+
+    switch.assert_not_called()
     assert _generations(source) == [(1, 1)]
 
 

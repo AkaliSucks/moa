@@ -71,7 +71,6 @@ class _ActivationRequest:
     database_path: Path
     evidence: ProjectionGenerationBackupResult
     reviewed_preflight_fingerprint: str
-    observed_source_identity: tuple[str, int]
 
 
 def activate_projection_generation(
@@ -148,7 +147,7 @@ def _validate_request(
         raise ProjectionGenerationActivationError(
             "Backup certification evidence is internally inconsistent."
         )
-    return _ActivationRequest(source, evidence, reviewed_fingerprint, _file_identity(source))
+    return _ActivationRequest(source, evidence, reviewed_fingerprint)
 
 
 def _require_regular_path(path: Path, *, label: str) -> Path:
@@ -326,17 +325,12 @@ def _require_identity(path: Path, *, expected_digest: str, expected_size: int, l
 
 def _require_certified_source(connection: sqlite3.Connection, request: _ActivationRequest) -> None:
     evidence = request.evidence
-    certified_physical = (evidence.source_sha256, evidence.source_size)
-    observed_physical = request.observed_source_identity
-    if observed_physical != certified_physical:
-        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
-        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
-        if observed_physical[1] != page_size * page_count:
-            raise ProjectionGenerationActivationError("Certified source digest or size is stale.")
-
-    # A WAL checkpoint can replace the main-file byte representation without a
-    # logical mutation. Exact transaction-consistent content parity with the
-    # certified backup distinguishes that normalization from stale source data.
+    _require_identity(
+        request.database_path,
+        expected_digest=evidence.source_sha256,
+        expected_size=evidence.source_size,
+        label="source",
+    )
     if _logical_identity(connection) != _logical_path_identity(evidence.backup_path):
         raise ProjectionGenerationActivationError("Certified source digest or size is stale.")
 
