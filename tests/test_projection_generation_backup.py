@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -54,6 +55,28 @@ def test_backup_records_identity_and_proves_exact_restore_without_changing_sourc
     assert source.read_bytes() == source_before
     with sqlite3.connect(source) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == journal_mode_before
+
+
+def test_canonical_default_database_is_refused_before_backup_work(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    file_identity = Mock(side_effect=AssertionError("file identity was reached"))
+    backup_promotion = Mock(side_effect=AssertionError("backup promotion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+    monkeypatch.setattr(backup_module, "_file_identity", file_identity)
+    monkeypatch.setattr(backup_module, "_backup_and_promote", backup_promotion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="canonical MOA default database"):
+        create_projection_generation_backup(source, backup, restore, worktree)
+
+    writer_exclusion.assert_not_called()
+    file_identity.assert_not_called()
+    backup_promotion.assert_not_called()
+    assert not backup.exists()
+    assert not restore.exists()
 
 
 @pytest.mark.parametrize("target_name", ["backup", "restore"])

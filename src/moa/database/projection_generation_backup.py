@@ -14,6 +14,7 @@ from moa.database.migrations import (
     MigrationError,
     validate_current_catalog_schema,
 )
+from moa.database.sqlite import default_database_path
 from moa.services.retained_source_reprojection_preflight_service import (
     RetainedSourceReprojectionPreflightError,
     RetainedSourceReprojectionPreflightService,
@@ -64,6 +65,7 @@ def create_projection_generation_backup(
     """Back up one explicit isolated database and prove an exact disposable restore."""
 
     source_path = _require_source(source)
+    _reject_default_database(source_path)
     backup_path = _require_output(backup, label="backup")
     restore_path = _require_output(restore_probe, label="restore probe")
     root_path = _require_worktree_root(worktree_root)
@@ -143,6 +145,14 @@ def _require_source(path: Path) -> Path:
             "Source must be an existing regular non-symlink file."
         )
     return raw.resolve(strict=True)
+
+
+def _reject_default_database(source: Path) -> None:
+    canonical_default = default_database_path().expanduser().resolve(strict=False)
+    if source == canonical_default:
+        raise ProjectionGenerationBackupError(
+            "The canonical MOA default database is not an allowed backup source."
+        )
 
 
 def _require_output(path: Path, *, label: str) -> Path:
