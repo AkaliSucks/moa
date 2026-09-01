@@ -9201,6 +9201,21 @@ def test_antidisable_helper_rollback_preserves_existing_scan_and_contexts(tmp_pa
             observed_at=OBSERVED_AT,
         )
         assert imported.scan_id == scan.id
+        assert tuple(
+            connection.execute(
+                "SELECT slots_used, slots_capacity FROM harem_scan_pages "
+                "WHERE harem_scan_id = ? AND page_number = ?",
+                (scan.id, ANTIDISABLE_PAGE.page_number),
+            ).fetchone()
+        ) == (0, 0)
+        with connect(database_path) as observer:
+            assert (
+                observer.execute(
+                    "SELECT COUNT(*) FROM harem_scan_pages WHERE harem_scan_id = ?",
+                    (scan.id,),
+                ).fetchone()[0]
+                == 0
+            )
         connection.rollback()
 
     with connect(database_path) as connection:
@@ -9232,9 +9247,13 @@ def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path)
         assert connection.execute(
             "SELECT expected_page_count FROM harem_scans WHERE id = ?", (scan.id,)
         ).fetchone()[0] == 2
-        assert connection.execute(
-            "SELECT page_number FROM harem_scan_pages WHERE harem_scan_id = ?", (scan.id,)
-        ).fetchone()[0] == 2
+        assert tuple(
+            connection.execute(
+                "SELECT page_number, slots_used, slots_capacity "
+                "FROM harem_scan_pages WHERE harem_scan_id = ?",
+                (scan.id,),
+            ).fetchone()
+        ) == (2, 7, 9)
         continuation_rows = connection.execute(
             """
             SELECT series_name, antidisabled_character_count
@@ -9269,11 +9288,14 @@ def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path)
     assert progress.is_complete is True
     with connect(database_path) as connection:
         pages = connection.execute(
-            "SELECT page_number, import_event_id FROM harem_scan_pages WHERE harem_scan_id = ? "
-            "ORDER BY page_number",
+            "SELECT page_number, import_event_id, slots_used, slots_capacity "
+            "FROM harem_scan_pages WHERE harem_scan_id = ? ORDER BY page_number",
             (scan.id,),
         ).fetchall()
-        assert [tuple(row) for row in pages] == [(1, first.import_event_id), (2, second.import_event_id)]
+        assert [tuple(row) for row in pages] == [
+            (1, first.import_event_id, 0, 0),
+            (2, second.import_event_id, 7, 9),
+        ]
         rows = connection.execute(
             """
             SELECT series_name, antidisabled_character_count
@@ -9293,6 +9315,39 @@ def test_antidisable_scanned_pages_preserve_order_nulls_and_scan_state(tmp_path)
 
     catalog.complete_antidisable_scan(scan.id)
     assert catalog.antidisable_series("Server", "Account") == ("Series A", "Series B", "Series C")
+
+
+def test_non_antidisable_scan_pages_leave_reconstructibility_fields_unknown(tmp_path) -> None:
+    database_path, catalog, _discord = _repositories(tmp_path)
+    scan = catalog.begin_harem_scan("Server", "Account", "keys")
+
+    imported = catalog.import_harem_key_page(
+        HaremKeyPage(
+            page_number=1,
+            page_count=1,
+            entries=(
+                HaremKeyEntry(
+                    name="Keyed Character",
+                    key_type="silver",
+                    key_count=4,
+                    kakera_value=875,
+                ),
+            ),
+        ),
+        "Server",
+        "Account",
+        "key page",
+        "test",
+        scan.id,
+    )
+
+    with connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT page_number, import_event_id, slots_used, slots_capacity "
+            "FROM harem_scan_pages WHERE harem_scan_id = ?",
+            (scan.id,),
+        ).fetchone()
+    assert tuple(row) == (1, imported.import_event_id, None, None)
 
 
 def test_antidisable_scan_completion_uses_supplied_connection_and_persists_result(

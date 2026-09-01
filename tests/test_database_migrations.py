@@ -13,6 +13,7 @@ from moa.database.migrations import (
 )
 from moa.database.sqlite import connect
 from moa.models.character import (
+    AntidisablePage,
     DisableListSnapshot,
     KakeralootStateSnapshot,
     ProfileSnapshot,
@@ -149,6 +150,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 12")
         connection.execute("DELETE FROM schema_migrations WHERE version = 13")
         connection.execute("DELETE FROM schema_migrations WHERE version = 14")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 15")
 
 
 def _make_version_5_database(database_path):
@@ -575,6 +577,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
+        (15, "antidisable-reconstructibility-foundation"),
     ]
     with _open_database(database_path) as connection:
         assert connection.execute(
@@ -852,6 +855,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
+        (15, "antidisable-reconstructibility-foundation"),
     ]
 
 
@@ -951,7 +955,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 15))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 16))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -1103,8 +1107,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            14,
-            "projection-generation-switchover",
+            15,
+            "antidisable-reconstructibility-foundation",
         )
 
 
@@ -1310,6 +1314,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
+        (15, "antidisable-reconstructibility-foundation"),
     ]
 
 
@@ -1767,8 +1772,8 @@ def test_projection_generation_upgrade_backfills_and_preserves_source_and_link_r
             (link_id,),
         ).fetchone() == (1,)
         assert _migration_rows(database_path)[-1] == (
-            14,
-            "projection-generation-switchover",
+            15,
+            "antidisable-reconstructibility-foundation",
         )
 
 
@@ -1903,8 +1908,8 @@ def test_projection_generation_switchover_migration_retains_generation_one_histo
             (generation_two_link_id, 2, None),
         ]
         assert _migration_rows(database_path)[-1] == (
-            14,
-            "projection-generation-switchover",
+            15,
+            "antidisable-reconstructibility-foundation",
         )
 
 
@@ -2321,6 +2326,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
+        (15, "antidisable-reconstructibility-foundation"),
     ]
 
 
@@ -2355,6 +2361,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (12, "raw-evidence-lifecycle-foundation"),
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
+        (15, "antidisable-reconstructibility-foundation"),
     ]
 
 
@@ -3548,6 +3555,78 @@ def test_fresh_and_migrated_disablelist_presence_schema_are_equivalent_and_idemp
             assert column_names.count("irl_disabled_observed") == 1
 
 
+def test_antidisable_reconstructibility_migration_preserves_legacy_unknowns(
+    tmp_path,
+) -> None:
+    database_path = tmp_path / "legacy-antidisable.db"
+    catalog = CatalogRepository(database_path)
+    scan = catalog.begin_antidisable_scan("Server", "Account")
+    imported = catalog.import_antidisable_page(
+        AntidisablePage(
+            page_number=1,
+            page_count=1,
+            slots_used=4,
+            slots_capacity=8,
+            antidisabled_character_count=None,
+            series_names=("Series B", "Series A"),
+        ),
+        "Server",
+        "Account",
+        "historical antidisable page",
+        "test",
+        scan.id,
+    )
+
+    with _open_database(database_path) as connection:
+        connection.execute("ALTER TABLE harem_scan_pages DROP COLUMN slots_used")
+        connection.execute("ALTER TABLE harem_scan_pages DROP COLUMN slots_capacity")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 15")
+        before_page = connection.execute(
+            "SELECT harem_scan_id, page_number, import_event_id FROM harem_scan_pages"
+        ).fetchone()
+        before_series = connection.execute(
+            "SELECT series_name, antidisabled_character_count, import_event_id, harem_scan_id "
+            "FROM antidisable_series_observations ORDER BY id"
+        ).fetchall()
+        connection.commit()
+
+        run_migrations(connection, CATALOG_MIGRATIONS)
+
+        columns = {
+            row[1]: tuple(row[1:5])
+            for row in connection.execute("PRAGMA table_info(harem_scan_pages)")
+            if row[1] in {"slots_used", "slots_capacity"}
+        }
+        page = connection.execute(
+            "SELECT harem_scan_id, page_number, import_event_id, slots_used, slots_capacity "
+            "FROM harem_scan_pages"
+        ).fetchone()
+        series = connection.execute(
+            "SELECT series_name, antidisabled_character_count, import_event_id, harem_scan_id "
+            "FROM antidisable_series_observations ORDER BY id"
+        ).fetchall()
+
+        assert columns == {
+            "slots_used": ("slots_used", "INTEGER", 0, None),
+            "slots_capacity": ("slots_capacity", "INTEGER", 0, None),
+        }
+        assert tuple(page) == (*tuple(before_page), None, None)
+        assert tuple(before_page) == (scan.id, 1, imported.import_event_id)
+        assert (
+            series
+            == before_series
+            == [
+                ("Series B", None, imported.import_event_id, scan.id),
+                ("Series A", None, imported.import_event_id, scan.id),
+            ]
+        )
+
+        CATALOG_MIGRATIONS[14].apply(connection)
+        assert connection.execute(
+            "SELECT slots_used, slots_capacity FROM harem_scan_pages"
+        ).fetchall() == [(None, None)]
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -3556,11 +3635,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (15, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (16, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(15,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(16,)]

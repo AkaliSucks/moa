@@ -1853,9 +1853,16 @@ class CatalogRepository:
             )
         if scan_id is not None:
             connection.execute(
-                "INSERT INTO harem_scan_pages (harem_scan_id, page_number, import_event_id) "
-                "VALUES (?, ?, ?)",
-                (scan_id, page.page_number, import_event_id),
+                "INSERT INTO harem_scan_pages ("
+                "harem_scan_id, page_number, import_event_id, slots_used, slots_capacity"
+                ") VALUES (?, ?, ?, ?, ?)",
+                (
+                    scan_id,
+                    page.page_number,
+                    import_event_id,
+                    page.slots_used,
+                    page.slots_capacity,
+                ),
             )
         return _AntidisablePageImportConnectionResult(
             import_event_id=import_event_id,
@@ -3162,6 +3169,8 @@ class CatalogRepository:
                     harem_scan_id INTEGER NOT NULL REFERENCES harem_scans(id),
                     page_number INTEGER NOT NULL,
                     import_event_id INTEGER NOT NULL REFERENCES import_events(id),
+                    slots_used INTEGER,
+                    slots_capacity INTEGER,
                     PRIMARY KEY (harem_scan_id, page_number)
                 );
 

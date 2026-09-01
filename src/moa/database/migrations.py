@@ -164,6 +164,7 @@ CATALOG_CURRENT_REQUIRED_COLUMNS = {
     "discord_processing_attempts": frozenset({"failure_detail_expired_at"}),
     "projection_generations": frozenset({"id", "is_current"}),
     "discord_projection_links": frozenset({"generation_id"}),
+    "harem_scan_pages": frozenset({"slots_used", "slots_capacity"}),
 }
 
 
@@ -1046,6 +1047,21 @@ def _apply_projection_generation_switchover(connection: sqlite3.Connection) -> N
     )
 
 
+def _apply_antidisable_reconstructibility_foundation(
+    connection: sqlite3.Connection,
+) -> None:
+    """Add prospective Antidisable slot evidence without resolving legacy rows."""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(harem_scan_pages)").fetchall()
+    }
+    for column in ("slots_used", "slots_capacity"):
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE harem_scan_pages ADD COLUMN {column} INTEGER NULL"
+            )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -1116,5 +1132,10 @@ CATALOG_MIGRATIONS = (
         version=14,
         name="projection-generation-switchover",
         apply=_apply_projection_generation_switchover,
+    ),
+    Migration(
+        version=15,
+        name="antidisable-reconstructibility-foundation",
+        apply=_apply_antidisable_reconstructibility_foundation,
     ),
 )
