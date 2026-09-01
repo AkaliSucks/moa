@@ -22,6 +22,9 @@ from moa.cli.catalog_reset_commands import register_catalog_reset_command
 from moa.cli.catalog_search_commands import build_catalog_search_app
 from moa.cli.catalog_snapshot_commands import build_catalog_snapshot_app
 from moa.cli.data_health_commands import build_data_health_app
+from moa.cli.retained_source_reprojection_preflight_commands import (
+    register_retained_source_reprojection_preflight_command,
+)
 from moa.cli.discord_commands import build_discord_app
 from moa.cli.analyze_roll_commands import register_analyze_roll_command
 from moa.cli.detect_commands import register_detect_command
@@ -38,6 +41,7 @@ from moa.cli.server_commands import build_server_app
 from moa.cli.tower_commands import build_tower_app
 from moa.cli.version_commands import register_version_command
 from moa.database.sqlite import DEFAULT_DATABASE_PATH, default_database_path
+
 app = typer.Typer(help="MOA - Mudae Optimization Assistant")
 import_app = typer.Typer(help="Save parsed Mudae data to the local catalog")
 catalog_app = typer.Typer(help="Browse MOA's local character catalog")
@@ -236,6 +240,7 @@ register_catalog_repair_bugged_data_command(
     console,
     lambda: DEFAULT_DATABASE_PATH,
 )
+register_retained_source_reprojection_preflight_command(catalog_app, console)
 
 
 if __name__ == "__main__":
