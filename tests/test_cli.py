@@ -36,6 +36,7 @@ import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
 from moa.database.legacy_database_relocation import DatabaseRelocationError
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
+from moa.models.data_health import DataHealthFinding
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
@@ -5613,14 +5614,24 @@ def test_catalog_relocate_database_complete_bound_identity_calls_only_bound(
     assert identity.generation_inventory == ((1, False), (2, True))
     assert identity.source_event_count == 5
     assert identity.generation_1_projection_link_count == 8
-    assert tuple(finding.local_identifier for finding in identity.projection_gaps) == (
-        7,
-        "007",
+    assert identity.projection_gaps == (
+        DataHealthFinding(
+            "DH-PG-001",
+            "first-category",
+            "first-entity",
+            7,
+            "first reason",
+        ),
+        DataHealthFinding(
+            "DH-PG-002",
+            "second-category",
+            "second-entity",
+            "007",
+            "second reason",
+        ),
     )
-    assert tuple(finding.check_id for finding in identity.projection_gaps) == (
-        "DH-PG-001",
-        "DH-PG-002",
-    )
+    assert isinstance(identity.projection_gaps[0].local_identifier, int)
+    assert isinstance(identity.projection_gaps[1].local_identifier, str)
     assert identity.retained_source_preflight_fingerprint == "b" * 64
 
 
