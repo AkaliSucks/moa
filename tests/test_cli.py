@@ -34,6 +34,7 @@ import moa.services.retention_expiry_service as retention_expiry_service_module
 import moa.services.roll_analysis_service as roll_analysis_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
+from moa.database.legacy_database_relocation import DatabaseRelocationError
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
 from moa.parser.mudae import MudaeTextParser
 from moa.repositories.catalog_repository import CatalogRepository
@@ -5353,6 +5354,88 @@ def test_catalog_reset_uses_main_database_path_at_callback_time(monkeypatch, tmp
     assert len(list(tmp_path.glob("second.db.bak-full-reset-*"))) == 1
 
 
+def _bound_relocation_argv(
+    source: Path,
+    *,
+    normalized_sha256: str | None = "a" * 64,
+    normalized_size: int | None = 123,
+    migration_versions: tuple[int, ...] = (1, 3),
+    migration_names: tuple[str, ...] = ("initial-catalog", "durable-events"),
+    generation_ids: tuple[int, ...] = (1, 2),
+    current_generation_id: int | None = 2,
+    source_event_count: int | None = 5,
+    generation_1_projection_link_count: int | None = 8,
+    projection_gap_check_ids: tuple[str, ...] = (),
+    projection_gap_categories: tuple[str, ...] = (),
+    projection_gap_entities: tuple[str, ...] = (),
+    projection_gap_local_identifier_kinds: tuple[str, ...] = (),
+    projection_gap_local_identifiers: tuple[str, ...] = (),
+    projection_gap_reasons: tuple[str, ...] = (),
+    retained_source_preflight_fingerprint: str | None = "b" * 64,
+    authorization_bound: bool = True,
+    apply: bool = True,
+) -> list[str]:
+    argv = ["catalog", "relocate-database", str(source)]
+    if authorization_bound:
+        argv.append("--authorization-bound")
+    for option, value in (
+        ("--expected-normalized-sha256", normalized_sha256),
+        ("--expected-normalized-size", normalized_size),
+    ):
+        if value is not None:
+            argv.extend((option, str(value)))
+    for version in migration_versions:
+        argv.extend(("--expected-migration-version", str(version)))
+    for name in migration_names:
+        argv.extend(("--expected-migration-name", name))
+    for generation_id in generation_ids:
+        argv.extend(("--expected-generation-id", str(generation_id)))
+    for option, value in (
+        ("--expected-current-generation-id", current_generation_id),
+        ("--expected-source-event-count", source_event_count),
+        (
+            "--expected-generation-1-projection-link-count",
+            generation_1_projection_link_count,
+        ),
+    ):
+        if value is not None:
+            argv.extend((option, str(value)))
+    for option, values in (
+        ("--expected-projection-gap-check-id", projection_gap_check_ids),
+        ("--expected-projection-gap-category", projection_gap_categories),
+        ("--expected-projection-gap-entity", projection_gap_entities),
+        (
+            "--expected-projection-gap-local-identifier-kind",
+            projection_gap_local_identifier_kinds,
+        ),
+        (
+            "--expected-projection-gap-local-identifier",
+            projection_gap_local_identifiers,
+        ),
+        ("--expected-projection-gap-reason", projection_gap_reasons),
+    ):
+        for value in values:
+            argv.extend((option, value))
+    if retained_source_preflight_fingerprint is not None:
+        argv.extend(
+            (
+                "--expected-retained-source-preflight-fingerprint",
+                retained_source_preflight_fingerprint,
+            )
+        )
+    if apply:
+        argv.append("--apply")
+    return argv
+
+
+def _unexpected_relocation(*_args, **_kwargs):
+    pytest.fail("relocation primitive must not be called")
+
+
+def _compact_cli_output(output: str) -> str:
+    return "".join(output.split())
+
+
 def test_catalog_relocate_database_help_is_lazy_and_requires_source_and_apply() -> None:
     calls: list[int] = []
 
@@ -5372,12 +5455,42 @@ def test_catalog_relocate_database_help_is_lazy_and_requires_source_and_apply() 
         target_path_provider,
     )
 
-    help_result = CliRunner().invoke(catalog_app, ["relocate-database", "--help"])
+    help_result = CliRunner().invoke(
+        catalog_app,
+        ["relocate-database", "--help"],
+        terminal_width=240,
+    )
     missing_source_result = CliRunner().invoke(catalog_app, ["relocate-database", "--apply"])
 
     assert help_result.exit_code == 0
     assert "SOURCE" in help_result.stdout
     assert "--apply" in help_result.stdout
+    assert "--authorization-bound" in help_result.stdout
+    expected_options = {
+        "--authorization-bound",
+        "--expected-normalized-sha256",
+        "--expected-normalized-size",
+        "--expected-migration-version",
+        "--expected-migration-name",
+        "--expected-generation-id",
+        "--expected-current-generation-id",
+        "--expected-source-event-count",
+        "--expected-generation-1-projection-link-count",
+        "--expected-projection-gap-check-id",
+        "--expected-projection-gap-category",
+        "--expected-projection-gap-entity",
+        "--expected-projection-gap-local-identifier-kind",
+        "--expected-projection-gap-local-identifier",
+        "--expected-projection-gap-reason",
+        "--expected-retained-source-preflight-fingerprint",
+    }
+    relocate_command = get_command(catalog_app).commands["relocate-database"]
+    registered_options = {
+        option
+        for parameter in relocate_command.params
+        for option in getattr(parameter, "opts", ())
+    }
+    assert expected_options <= registered_options
     assert missing_source_result.exit_code == 2
     assert "SOURCE" in missing_source_result.stderr
     assert calls == []
@@ -5387,8 +5500,21 @@ def test_catalog_relocate_database_warns_and_requires_apply(monkeypatch, tmp_pat
     source = tmp_path / "legacy" / "moa.db"
     target = tmp_path / "user-data" / "moa.db"
     monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
 
-    result = CliRunner().invoke(main.app, ["catalog", "relocate-database", str(source)])
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(source, normalized_sha256="invalid", apply=False),
+    )
 
     assert result.exit_code == 0
     unwrapped_output = result.stdout.replace("\n", "")
@@ -5400,24 +5526,28 @@ def test_catalog_relocate_database_warns_and_requires_apply(monkeypatch, tmp_pat
     assert not target.exists()
 
 
-def test_catalog_relocate_database_applies_without_traceback(monkeypatch, tmp_path) -> None:
-    from moa.database import legacy_database_relocation, sqlite
-
+def test_catalog_relocate_database_unbound_apply_calls_only_unbound(
+    monkeypatch, tmp_path
+) -> None:
     source = tmp_path / "legacy" / "moa.db"
     target = tmp_path / "user-data" / "moa.db"
-    CatalogRepository(source)
-    connection = sqlite.connect(source)
-    connection.execute(
-        "INSERT INTO import_events (kind, source, observed_at, raw_message) "
-        "VALUES ('command_observation', 'cli-test', '2026-08-12T00:00:00+00:00', 'copied')"
-    )
-    connection.commit()
-    connection.close()
+    archive = tmp_path / "archive" / "moa.db"
+    calls = []
+
+    def relocate(received_source, received_target):
+        calls.append((received_source, received_target))
+        return SimpleNamespace(target=received_target, source_archive=archive)
+
     monkeypatch.setattr(main, "default_database_path", lambda: target)
     monkeypatch.setattr(
-        legacy_database_relocation,
-        "verified_legacy_database_path",
-        lambda: None,
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        relocate,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
     )
 
     result = CliRunner().invoke(
@@ -5426,29 +5556,481 @@ def test_catalog_relocate_database_applies_without_traceback(monkeypatch, tmp_pa
     )
 
     assert result.exit_code == 0
+    assert calls == [(source.resolve(), target.resolve())]
     assert "Database relocated" in result.stdout
     assert "Legacy source archived" in result.stdout
     assert "Traceback" not in result.stdout
-    assert target.is_file()
-    assert not source.exists()
+
+
+def test_catalog_relocate_database_complete_bound_identity_calls_only_bound(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    archive = tmp_path / "archive" / "moa.db"
+    calls = []
+
+    def relocate_bound(received_source, received_target, identity):
+        calls.append((received_source, received_target, identity))
+        return SimpleNamespace(target=received_target, source_archive=archive)
+
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        relocate_bound,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(
+            source,
+            projection_gap_check_ids=("DH-PG-001", "DH-PG-002"),
+            projection_gap_categories=("first-category", "second-category"),
+            projection_gap_entities=("first-entity", "second-entity"),
+            projection_gap_local_identifier_kinds=("int", "str"),
+            projection_gap_local_identifiers=("7", "007"),
+            projection_gap_reasons=("first reason", "second reason"),
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    received_source, received_target, identity = calls[0]
+    assert received_source == source.resolve()
+    assert received_target == target.resolve()
+    assert identity.normalized_sha256 == "a" * 64
+    assert identity.normalized_size == 123
+    assert identity.migration_identity == (
+        (1, "initial-catalog"),
+        (3, "durable-events"),
+    )
+    assert identity.generation_inventory == ((1, False), (2, True))
+    assert identity.source_event_count == 5
+    assert identity.generation_1_projection_link_count == 8
+    assert tuple(finding.local_identifier for finding in identity.projection_gaps) == (
+        7,
+        "007",
+    )
+    assert tuple(finding.check_id for finding in identity.projection_gaps) == (
+        "DH-PG-001",
+        "DH-PG-002",
+    )
+    assert identity.retained_source_preflight_fingerprint == "b" * 64
+
+
+def test_catalog_relocate_database_bound_empty_projection_gaps_are_exact(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    identities = []
+
+    def relocate_bound(_source, received_target, identity):
+        identities.append(identity)
+        return SimpleNamespace(
+            target=received_target,
+            source_archive=tmp_path / "archive" / "moa.db",
+        )
+
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        relocate_bound,
+    )
+
+    result = CliRunner().invoke(main.app, _bound_relocation_argv(source))
+
+    assert result.exit_code == 0
+    assert identities[0].projection_gaps == ()
+
+
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("--expected-normalized-sha256", "a" * 64),
+        ("--expected-normalized-size", "1"),
+        ("--expected-migration-version", "1"),
+        ("--expected-migration-name", "initial"),
+        ("--expected-generation-id", "1"),
+        ("--expected-current-generation-id", "1"),
+        ("--expected-source-event-count", "1"),
+        ("--expected-generation-1-projection-link-count", "1"),
+        ("--expected-projection-gap-check-id", "DH-PG-001"),
+        ("--expected-projection-gap-category", "projection-gap"),
+        ("--expected-projection-gap-entity", "source"),
+        ("--expected-projection-gap-local-identifier-kind", "int"),
+        ("--expected-projection-gap-local-identifier", "1"),
+        ("--expected-projection-gap-reason", "reason"),
+        ("--expected-retained-source-preflight-fingerprint", "b" * 64),
+    ],
+)
+def test_catalog_relocate_database_authorization_fields_require_bound_mode(
+    monkeypatch, tmp_path, option, value
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        ["catalog", "relocate-database", str(source), option, value, "--apply"],
+    )
+
+    assert result.exit_code == 1
+    assert "require--authorization-bound" in _compact_cli_output(result.stdout)
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "normalized_sha256",
+        "normalized_size",
+        "current_generation_id",
+        "source_event_count",
+        "generation_1_projection_link_count",
+        "retained_source_preflight_fingerprint",
+    ],
+)
+def test_catalog_relocate_database_bound_requires_every_scalar(
+    monkeypatch, tmp_path, missing_field
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(source, **{missing_field: None}),
+    )
+
+    assert result.exit_code == 1
+    assert "requires--expected-" in _compact_cli_output(result.stdout)
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"normalized_sha256": "A" * 64}, "lowercase hexadecimal"),
+        ({"normalized_sha256": "a" * 63}, "lowercase hexadecimal"),
+        ({"normalized_sha256": "g" * 64}, "lowercase hexadecimal"),
+        ({"normalized_size": -1}, "normalized-size must be nonnegative"),
+        ({"source_event_count": -1}, "source-event-count must be nonnegative"),
+        (
+            {"generation_1_projection_link_count": -1},
+            "generation-1-projection-link-count must be nonnegative",
+        ),
+        (
+            {"retained_source_preflight_fingerprint": "B" * 64},
+            "preflight-fingerprint must be exactly 64 lowercase",
+        ),
+    ],
+)
+def test_catalog_relocate_database_bound_rejects_invalid_scalars(
+    monkeypatch, tmp_path, overrides, message
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(main.app, _bound_relocation_argv(source, **overrides))
+
+    assert result.exit_code == 1
+    assert _compact_cli_output(message) in _compact_cli_output(result.stdout)
+    assert "Traceback" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("versions", "names", "message"),
+    [
+        ((), (), "nonempty migration identity"),
+        ((1, 2), ("one",), "equal lengths"),
+        ((0,), ("zero",), "must be positive"),
+        ((1, 1), ("one", "duplicate"), "strictly increasing and unique"),
+        ((2, 1), ("two", "one"), "strictly increasing and unique"),
+        ((1,), ("",), "names must be nonempty"),
+    ],
+)
+def test_catalog_relocate_database_bound_rejects_invalid_migration_identity(
+    monkeypatch, tmp_path, versions, names, message
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(
+            source,
+            migration_versions=versions,
+            migration_names=names,
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert _compact_cli_output(message) in _compact_cli_output(result.stdout)
+
+
+@pytest.mark.parametrize(
+    ("generation_ids", "current_generation_id", "message"),
+    [
+        ((), 1, "nonempty generation inventory"),
+        ((1,), None, "requires --expected-current-generation-id"),
+        ((0,), 0, "Generation IDs must be positive"),
+        ((1, 1), 1, "strictly increasing and unique"),
+        ((2, 1), 1, "strictly increasing and unique"),
+        ((1, 2), 3, "must occur exactly once"),
+    ],
+)
+def test_catalog_relocate_database_bound_rejects_invalid_generation_inventory(
+    monkeypatch, tmp_path, generation_ids, current_generation_id, message
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(
+            source,
+            generation_ids=generation_ids,
+            current_generation_id=current_generation_id,
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert _compact_cli_output(message) in _compact_cli_output(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "missing_group",
+    [
+        "projection_gap_check_ids",
+        "projection_gap_categories",
+        "projection_gap_entities",
+        "projection_gap_local_identifier_kinds",
+        "projection_gap_local_identifiers",
+        "projection_gap_reasons",
+    ],
+)
+def test_catalog_relocate_database_bound_rejects_any_unequal_projection_gap_group(
+    monkeypatch, tmp_path, missing_group
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    gap = {
+        "projection_gap_check_ids": ("DH-PG-001",),
+        "projection_gap_categories": ("projection-gap",),
+        "projection_gap_entities": ("source",),
+        "projection_gap_local_identifier_kinds": ("int",),
+        "projection_gap_local_identifiers": ("1",),
+        "projection_gap_reasons": ("reason",),
+    }
+    gap[missing_group] = ()
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(main.app, _bound_relocation_argv(source, **gap))
+
+    assert result.exit_code == 1
+    assert "musthaveequallengths" in _compact_cli_output(result.stdout)
+
+
+@pytest.mark.parametrize("kind", ["integer", "INT", ""])
+def test_catalog_relocate_database_bound_rejects_invalid_projection_gap_kind(
+    monkeypatch, tmp_path, kind
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(
+            source,
+            projection_gap_check_ids=("DH-PG-001",),
+            projection_gap_categories=("projection-gap",),
+            projection_gap_entities=("source",),
+            projection_gap_local_identifier_kinds=(kind,),
+            projection_gap_local_identifiers=("1",),
+            projection_gap_reasons=("reason",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert "exactly'int'or'str'" in _compact_cli_output(result.stdout)
+
+
+@pytest.mark.parametrize("identifier", ["01", "+1", "-0", " 1", "1.0"])
+def test_catalog_relocate_database_bound_rejects_noncanonical_gap_integer(
+    monkeypatch, tmp_path, identifier
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: tmp_path / "target.db")
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _bound_relocation_argv(
+            source,
+            projection_gap_check_ids=("DH-PG-001",),
+            projection_gap_categories=("projection-gap",),
+            projection_gap_entities=("source",),
+            projection_gap_local_identifier_kinds=("int",),
+            projection_gap_local_identifiers=(identifier,),
+            projection_gap_reasons=("reason",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert "canonicaldecimalintegerspelling" in _compact_cli_output(result.stdout)
+
+
+@pytest.mark.parametrize(
+    "primitive_error",
+    [
+        "RELOCATION_AUTHORIZATION_MISMATCH: normalized main-file SHA-256.",
+        "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint normalization failed.",
+    ],
+)
+def test_catalog_relocate_database_bound_primitive_failure_never_falls_back(
+    monkeypatch, tmp_path, primitive_error
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    target = tmp_path / "user-data" / "moa.db"
+    bound_calls = []
+
+    def fail_bound(*args):
+        bound_calls.append(args)
+        raise DatabaseRelocationError(primitive_error)
+
+    monkeypatch.setattr(main, "default_database_path", lambda: target)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        fail_bound,
+    )
+
+    result = CliRunner().invoke(main.app, _bound_relocation_argv(source))
+
+    assert result.exit_code == 1
+    assert len(bound_calls) == 1
+    assert _compact_cli_output(primitive_error) in _compact_cli_output(result.stdout)
+    assert "Traceback" not in result.stdout
 
 
 def test_catalog_relocate_database_reports_existing_target_without_traceback(
     monkeypatch, tmp_path
 ) -> None:
-    from moa.database import legacy_database_relocation
-
     source = tmp_path / "legacy" / "moa.db"
-    source.parent.mkdir()
-    source.write_bytes(b"source")
     target = tmp_path / "user-data" / "moa.db"
-    target.parent.mkdir()
-    target.write_bytes(b"target")
     monkeypatch.setattr(main, "default_database_path", lambda: target)
+
+    def fail_relocation(_source, _target):
+        raise DatabaseRelocationError(
+            f"Relocation target already exists and will not be overwritten: {target}"
+        )
+
     monkeypatch.setattr(
-        legacy_database_relocation,
-        "verified_legacy_database_path",
-        lambda: None,
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        fail_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
     )
 
     result = CliRunner().invoke(
@@ -5459,8 +6041,6 @@ def test_catalog_relocate_database_reports_existing_target_without_traceback(
     assert result.exit_code == 1
     assert "will not be overwritten" in result.stdout
     assert "Traceback" not in result.stdout
-    assert source.read_bytes() == b"source"
-    assert target.read_bytes() == b"target"
 
 
 def test_catalog_repair_registration_and_help_are_lazy(monkeypatch) -> None:
