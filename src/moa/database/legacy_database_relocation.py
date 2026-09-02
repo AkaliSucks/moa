@@ -14,6 +14,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_TABLES
+from moa.models.data_health import DataHealthFinding
+from moa.repositories.data_health_repository import DataHealthRepository
+from moa.services.retained_source_reprojection_preflight_service import (
+    RetainedSourceReprojectionPreflightService,
+)
 
 
 _INCOMPLETE_RETIREMENT_MARKER_NAME = ".moa-relocation-incomplete"
@@ -46,6 +51,20 @@ class DatabaseRelocationResult:
     source: Path
     target: Path
     source_archive: Path
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRelocationAuthorizationIdentity:
+    """Exact normalized physical and semantic identity authorized for relocation."""
+
+    normalized_sha256: str
+    normalized_size: int
+    migration_identity: tuple[tuple[int, str], ...]
+    generation_inventory: tuple[tuple[int, bool], ...]
+    source_event_count: int
+    generation_1_projection_link_count: int
+    projection_gaps: tuple[DataHealthFinding, ...]
+    retained_source_preflight_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +165,35 @@ def relocate_database(
     _test_hook: Callable[[str], None] | None = None,
 ) -> DatabaseRelocationResult:
     """Relocate one explicit MOA database with backup and fail-closed retirement."""
+    return _relocate_database(source, target, expected_identity=None, _test_hook=_test_hook)
+
+
+def relocate_database_with_authorization(
+    source: Path,
+    target: Path,
+    expected_identity: DatabaseRelocationAuthorizationIdentity,
+    *,
+    _test_hook: Callable[[str], None] | None = None,
+) -> DatabaseRelocationResult:
+    """Relocate only when the normalized source identity matches trusted expectations."""
+    _validate_expected_authorization_identity(expected_identity)
+    return _relocate_database(
+        source,
+        target,
+        expected_identity=expected_identity,
+        _test_hook=_test_hook,
+    )
+
+
+def _relocate_database(
+    source: Path,
+    target: Path,
+    *,
+    expected_identity: DatabaseRelocationAuthorizationIdentity | None,
+    _test_hook: Callable[[str], None] | None,
+) -> DatabaseRelocationResult:
+    if expected_identity is not None:
+        _validate_expected_authorization_identity(expected_identity)
     source_path = _canonical_file_path(source, label="source")
     target_path = _canonical_file_path(target, label="target")
     if source_path == target_path:
@@ -172,20 +220,28 @@ def relocate_database(
                 f"relocation source: {resolved_legacy}"
             )
 
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    stale_paths = tuple(sorted(target_path.parent.glob(f"{target_path.name}.migrating-*")))
-    if stale_paths:
-        rendered = ", ".join(str(path) for path in stale_paths)
-        raise DatabaseRelocationError(
-            f"Recognized stale relocation temporary file(s) require cleanup: {rendered}"
-        )
+    if expected_identity is None:
+        _prepare_relocation_target(target_path)
     _validate_database(source_path)
     _checkpoint_source_for_retirement(source_path)
-    source_connection = _acquire_source_quiescence(source_path)
+    source_connection = (
+        _acquire_authorization_exclusion(source_path)
+        if expected_identity is not None
+        else _acquire_source_quiescence(source_path)
+    )
     primary_error: BaseException | None = None
     try:
         _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_HELD")
-        source_fingerprint = _validate_database(source_path)
+        if expected_identity is not None:
+            _checkpoint_source_passive_under_exclusion(source_path)
+            actual_identity = _compute_relocation_authorization_identity(
+                source_connection, source_path
+            )
+            _notify_test_hook(_test_hook, "AUTHORIZATION_IDENTITY_COMPUTED")
+            _require_matching_authorization_identity(expected_identity, actual_identity)
+            _notify_test_hook(_test_hook, "RELOCATION_AUTHORIZED")
+            _prepare_relocation_target(target_path)
+        source_fingerprint = _validate_held_database(source_connection, source_path)
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f"{target_path.name}.migrating-",
             dir=target_path.parent,
@@ -201,7 +257,7 @@ def relocate_database(
                 raise DatabaseRelocationError(
                     "Relocation target validation did not match the source database."
                 )
-            if _validate_database(source_path) != source_fingerprint:
+            if _validate_held_database(source_connection, source_path) != source_fingerprint:
                 raise DatabaseRelocationError(
                     "Relocation source changed despite source writer exclusion."
                 )
@@ -397,6 +453,24 @@ def _source_handle_blocks_retirement() -> bool:
     return os.name == "nt"
 
 
+def _prepare_relocation_target(target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    stale_paths = tuple(sorted(target.parent.glob(f"{target.name}.migrating-*")))
+    if stale_paths:
+        rendered = ", ".join(str(path) for path in stale_paths)
+        raise DatabaseRelocationError(
+            f"Recognized stale relocation temporary file(s) require cleanup: {rendered}"
+        )
+
+
+def _open_neutral_source_connection(source: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(source)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute(f"PRAGMA busy_timeout = {_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS}")
+    return connection
+
+
 def _acquire_source_quiescence(source: Path) -> sqlite3.Connection:
     from moa.database.sqlite import connect
 
@@ -418,6 +492,67 @@ def _acquire_source_quiescence(source: Path) -> sqlite3.Connection:
             "LEGACY_SOURCE_RETIREMENT_BLOCKER: could not acquire bounded SQLite source "
             "writer exclusion; stop every listener and source writer."
         ) from error
+
+
+def _acquire_authorization_exclusion(source: Path) -> sqlite3.Connection:
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = _open_neutral_source_connection(source)
+        connection.execute("BEGIN IMMEDIATE")
+        return connection
+    except sqlite3.Error as error:
+        if connection is not None:
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                error.add_note(
+                    f"Could not close source quiescence connection: {cleanup_error}"
+                )
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: could not acquire bounded SQLite source "
+            "writer exclusion; stop every listener and source writer."
+        ) from error
+
+
+def _checkpoint_source_passive_under_exclusion(source: Path) -> None:
+    connection: sqlite3.Connection | None = None
+    primary_error: BaseException | None = None
+    try:
+        connection = _open_neutral_source_connection(source)
+        row = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        if row is None or len(row) != 3:
+            raise DatabaseRelocationError(
+                "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint returned no "
+                "complete backfill result."
+            )
+        busy, log_frames, checkpointed_frames = (int(value) for value in row)
+        if busy or log_frames != checkpointed_frames:
+            raise DatabaseRelocationError(
+                "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint could not "
+                "completely backfill the normalized source."
+            )
+    except DatabaseRelocationError as error:
+        primary_error = error
+        raise
+    except (sqlite3.Error, TypeError, ValueError) as error:
+        primary_error = error
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint normalization failed."
+        ) from error
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                if primary_error is not None:
+                    primary_error.add_note(
+                        f"Could not close passive checkpoint connection: {cleanup_error}"
+                    )
+                else:
+                    raise DatabaseRelocationError(
+                        "RELOCATION_AUTHORIZATION_BLOCKER: could not close passive "
+                        "checkpoint connection."
+                    ) from cleanup_error
 
 
 def _release_source_quiescence(
@@ -463,60 +598,258 @@ def _open_read_only(path: Path) -> sqlite3.Connection:
     return connection
 
 
+def _validate_expected_authorization_identity(
+    identity: DatabaseRelocationAuthorizationIdentity,
+) -> None:
+    if not isinstance(identity, DatabaseRelocationAuthorizationIdentity):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid typed representation."
+        )
+    if not _is_sha256(identity.normalized_sha256):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid normalized SHA-256."
+        )
+    if not _is_nonnegative_int(identity.normalized_size):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid normalized size."
+        )
+    if not isinstance(identity.migration_identity, tuple) or not all(
+        isinstance(row, tuple)
+        and len(row) == 2
+        and isinstance(row[0], int)
+        and not isinstance(row[0], bool)
+        and row[0] > 0
+        and isinstance(row[1], str)
+        and bool(row[1])
+        for row in identity.migration_identity
+    ):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has invalid migration tuples."
+        )
+    if not isinstance(identity.generation_inventory, tuple) or not all(
+        isinstance(row, tuple)
+        and len(row) == 2
+        and isinstance(row[0], int)
+        and not isinstance(row[0], bool)
+        and row[0] > 0
+        and isinstance(row[1], bool)
+        for row in identity.generation_inventory
+    ):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid generation inventory."
+        )
+    if (
+        not identity.generation_inventory
+        or tuple(row[0] for row in identity.generation_inventory)
+        != tuple(sorted({row[0] for row in identity.generation_inventory}))
+        or sum(row[1] for row in identity.generation_inventory) != 1
+    ):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity requires one ordered current generation."
+        )
+    if not _is_nonnegative_int(identity.source_event_count) or not _is_nonnegative_int(
+        identity.generation_1_projection_link_count
+    ):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid durable row count."
+        )
+    if not isinstance(identity.projection_gaps, tuple) or not all(
+        isinstance(finding, DataHealthFinding) for finding in identity.projection_gaps
+    ):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid projection-gap result."
+        )
+    if not _is_sha256(identity.retained_source_preflight_fingerprint):
+        raise DatabaseRelocationError(
+            "Relocation authorization identity has an invalid retained-source fingerprint."
+        )
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_nonnegative_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _normalized_database_file_identity(path: Path) -> tuple[str, int]:
+    with path.open("rb") as database_file:
+        digest = file_digest(database_file, "sha256").hexdigest()
+        size = os.fstat(database_file.fileno()).st_size
+    return digest, size
+
+
+def _compute_relocation_authorization_identity(
+    connection: sqlite3.Connection,
+    source: Path,
+) -> DatabaseRelocationAuthorizationIdentity:
+    if not connection.in_transaction:
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: source writer exclusion is not held."
+        )
+    try:
+        normalized_sha256, normalized_size = _normalized_database_file_identity(source)
+        migration_identity = tuple(
+            (int(row[0]), str(row[1]))
+            for row in connection.execute(
+                "SELECT version, name FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        )
+        generation_rows = connection.execute(
+            "SELECT id, is_current FROM projection_generations ORDER BY id"
+        ).fetchall()
+        generation_inventory = tuple(
+            (int(row[0]), bool(int(row[1]))) for row in generation_rows
+        )
+        if (
+            not generation_inventory
+            or any(int(row[1]) not in (0, 1) for row in generation_rows)
+            or tuple(row[0] for row in generation_inventory)
+            != tuple(sorted({row[0] for row in generation_inventory}))
+            or sum(row[1] for row in generation_inventory) != 1
+        ):
+            raise ValueError("invalid projection-generation inventory")
+        source_event_count = _table_count(connection, "discord_source_events")
+        generation_1_projection_link_count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM discord_projection_links WHERE generation_id = 1"
+            ).fetchone()[0]
+        )
+        projection_gaps = DataHealthRepository(connection).scan_projection_gaps()
+        preflight = RetainedSourceReprojectionPreflightService().preflight(connection)
+        current_generation_ids = tuple(
+            generation_id
+            for generation_id, is_current in generation_inventory
+            if is_current
+        )
+        if preflight.current_generation_id != current_generation_ids[0]:
+            raise ValueError("preflight current generation does not match storage")
+        return DatabaseRelocationAuthorizationIdentity(
+            normalized_sha256=normalized_sha256,
+            normalized_size=normalized_size,
+            migration_identity=migration_identity,
+            generation_inventory=generation_inventory,
+            source_event_count=source_event_count,
+            generation_1_projection_link_count=generation_1_projection_link_count,
+            projection_gaps=projection_gaps,
+            retained_source_preflight_fingerprint=preflight.inventory_fingerprint,
+        )
+    except DatabaseRelocationError:
+        raise
+    except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError, KeyError) as error:
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: normalized source identity is unavailable "
+            "or malformed."
+        ) from error
+
+
+def _require_matching_authorization_identity(
+    expected: DatabaseRelocationAuthorizationIdentity,
+    actual: DatabaseRelocationAuthorizationIdentity,
+) -> None:
+    fields = (
+        ("normalized main-file SHA-256", expected.normalized_sha256, actual.normalized_sha256),
+        ("normalized main-file size", expected.normalized_size, actual.normalized_size),
+        ("migration tuples", expected.migration_identity, actual.migration_identity),
+        ("projection-generation inventory", expected.generation_inventory, actual.generation_inventory),
+        ("source-event count", expected.source_event_count, actual.source_event_count),
+        (
+            "generation-1 projection-link count",
+            expected.generation_1_projection_link_count,
+            actual.generation_1_projection_link_count,
+        ),
+        ("projection-gap result", expected.projection_gaps, actual.projection_gaps),
+        (
+            "retained-source readiness fingerprint",
+            expected.retained_source_preflight_fingerprint,
+            actual.retained_source_preflight_fingerprint,
+        ),
+    )
+    mismatches = tuple(label for label, expected_value, actual_value in fields if expected_value != actual_value)
+    if mismatches:
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_MISMATCH: " + ", ".join(mismatches) + "."
+        )
+
+
 def _validate_database(path: Path) -> _DatabaseFingerprint:
     try:
         connection = _open_read_only(path)
         try:
-            integrity_rows = tuple(
-                row[0] for row in connection.execute("PRAGMA integrity_check").fetchall()
-            )
-            if integrity_rows != ("ok",):
-                raise DatabaseRelocationError(
-                    f"SQLite integrity validation failed for {path}: {integrity_rows}"
-                )
-            table_names = tuple(
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master "
-                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-                ).fetchall()
-            )
-            missing_core = sorted(CATALOG_TABLES - set(table_names))
-            if missing_core:
-                raise DatabaseRelocationError(
-                    f"Database is not a recognized MOA catalog; missing tables: "
-                    f"{', '.join(missing_core)}"
-                )
-            migration_rows = tuple(
-                (int(row[0]), str(row[1]))
-                for row in connection.execute(
-                    "SELECT version, name FROM schema_migrations ORDER BY version"
-                ).fetchall()
-            )
-            expected_migrations = tuple(
-                (migration.version, migration.name) for migration in CATALOG_MIGRATIONS
-            )
-            if migration_rows != expected_migrations:
-                raise DatabaseRelocationError(
-                    "Database does not have the current recognized MOA migration identity."
-                )
-            table_counts = tuple(
-                (name, _table_count(connection, name)) for name in table_names
-            )
-            representative_row = connection.execute(
-                "SELECT id, kind, source, observed_at, raw_message "
-                "FROM import_events ORDER BY id LIMIT 1"
-            ).fetchone()
-            representative_import_event = (
-                tuple(representative_row) if representative_row is not None else None
-            )
-            return _DatabaseFingerprint(
-                migration_rows,
-                table_counts,
-                representative_import_event,
-            )
+            return _validate_database_connection(connection, path)
         finally:
             connection.close()
+    except DatabaseRelocationError:
+        raise
+    except sqlite3.Error as error:
+        raise DatabaseRelocationError(
+            f"Could not validate MOA SQLite database {path}: {error}"
+        ) from error
+
+
+def _validate_database_connection(
+    connection: sqlite3.Connection,
+    path: Path,
+) -> _DatabaseFingerprint:
+    integrity_rows = tuple(
+        row[0] for row in connection.execute("PRAGMA integrity_check").fetchall()
+    )
+    if integrity_rows != ("ok",):
+        raise DatabaseRelocationError(
+            f"SQLite integrity validation failed for {path}: {integrity_rows}"
+        )
+    table_names = tuple(
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+    )
+    missing_core = sorted(CATALOG_TABLES - set(table_names))
+    if missing_core:
+        raise DatabaseRelocationError(
+            f"Database is not a recognized MOA catalog; missing tables: "
+            f"{', '.join(missing_core)}"
+        )
+    migration_rows = tuple(
+        (int(row[0]), str(row[1]))
+        for row in connection.execute(
+            "SELECT version, name FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    )
+    expected_migrations = tuple(
+        (migration.version, migration.name) for migration in CATALOG_MIGRATIONS
+    )
+    if migration_rows != expected_migrations:
+        raise DatabaseRelocationError(
+            "Database does not have the current recognized MOA migration identity."
+        )
+    table_counts = tuple((name, _table_count(connection, name)) for name in table_names)
+    representative_row = connection.execute(
+        "SELECT id, kind, source, observed_at, raw_message "
+        "FROM import_events ORDER BY id LIMIT 1"
+    ).fetchone()
+    representative_import_event = (
+        tuple(representative_row) if representative_row is not None else None
+    )
+    return _DatabaseFingerprint(
+        migration_rows,
+        table_counts,
+        representative_import_event,
+    )
+
+
+def _validate_held_database(
+    connection: sqlite3.Connection,
+    path: Path,
+) -> _DatabaseFingerprint:
+    try:
+        return _validate_database_connection(connection, path)
     except DatabaseRelocationError:
         raise
     except sqlite3.Error as error:

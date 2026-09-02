@@ -2,17 +2,21 @@ import gc
 import multiprocessing
 import os
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from moa.database import legacy_database_relocation, sqlite
 from moa.database.legacy_database_relocation import (
+    DatabaseRelocationAuthorizationIdentity,
     DatabaseRelocationError,
     LegacyDatabaseAuthorityConflictError,
     LegacyDatabaseRelocationRequiredError,
     relocate_database,
+    relocate_database_with_authorization,
 )
+from moa.models.data_health import DataHealthFinding
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -143,6 +147,31 @@ def _create_moa_database(path: Path, *, message: str = "representative content")
     gc.collect()
 
 
+def _authorization_identity(source: Path) -> DatabaseRelocationAuthorizationIdentity:
+    legacy_database_relocation._checkpoint_source_for_retirement(source)
+    connection = legacy_database_relocation._acquire_authorization_exclusion(source)
+    primary_error = None
+    try:
+        legacy_database_relocation._checkpoint_source_passive_under_exclusion(source)
+        return legacy_database_relocation._compute_relocation_authorization_identity(
+            connection, source
+        )
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        legacy_database_relocation._release_source_quiescence(
+            connection, primary_error=primary_error
+        )
+
+
+def _assert_no_authorization_failure_output(source: Path, target: Path) -> None:
+    assert source.is_file()
+    assert not target.exists()
+    assert not target.parent.exists()
+    assert list(source.parent.glob(f"{source.name}.migrated-backup-*")) == []
+
+
 def _assert_valid_tombstone(source: Path, target: Path, archive: Path) -> None:
     tombstone = legacy_database_relocation._validate_retirement_tombstone(
         source,
@@ -181,6 +210,258 @@ def test_successful_relocation_validates_promotes_and_retires_source(
             "SELECT raw_message FROM import_events WHERE source = 'test'"
         ).fetchone()[0] == "representative content"
     assert Path(sqlite.DEFAULT_DATABASE_PATH) == target
+
+
+def test_authorization_bound_relocation_matches_normalized_identity_and_relocates(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "authorized-target" / "moa.db"
+
+    assert expected.generation_inventory == ((1, True),)
+    assert expected.source_event_count == 0
+    assert expected.generation_1_projection_link_count == 0
+    assert expected.projection_gaps == ()
+    result = relocate_database_with_authorization(source, target, expected)
+
+    assert result.target == target.resolve()
+    assert target.is_file()
+    _assert_valid_tombstone(source, target, result.source_archive)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("normalized_sha256", lambda value: "0" * 64 if value != "0" * 64 else "1" * 64, "SHA-256"),
+        ("normalized_size", lambda value: value + 1, "size"),
+        ("migration_identity", lambda value: value[:-1], "migration tuples"),
+        ("generation_inventory", lambda _value: ((2, True),), "generation"),
+        ("source_event_count", lambda value: value + 1, "source-event count"),
+        (
+            "generation_1_projection_link_count",
+            lambda value: value + 1,
+            "generation-1 projection-link count",
+        ),
+        (
+            "projection_gaps",
+            lambda value: value
+            + (
+                DataHealthFinding(
+                    "DH-PG-TEST", "projection-gap", "test", "test", "mismatch"
+                ),
+            ),
+            "projection-gap result",
+        ),
+        (
+            "retained_source_preflight_fingerprint",
+            lambda value: "0" * 64 if value != "0" * 64 else "1" * 64,
+            "readiness fingerprint",
+        ),
+    ],
+    ids=[
+        "sha",
+        "size",
+        "migrations",
+        "generations",
+        "source-events",
+        "generation-links",
+        "projection-gaps",
+        "readiness-fingerprint",
+    ],
+)
+def test_authorization_identity_mismatch_fails_before_output(
+    monkeypatch, tmp_path, field, replacement, message
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "absent-target-parent" / "moa.db"
+    mismatched = replace(expected, **{field: replacement(getattr(expected, field))})
+
+    with pytest.raises(DatabaseRelocationError, match=message):
+        relocate_database_with_authorization(source, target, mismatched)
+
+    _assert_no_authorization_failure_output(source, target)
+
+
+def test_bound_relocation_writer_contention_fails_before_output(monkeypatch, tmp_path) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "absent-target-parent" / "moa.db"
+    monkeypatch.setattr(
+        legacy_database_relocation, "_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS", 100
+    )
+    context = multiprocessing.get_context("spawn")
+    holding = context.Event()
+    release = context.Event()
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_hold_writer_transaction_process,
+        args=(str(source), holding, release, result_queue),
+    )
+    real_checkpoint = legacy_database_relocation._checkpoint_source_for_retirement
+
+    def checkpoint_then_start_writer(path):
+        real_checkpoint(path)
+        process.start()
+        assert holding.wait(10)
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_checkpoint_source_for_retirement",
+        checkpoint_then_start_writer,
+    )
+
+    try:
+        with pytest.raises(DatabaseRelocationError, match="writer exclusion"):
+            relocate_database_with_authorization(source, target, expected)
+    finally:
+        release.set()
+        _join_process(process)
+
+    assert result_queue.get(timeout=1) == ("rolled-back", None)
+    _assert_no_authorization_failure_output(source, target)
+
+
+def test_bound_relocation_incomplete_passive_checkpoint_fails_before_output(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "absent-target-parent" / "moa.db"
+    original_open = legacy_database_relocation._open_neutral_source_connection
+    opened = 0
+    passive_closed = False
+
+    class IncompletePassiveConnection:
+        def execute(self, statement):
+            assert statement == "PRAGMA wal_checkpoint(PASSIVE)"
+            return self
+
+        def fetchone(self):
+            return (1, 2, 1)
+
+        def close(self):
+            nonlocal passive_closed
+            passive_closed = True
+
+    def open_with_incomplete_passive(path):
+        nonlocal opened
+        opened += 1
+        if opened == 1:
+            return original_open(path)
+        return IncompletePassiveConnection()
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_open_neutral_source_connection",
+        open_with_incomplete_passive,
+    )
+
+    with pytest.raises(DatabaseRelocationError, match="completely backfill"):
+        relocate_database_with_authorization(source, target, expected)
+
+    assert passive_closed
+    _assert_no_authorization_failure_output(source, target)
+
+
+def test_commit_before_writer_exclusion_invalidates_earlier_normalized_identity(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "absent-target-parent" / "moa.db"
+    real_checkpoint = legacy_database_relocation._checkpoint_source_for_retirement
+
+    def checkpoint_then_commit(path):
+        real_checkpoint(path)
+        with sqlite.connect(path) as connection:
+            connection.execute(
+                "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+                "VALUES ('command_observation', 'later-write', "
+                "'2026-09-02T00:00:00+00:00', 'committed before exclusion')"
+            )
+            connection.commit()
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_checkpoint_source_for_retirement",
+        checkpoint_then_commit,
+    )
+
+    with pytest.raises(DatabaseRelocationError, match="normalized main-file SHA-256"):
+        relocate_database_with_authorization(source, target, expected)
+
+    _assert_no_authorization_failure_output(source, target)
+
+
+def test_semantic_identity_uses_the_held_begin_immediate_connection(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "authorized-target" / "moa.db"
+    real_acquire = legacy_database_relocation._acquire_authorization_exclusion
+    real_compute = legacy_database_relocation._compute_relocation_authorization_identity
+    held_connection = None
+    checked = False
+
+    def acquire(path):
+        nonlocal held_connection
+        held_connection = real_acquire(path)
+        return held_connection
+
+    def compute(connection, path):
+        nonlocal checked
+        assert connection is held_connection
+        assert connection.in_transaction
+        checked = True
+        return real_compute(connection, path)
+
+    monkeypatch.setattr(
+        legacy_database_relocation, "_acquire_authorization_exclusion", acquire
+    )
+    monkeypatch.setattr(
+        legacy_database_relocation, "_compute_relocation_authorization_identity", compute
+    )
+
+    relocate_database_with_authorization(source, target, expected)
+
+    assert checked
+
+
+def test_bound_relocation_preflight_uses_caller_owned_transaction(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    expected = _authorization_identity(source)
+    target = tmp_path / "authorized-target" / "moa.db"
+    real_service = legacy_database_relocation.RetainedSourceReprojectionPreflightService()
+    checked = False
+
+    class CheckingPreflightService:
+        def preflight(self, connection):
+            nonlocal checked
+            assert connection.in_transaction
+            checked = True
+            return real_service.preflight(connection)
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "RetainedSourceReprojectionPreflightService",
+        CheckingPreflightService,
+    )
+
+    relocate_database_with_authorization(source, target, expected)
+
+    assert checked
 
 
 def test_competing_writer_winning_post_retirement_race_fails_relocation(
