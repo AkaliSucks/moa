@@ -1,8 +1,10 @@
 import gc
+import json
 import multiprocessing
 import os
 import sqlite3
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -13,11 +15,15 @@ from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     LegacyDatabaseAuthorityConflictError,
     LegacyDatabaseRelocationRequiredError,
+    certify_database_relocation_identity,
     relocate_database,
     relocate_database_with_authorization,
 )
 from moa.models.data_health import DataHealthFinding
 from moa.repositories.catalog_repository import CatalogRepository
+
+
+CHECKPOINT = "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527"
 
 
 def _commit_import_event_process(
@@ -129,6 +135,11 @@ def _configure_checkout(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     (checkout / "pyproject.toml").write_text("[project]", encoding="utf-8")
     (checkout / ".git").mkdir()
     monkeypatch.setattr(legacy_database_relocation, "_source_file_path", lambda: source_file)
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_verified_moa_checkout_checkpoint",
+        lambda: CHECKPOINT,
+    )
     return checkout, checkout / "data" / "database" / "moa.db"
 
 
@@ -231,6 +242,388 @@ def test_authorization_bound_relocation_matches_normalized_identity_and_relocate
     _assert_valid_tombstone(source, target, result.source_archive)
 
 
+def test_certification_returns_canonical_evidence_without_relocation_output(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "absent-destination" / "moa.db"
+    with sqlite3.connect(source) as connection:
+        original_rows = tuple(
+            connection.execute(
+            "SELECT id, kind, source, observed_at, raw_message FROM import_events ORDER BY id"
+            )
+        )
+    timestamps = iter(
+        (
+            "2026-09-03T10:00:00+00:00",
+            "2026-09-03T10:00:01+00:00",
+            "2026-09-03T10:00:02+00:00",
+        )
+    )
+    monkeypatch.setattr(legacy_database_relocation, "_utc_timestamp", lambda: next(timestamps))
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "uuid4",
+        lambda: "00000000-0000-4000-8000-000000000001",
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("certification invoked relocation output")
+
+    for name in (
+        "_prepare_relocation_target",
+        "_backup_database",
+        "_promote_target",
+        "_retire_source",
+        "_install_retirement_tombstone",
+        "_complete_source_retirement",
+    ):
+        monkeypatch.setattr(legacy_database_relocation, name, forbidden)
+    monkeypatch.setattr(legacy_database_relocation.tempfile, "mkstemp", forbidden)
+
+    certification = certify_database_relocation_identity(
+        source,
+        destination,
+        CHECKPOINT,
+        listener_known_writers_stopped_attested=True,
+    )
+
+    document = json.loads(certification.to_json())
+    digest = document.pop("certification_record_sha256")
+    assert digest == sha256(
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+    ).hexdigest()
+    assert certification.to_json() == json.dumps(
+        certification.as_dict(),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    assert document["certification_format"] == (
+        "moa-database-relocation-identity-certification"
+    )
+    assert document["certification_version"] == 1
+    assert document["moa_checkpoint"] == CHECKPOINT
+    assert document["source"] == str(source.resolve())
+    assert document["destination"] == str(destination.resolve())
+    assert document["normalization"]["truncate_checkpoint"][0] == 0
+    assert document["normalization"]["passive_checkpoint"][0] == 0
+    assert document["validation"] == {
+        "foreign_key_check": [],
+        "integrity_check": ["ok"],
+    }
+    assert document["listener_known_writers_stopped_attested"] is True
+    assert document["sqlite_writer_exclusion"]["acquired"] is True
+    assert document["sqlite_writer_exclusion"]["released"] is True
+    assert document["post_normalization_main"] == {
+        "sha256": certification.identity.normalized_sha256,
+        "size": certification.identity.normalized_size,
+    }
+    assert source.is_file()
+    assert not destination.parent.exists()
+    assert list(source.parent.glob(f"{source.name}.migrated-backup-*")) == []
+    with sqlite3.connect(source) as connection:
+        assert tuple(
+            connection.execute(
+                "SELECT id, kind, source, observed_at, raw_message "
+                "FROM import_events ORDER BY id"
+            )
+        ) == original_rows
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
+
+def test_certification_preserves_order_and_typed_projection_gap_identifiers(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    real_compute = legacy_database_relocation._compute_relocation_authorization_identity
+
+    def compute_with_findings(connection, path):
+        identity = real_compute(connection, path)
+        return replace(
+            identity,
+            projection_gaps=(
+                DataHealthFinding("DH-PG-001", "first", "entity", 7, "first"),
+                DataHealthFinding("DH-PG-002", "second", "entity", "007", "second"),
+            ),
+        )
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_compute_relocation_authorization_identity",
+        compute_with_findings,
+    )
+
+    certification = certify_database_relocation_identity(source, destination, CHECKPOINT)
+    identity_document = certification.as_dict()["authorization_identity"]
+    assert identity_document["migration_identity"] == [
+        list(row) for row in certification.identity.migration_identity
+    ]
+    assert identity_document["generation_inventory"] == [
+        list(row) for row in certification.identity.generation_inventory
+    ]
+    assert [
+        (finding["local_identifier_kind"], finding["local_identifier"])
+        for finding in identity_document["projection_gaps"]
+    ] == [("int", 7), ("str", "007")]
+    argv = certification.as_dict()["later_bound_relocation_argv"]
+    assert isinstance(argv, list)
+    assert argv[:4] == [
+        "catalog",
+        "relocate-database",
+        str(source.resolve()),
+        "--authorization-bound",
+    ]
+    assert argv[-1] == "--apply"
+
+
+def test_certification_identity_is_reused_by_unchanged_bound_relocation(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+
+    certification = certify_database_relocation_identity(source, destination, CHECKPOINT)
+    result = relocate_database_with_authorization(
+        source, destination, certification.identity
+    )
+
+    assert result.target == destination.resolve()
+    assert destination.is_file()
+
+
+def test_certification_identity_rejects_later_logical_drift_before_output(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    certification = certify_database_relocation_identity(source, destination, CHECKPOINT)
+    with sqlite.connect(source) as connection:
+        connection.execute(
+            "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+            "VALUES ('command_observation', 'drift', "
+            "'2026-09-03T00:00:00+00:00', 'later state')"
+        )
+        connection.commit()
+
+    with pytest.raises(DatabaseRelocationError, match="RELOCATION_AUTHORIZATION_MISMATCH"):
+        relocate_database_with_authorization(
+            source, destination, certification.identity
+        )
+
+    _assert_no_authorization_failure_output(source, destination)
+
+
+def test_certification_rejects_incomplete_retirement_and_stale_target_state(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    incomplete = source.with_name(f"{source.name}.migrated-backup-test")
+    incomplete.mkdir()
+    (incomplete / ".moa-relocation-incomplete").write_text("incomplete", encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match="incomplete source retirement"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+
+    (incomplete / ".moa-relocation-incomplete").unlink()
+    incomplete.rmdir()
+    destination.parent.mkdir()
+    stale = destination.parent / f"{destination.name}.migrating-stale"
+    stale.write_text("stale", encoding="utf-8")
+    with pytest.raises(DatabaseRelocationError, match="stale relocation temporary"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+    assert not destination.exists()
+
+
+def test_certification_rejects_path_checkpoint_and_database_admission_failures(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+
+    with pytest.raises(DatabaseRelocationError, match="distinct paths"):
+        certify_database_relocation_identity(source, source, CHECKPOINT)
+
+    destination.parent.mkdir()
+    destination.write_bytes(b"existing destination")
+    with pytest.raises(DatabaseRelocationError, match="will not be overwritten"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+    assert destination.read_bytes() == b"existing destination"
+    destination.unlink()
+    destination.parent.rmdir()
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_verified_moa_checkout_checkpoint",
+        lambda: "0" * 40,
+    )
+    with pytest.raises(DatabaseRelocationError, match="CHECKPOINT_MISMATCH"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+    assert not destination.parent.exists()
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_verified_moa_checkout_checkpoint",
+        lambda: CHECKPOINT,
+    )
+    monkeypatch.setattr(
+        legacy_database_relocation, "verified_legacy_database_path", lambda: None
+    )
+    invalid_source = tmp_path / "invalid" / "moa.db"
+    invalid_source.parent.mkdir()
+    invalid_source.write_bytes(b"not sqlite")
+    with pytest.raises(DatabaseRelocationError, match="SQLite database"):
+        certify_database_relocation_identity(invalid_source, destination, CHECKPOINT)
+    assert not destination.parent.exists()
+
+
+def test_certification_rejects_non_wal_source_without_changing_journal_mode(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == "delete"
+
+    with pytest.raises(DatabaseRelocationError, match="must already be WAL"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+
+    with sqlite3.connect(source) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    assert not destination.parent.exists()
+
+
+def test_certification_semantic_identity_failure_releases_exclusion(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+
+    def fail_identity(*_args, **_kwargs):
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: normalized source identity is unavailable."
+        )
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_compute_relocation_authorization_identity",
+        fail_identity,
+    )
+    with pytest.raises(DatabaseRelocationError, match="identity is unavailable"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+    assert not destination.parent.exists()
+    with sqlite3.connect(source) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
+
+def test_certification_foreign_key_failure_releases_exclusion_and_creates_no_output(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    with sqlite3.connect(source) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            "INSERT INTO rank_snapshots "
+            "(character_id, claim_rank, like_rank, observed_at, import_event_id) "
+            "VALUES (999999, NULL, NULL, '2026-09-03T00:00:00+00:00', 1)"
+        )
+        connection.commit()
+
+    with pytest.raises(DatabaseRelocationError, match="foreign-key validation failed"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+
+    assert not destination.parent.exists()
+    with sqlite3.connect(source) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+
+
+def test_certification_begin_immediate_contention_fails_before_output(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+    monkeypatch.setattr(
+        legacy_database_relocation, "_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS", 100
+    )
+    context = multiprocessing.get_context("spawn")
+    holding = context.Event()
+    release = context.Event()
+    result_queue = context.Queue()
+    process = context.Process(
+        target=_hold_writer_transaction_process,
+        args=(str(source), holding, release, result_queue),
+    )
+    real_checkpoint = legacy_database_relocation._checkpoint_source_truncate_neutral
+
+    def checkpoint_then_start_writer(path):
+        result = real_checkpoint(path)
+        process.start()
+        assert holding.wait(10)
+        return result
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_checkpoint_source_truncate_neutral",
+        checkpoint_then_start_writer,
+    )
+    try:
+        with pytest.raises(DatabaseRelocationError, match="writer exclusion"):
+            certify_database_relocation_identity(source, destination, CHECKPOINT)
+    finally:
+        release.set()
+        _join_process(process)
+
+    assert result_queue.get(timeout=1) == ("rolled-back", None)
+    assert not destination.parent.exists()
+
+
+@pytest.mark.parametrize("checkpoint_mode", ["truncate", "passive"])
+def test_certification_incomplete_checkpoint_fails_before_output(
+    monkeypatch, tmp_path, checkpoint_mode
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "destination" / "moa.db"
+
+    def incomplete(_path):
+        raise DatabaseRelocationError(
+            f"RELOCATION_AUTHORIZATION_BLOCKER: {checkpoint_mode} checkpoint could not "
+            "completely backfill the normalized source."
+        )
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        f"_checkpoint_source_{checkpoint_mode}_neutral"
+        if checkpoint_mode == "truncate"
+        else "_checkpoint_source_passive_under_exclusion",
+        incomplete,
+    )
+    with pytest.raises(DatabaseRelocationError, match=f"{checkpoint_mode} checkpoint"):
+        certify_database_relocation_identity(source, destination, CHECKPOINT)
+    assert not destination.parent.exists()
+
+
 @pytest.mark.parametrize(
     ("field", "replacement", "message"),
     [
@@ -302,7 +695,7 @@ def test_bound_relocation_writer_contention_fails_before_output(monkeypatch, tmp
         target=_hold_writer_transaction_process,
         args=(str(source), holding, release, result_queue),
     )
-    real_checkpoint = legacy_database_relocation._checkpoint_source_for_retirement
+    real_checkpoint = legacy_database_relocation._checkpoint_source_truncate_neutral
 
     def checkpoint_then_start_writer(path):
         real_checkpoint(path)
@@ -311,7 +704,7 @@ def test_bound_relocation_writer_contention_fails_before_output(monkeypatch, tmp
 
     monkeypatch.setattr(
         legacy_database_relocation,
-        "_checkpoint_source_for_retirement",
+        "_checkpoint_source_truncate_neutral",
         checkpoint_then_start_writer,
     )
 
@@ -352,7 +745,7 @@ def test_bound_relocation_incomplete_passive_checkpoint_fails_before_output(
     def open_with_incomplete_passive(path):
         nonlocal opened
         opened += 1
-        if opened == 1:
+        if opened <= 2:
             return original_open(path)
         return IncompletePassiveConnection()
 
@@ -376,7 +769,7 @@ def test_commit_before_writer_exclusion_invalidates_earlier_normalized_identity(
     _create_moa_database(source)
     expected = _authorization_identity(source)
     target = tmp_path / "absent-target-parent" / "moa.db"
-    real_checkpoint = legacy_database_relocation._checkpoint_source_for_retirement
+    real_checkpoint = legacy_database_relocation._checkpoint_source_truncate_neutral
 
     def checkpoint_then_commit(path):
         real_checkpoint(path)
@@ -390,7 +783,7 @@ def test_commit_before_writer_exclusion_invalidates_earlier_normalized_identity(
 
     monkeypatch.setattr(
         legacy_database_relocation,
-        "_checkpoint_source_for_retirement",
+        "_checkpoint_source_truncate_neutral",
         checkpoint_then_commit,
     )
 
@@ -409,8 +802,10 @@ def test_semantic_identity_uses_the_held_begin_immediate_connection(
     target = tmp_path / "authorized-target" / "moa.db"
     real_acquire = legacy_database_relocation._acquire_authorization_exclusion
     real_compute = legacy_database_relocation._compute_relocation_authorization_identity
+    real_prepare = legacy_database_relocation._prepare_relocation_target
     held_connection = None
-    checked = False
+    identity_checked = False
+    continuation_checked = False
 
     def acquire(path):
         nonlocal held_connection
@@ -418,11 +813,18 @@ def test_semantic_identity_uses_the_held_begin_immediate_connection(
         return held_connection
 
     def compute(connection, path):
-        nonlocal checked
+        nonlocal identity_checked
         assert connection is held_connection
         assert connection.in_transaction
-        checked = True
+        identity_checked = True
         return real_compute(connection, path)
+
+    def prepare(path):
+        nonlocal continuation_checked
+        assert held_connection is not None
+        assert held_connection.in_transaction
+        continuation_checked = True
+        real_prepare(path)
 
     monkeypatch.setattr(
         legacy_database_relocation, "_acquire_authorization_exclusion", acquire
@@ -430,10 +832,12 @@ def test_semantic_identity_uses_the_held_begin_immediate_connection(
     monkeypatch.setattr(
         legacy_database_relocation, "_compute_relocation_authorization_identity", compute
     )
+    monkeypatch.setattr(legacy_database_relocation, "_prepare_relocation_target", prepare)
 
     relocate_database_with_authorization(source, target, expected)
 
-    assert checked
+    assert identity_checked
+    assert continuation_checked
 
 
 def test_bound_relocation_preflight_uses_caller_owned_transaction(

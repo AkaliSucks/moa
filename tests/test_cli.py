@@ -5437,6 +5437,219 @@ def _compact_cli_output(output: str) -> str:
     return "".join(output.split())
 
 
+def test_catalog_certify_relocation_identity_help_is_lazy() -> None:
+    calls: list[int] = []
+
+    def target_path_provider():
+        calls.append(1)
+        return Path("unused.db")
+
+    catalog_app = typer.Typer()
+    catalog_relocate_database_commands_module.register_catalog_relocate_database_command(
+        catalog_app,
+        Console(),
+        target_path_provider,
+    )
+
+    result = CliRunner().invoke(
+        catalog_app,
+        ["certify-relocation-identity", "--help"],
+        terminal_width=240,
+    )
+
+    assert result.exit_code == 0
+    assert "SOURCE" in result.stdout
+    assert "--expected-destination" in result.stdout
+    assert "--expected-moa-checkpoint" in result.stdout
+    assert "--normalize" in result.stdout
+    certify_command = get_command(catalog_app).commands["certify-relocation-identity"]
+    registered_options = {
+        option
+        for parameter in certify_command.params
+        for option in getattr(parameter, "opts", ())
+    }
+    assert "--listener-known-writers-stopped" in registered_options
+    assert calls == []
+
+
+def test_catalog_certify_relocation_identity_preview_does_not_certify(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "certify-relocation-identity",
+            str(source),
+            "--expected-destination",
+            str(destination),
+            "--expected-moa-checkpoint",
+            "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "No changes made" in result.stdout
+    assert "--normalize" in result.stdout
+    assert not destination.parent.exists()
+
+
+def test_catalog_certify_relocation_identity_validates_destination_before_certifying(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    other_destination = tmp_path / "other" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "certify-relocation-identity",
+            str(source),
+            "--expected-destination",
+            str(other_destination),
+            "--expected-moa-checkpoint",
+            "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527",
+            "--normalize",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "RELOCATION_CERTIFICATION_DESTINATION_MISMATCH" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert not destination.parent.exists()
+    assert not other_destination.parent.exists()
+
+
+def test_catalog_certify_relocation_identity_outputs_only_canonical_json(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    calls = []
+    canonical_json = '{"certification_format":"test","certification_version":1}'
+
+    def certify(
+        received_source,
+        received_destination,
+        received_checkpoint,
+        *,
+        listener_known_writers_stopped_attested,
+    ):
+        calls.append(
+            (
+                received_source,
+                received_destination,
+                received_checkpoint,
+                listener_known_writers_stopped_attested,
+            )
+        )
+        return SimpleNamespace(to_json=lambda: canonical_json)
+
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        certify,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "certify-relocation-identity",
+            str(source),
+            "--expected-destination",
+            str(destination),
+            "--expected-moa-checkpoint",
+            "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527",
+            "--listener-known-writers-stopped",
+            "--normalize",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == canonical_json + "\n"
+    assert calls == [
+        (
+            source.resolve(),
+            destination.resolve(),
+            "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527",
+            True,
+        )
+    ]
+
+
+def test_catalog_certify_relocation_identity_bounds_primitive_error(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+
+    def fail(*_args, **_kwargs):
+        raise DatabaseRelocationError("RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH")
+
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        fail,
+    )
+    result = CliRunner().invoke(
+        main.app,
+        [
+            "catalog",
+            "certify-relocation-identity",
+            str(source),
+            "--expected-destination",
+            str(destination),
+            "--expected-moa-checkpoint",
+            "0" * 40,
+            "--normalize",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
 def test_catalog_relocate_database_help_is_lazy_and_requires_source_and_apply() -> None:
     calls: list[int] = []
 

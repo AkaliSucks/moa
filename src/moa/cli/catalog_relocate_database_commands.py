@@ -9,6 +9,7 @@ from rich.console import Console
 from moa.database.legacy_database_relocation import (
     DatabaseRelocationAuthorizationIdentity,
     DatabaseRelocationError,
+    certify_database_relocation_identity,
     relocate_database,
     relocate_database_with_authorization,
 )
@@ -189,6 +190,62 @@ def register_catalog_relocate_database_command(
     console: Console,
     target_path_provider: Callable[[], Path],
 ) -> None:
+    @catalog_app.command("certify-relocation-identity")
+    def catalog_certify_relocation_identity(
+        source: Path = typer.Argument(..., help="Explicit MOA source database path."),
+        expected_destination: Path = typer.Option(
+            ...,
+            "--expected-destination",
+            help="Canonical destination context intended for a later relocation.",
+        ),
+        expected_moa_checkpoint: str = typer.Option(
+            ...,
+            "--expected-moa-checkpoint",
+            help="Exact verified MOA checkout commit for this certification.",
+        ),
+        normalize: bool = typer.Option(
+            False,
+            "--normalize",
+            help="Permit SQLite representation normalization and certify identity.",
+        ),
+        listener_known_writers_stopped: bool = typer.Option(
+            False,
+            "--listener-known-writers-stopped",
+            help="Attest that the listener and known source writers are stopped.",
+        ),
+    ) -> None:
+        """Certify a relocation identity without authorizing or performing relocation."""
+        destination = Path(target_path_provider()).resolve(strict=False)
+        supplied_destination = expected_destination.expanduser().resolve(strict=False)
+        resolved_source = source.expanduser().resolve(strict=False)
+        if supplied_destination != destination:
+            console.print(
+                "[red]RELOCATION_CERTIFICATION_DESTINATION_MISMATCH: expected destination "
+                "does not match MOA's current relocation destination.[/red]"
+            )
+            raise typer.Exit(1)
+        if not normalize:
+            console.print(f"Source: {resolved_source}")
+            console.print(f"Intended destination: {destination}")
+            console.print(
+                "[yellow]No changes made. Rerun with --normalize only after explicitly "
+                "authorizing SQLite representation normalization.[/yellow]"
+            )
+            return
+        try:
+            certification = certify_database_relocation_identity(
+                resolved_source,
+                destination,
+                expected_moa_checkpoint,
+                listener_known_writers_stopped_attested=(
+                    listener_known_writers_stopped
+                ),
+            )
+        except DatabaseRelocationError as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
+        typer.echo(certification.to_json())
+
     @catalog_app.command("relocate-database")
     def catalog_relocate_database(
         source: Path = typer.Argument(..., help="Explicit legacy MOA database path."),

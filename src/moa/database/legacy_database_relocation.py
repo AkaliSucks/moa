@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from hashlib import file_digest
+from hashlib import file_digest, sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,6 +26,9 @@ _INCOMPLETE_RETIREMENT_MARKER_NAME = ".moa-relocation-incomplete"
 _RETIREMENT_TOMBSTONE_MARKER_NAME = ".moa-relocated"
 _RETIREMENT_TOMBSTONE_FORMAT = "moa-legacy-database-retirement"
 _RETIREMENT_TOMBSTONE_VERSION = 1
+_CERTIFICATION_FORMAT = "moa-database-relocation-identity-certification"
+_CERTIFICATION_VERSION = 1
+_CERTIFICATION_HASH_SCOPE = "canonical-json-without-certification-record-sha256"
 _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS = 5000
 
 
@@ -68,10 +72,95 @@ class DatabaseRelocationAuthorizationIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class DatabaseFileObservation:
+    """Informational physical state observed before source normalization."""
+
+    present: bool
+    size: int | None
+    sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRelocationIdentityCertification:
+    """Versioned evidence for one certification-only normalization epoch."""
+
+    run_id: str
+    certified_at: str
+    source: Path
+    destination: Path
+    moa_checkpoint: str
+    identity: DatabaseRelocationAuthorizationIdentity
+    truncate_checkpoint: tuple[int, int, int]
+    passive_checkpoint: tuple[int, int, int]
+    exclusion_acquired_at: str
+    exclusion_released_at: str
+    integrity_check: tuple[str, ...]
+    foreign_key_check: tuple[tuple[object, ...], ...]
+    listener_known_writers_stopped_attested: bool
+    pre_normalization_main: DatabaseFileObservation
+    pre_normalization_wal: DatabaseFileObservation
+    pre_normalization_shm: DatabaseFileObservation
+    certification_record_sha256: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the stable JSON document, including its self-verifying digest."""
+        document = _certification_document(
+            run_id=self.run_id,
+            certified_at=self.certified_at,
+            source=self.source,
+            destination=self.destination,
+            moa_checkpoint=self.moa_checkpoint,
+            identity=self.identity,
+            truncate_checkpoint=self.truncate_checkpoint,
+            passive_checkpoint=self.passive_checkpoint,
+            exclusion_acquired_at=self.exclusion_acquired_at,
+            exclusion_released_at=self.exclusion_released_at,
+            integrity_check=self.integrity_check,
+            foreign_key_check=self.foreign_key_check,
+            listener_known_writers_stopped_attested=(
+                self.listener_known_writers_stopped_attested
+            ),
+            pre_normalization_main=self.pre_normalization_main,
+            pre_normalization_wal=self.pre_normalization_wal,
+            pre_normalization_shm=self.pre_normalization_shm,
+        )
+        document["certification_record_sha256"] = self.certification_record_sha256
+        return document
+
+    def to_json(self) -> str:
+        """Serialize canonical machine-readable certification JSON."""
+        return _canonical_json(self.as_dict())
+
+
+@dataclass(frozen=True, slots=True)
 class _DatabaseFingerprint:
     migration_rows: tuple[tuple[int, str], ...]
     table_counts: tuple[tuple[str, int], ...]
     representative_import_event: tuple[object, ...] | None
+
+
+@dataclass(slots=True)
+class _NormalizedRelocationAuthority:
+    connection: sqlite3.Connection | None
+    identity: DatabaseRelocationAuthorizationIdentity
+    source_fingerprint: _DatabaseFingerprint
+    truncate_checkpoint: tuple[int, int, int]
+    passive_checkpoint: tuple[int, int, int]
+    exclusion_acquired_at: str
+    certified_at: str
+    integrity_check: tuple[str, ...]
+    foreign_key_check: tuple[tuple[object, ...], ...]
+    pre_normalization_main: DatabaseFileObservation
+    pre_normalization_wal: DatabaseFileObservation
+    pre_normalization_shm: DatabaseFileObservation
+    exclusion_released_at: str | None = None
+
+    def release(self, *, primary_error: BaseException | None = None) -> None:
+        connection, self.connection = self.connection, None
+        if connection is None:
+            return
+        _release_source_quiescence(connection, primary_error=primary_error)
+        self.exclusion_released_at = _utc_timestamp()
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,8 +173,7 @@ def _source_file_path() -> Path:
     return Path(__file__).resolve()
 
 
-def verified_legacy_database_path() -> Path | None:
-    """Return the one verified current-checkout legacy path, if available."""
+def _verified_checkout_root() -> Path | None:
     source_path = _source_file_path()
     try:
         checkout_root = source_path.parents[3]
@@ -100,7 +188,52 @@ def verified_legacy_database_path() -> Path | None:
         return None
     if not (checkout_root / "src" / "moa" / "database" / "sqlite.py").is_file():
         return None
+    return checkout_root
+
+
+def verified_legacy_database_path() -> Path | None:
+    """Return the one verified current-checkout legacy path, if available."""
+    checkout_root = _verified_checkout_root()
+    if checkout_root is None:
+        return None
     return checkout_root / "data" / "database" / "moa.db"
+
+
+def _verified_moa_checkout_checkpoint() -> str:
+    checkout_root = _verified_checkout_root()
+    if checkout_root is None:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH: the running MOA source "
+            "is not in a verified checkout."
+        )
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-c",
+                f"safe.directory={checkout_root}",
+                "-C",
+                str(checkout_root),
+                "rev-parse",
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH: the running MOA checkout "
+            "checkpoint could not be verified."
+        ) from error
+    checkpoint = result.stdout.strip()
+    if not _is_git_checkpoint(checkpoint):
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH: the running MOA checkout "
+            "returned an invalid checkpoint."
+        )
+    return checkpoint
 
 
 def ensure_default_database_authority(target: Path) -> None:
@@ -185,6 +318,72 @@ def relocate_database_with_authorization(
     )
 
 
+def certify_database_relocation_identity(
+    source: Path,
+    intended_destination: Path,
+    expected_moa_checkpoint: str,
+    *,
+    listener_known_writers_stopped_attested: bool = False,
+) -> DatabaseRelocationIdentityCertification:
+    """Certify one normalized source identity without performing relocation."""
+    source_path, destination_path, _tombstone_required = _resolve_relocation_paths(
+        source, intended_destination
+    )
+    _require_clean_authorization_context(source_path, destination_path)
+    _require_expected_moa_checkpoint(expected_moa_checkpoint)
+    run_id = str(uuid4())
+    authority = _establish_normalized_relocation_authority(source_path)
+    authority.release()
+    if authority.exclusion_released_at is None:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_BLOCKER: source writer exclusion release was not "
+            "certified."
+        )
+
+    document = _certification_document(
+        run_id=run_id,
+        certified_at=authority.certified_at,
+        source=source_path,
+        destination=destination_path,
+        moa_checkpoint=expected_moa_checkpoint,
+        identity=authority.identity,
+        truncate_checkpoint=authority.truncate_checkpoint,
+        passive_checkpoint=authority.passive_checkpoint,
+        exclusion_acquired_at=authority.exclusion_acquired_at,
+        exclusion_released_at=authority.exclusion_released_at,
+        integrity_check=authority.integrity_check,
+        foreign_key_check=authority.foreign_key_check,
+        listener_known_writers_stopped_attested=(
+            listener_known_writers_stopped_attested
+        ),
+        pre_normalization_main=authority.pre_normalization_main,
+        pre_normalization_wal=authority.pre_normalization_wal,
+        pre_normalization_shm=authority.pre_normalization_shm,
+    )
+    record_digest = sha256(_canonical_json(document).encode("ascii")).hexdigest()
+    return DatabaseRelocationIdentityCertification(
+        run_id=run_id,
+        certified_at=authority.certified_at,
+        source=source_path,
+        destination=destination_path,
+        moa_checkpoint=expected_moa_checkpoint,
+        identity=authority.identity,
+        truncate_checkpoint=authority.truncate_checkpoint,
+        passive_checkpoint=authority.passive_checkpoint,
+        exclusion_acquired_at=authority.exclusion_acquired_at,
+        exclusion_released_at=authority.exclusion_released_at,
+        integrity_check=authority.integrity_check,
+        foreign_key_check=authority.foreign_key_check,
+        listener_known_writers_stopped_attested=(
+            listener_known_writers_stopped_attested
+        ),
+        pre_normalization_main=authority.pre_normalization_main,
+        pre_normalization_wal=authority.pre_normalization_wal,
+        pre_normalization_shm=authority.pre_normalization_shm,
+        certification_record_sha256=record_digest,
+    )
+
+
 def _relocate_database(
     source: Path,
     target: Path,
@@ -194,54 +393,40 @@ def _relocate_database(
 ) -> DatabaseRelocationResult:
     if expected_identity is not None:
         _validate_expected_authorization_identity(expected_identity)
-    source_path = _canonical_file_path(source, label="source")
-    target_path = _canonical_file_path(target, label="target")
-    if source_path == target_path:
-        raise DatabaseRelocationError("Relocation source and target must be distinct paths.")
-    if not source_path.is_file():
-        raise DatabaseRelocationError(
-            f"Relocation source does not exist as a database file: {source_path}"
-        )
-    if target_path.exists():
-        raise DatabaseRelocationError(
-            f"Relocation target already exists and will not be overwritten: {target_path}"
-        )
-
-    verified_legacy = verified_legacy_database_path()
-    retirement_tombstone_required = (
-        verified_legacy is not None
-        and source_path == verified_legacy.resolve(strict=False)
+    source_path, target_path, retirement_tombstone_required = _resolve_relocation_paths(
+        source, target
     )
-    if verified_legacy is not None and verified_legacy.exists():
-        resolved_legacy = verified_legacy.resolve(strict=False)
-        if source_path != resolved_legacy:
-            raise DatabaseRelocationError(
-                "A verified checkout-local legacy database exists and must be the explicit "
-                f"relocation source: {resolved_legacy}"
-            )
 
     if expected_identity is None:
         _prepare_relocation_target(target_path)
-    _validate_database(source_path)
-    _checkpoint_source_for_retirement(source_path)
-    source_connection = (
-        _acquire_authorization_exclusion(source_path)
-        if expected_identity is not None
-        else _acquire_source_quiescence(source_path)
-    )
+        _validate_database(source_path)
+        _checkpoint_source_for_retirement(source_path)
+        source_connection = _acquire_source_quiescence(source_path)
+        authorization_authority = None
+        source_fingerprint = None
+    else:
+        _require_clean_authorization_context(source_path, target_path)
+        authorization_authority = _establish_normalized_relocation_authority(source_path)
+        source_connection = authorization_authority.connection
+        source_fingerprint = authorization_authority.source_fingerprint
+        if source_connection is None:
+            raise DatabaseRelocationError(
+                "RELOCATION_AUTHORIZATION_BLOCKER: source writer exclusion is not held."
+            )
     primary_error: BaseException | None = None
     try:
         _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_HELD")
         if expected_identity is not None:
-            _checkpoint_source_passive_under_exclusion(source_path)
-            actual_identity = _compute_relocation_authorization_identity(
-                source_connection, source_path
-            )
             _notify_test_hook(_test_hook, "AUTHORIZATION_IDENTITY_COMPUTED")
-            _require_matching_authorization_identity(expected_identity, actual_identity)
+            assert authorization_authority is not None
+            _require_matching_authorization_identity(
+                expected_identity, authorization_authority.identity
+            )
             _notify_test_hook(_test_hook, "RELOCATION_AUTHORIZED")
             _prepare_relocation_target(target_path)
-        source_fingerprint = _validate_held_database(source_connection, source_path)
+        else:
+            source_fingerprint = _validate_held_database(source_connection, source_path)
+        assert source_fingerprint is not None
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f"{target_path.name}.migrating-",
             dir=target_path.parent,
@@ -283,7 +468,10 @@ def _relocate_database(
 
         try:
             if _source_handle_blocks_retirement():
-                _release_source_quiescence(source_connection)
+                if authorization_authority is None:
+                    _release_source_quiescence(source_connection)
+                else:
+                    authorization_authority.release()
                 source_connection = None
                 _notify_test_hook(_test_hook, "SOURCE_QUIESCENCE_RELEASED")
                 archive_path = _retire_source(source_path)
@@ -321,7 +509,10 @@ def _relocate_database(
                 if retirement_tombstone_required:
                     _install_retirement_tombstone(source_path, target_path, archive_path)
                     _notify_test_hook(_test_hook, "RETIREMENT_TOMBSTONE_INSTALLED")
-                _release_source_quiescence(source_connection)
+                if authorization_authority is None:
+                    _release_source_quiescence(source_connection)
+                else:
+                    authorization_authority.release()
                 source_connection = None
                 if retirement_tombstone_required:
                     _validate_retirement_tombstone(
@@ -342,7 +533,116 @@ def _relocate_database(
         raise
     finally:
         if source_connection is not None:
-            _release_source_quiescence(source_connection, primary_error=primary_error)
+            if authorization_authority is None:
+                _release_source_quiescence(
+                    source_connection, primary_error=primary_error
+                )
+            else:
+                authorization_authority.release(primary_error=primary_error)
+
+
+def _resolve_relocation_paths(
+    source: Path, target: Path
+) -> tuple[Path, Path, bool]:
+    source_path = _canonical_file_path(source, label="source")
+    target_path = _canonical_file_path(target, label="target")
+    if source_path == target_path:
+        raise DatabaseRelocationError("Relocation source and target must be distinct paths.")
+    if not source_path.is_file():
+        raise DatabaseRelocationError(
+            f"Relocation source does not exist as a database file: {source_path}"
+        )
+    if target_path.exists():
+        raise DatabaseRelocationError(
+            f"Relocation target already exists and will not be overwritten: {target_path}"
+        )
+
+    verified_legacy = verified_legacy_database_path()
+    retirement_tombstone_required = (
+        verified_legacy is not None
+        and source_path == verified_legacy.resolve(strict=False)
+    )
+    if verified_legacy is not None and verified_legacy.exists():
+        resolved_legacy = verified_legacy.resolve(strict=False)
+        if source_path != resolved_legacy:
+            raise DatabaseRelocationError(
+                "A verified checkout-local legacy database exists and must be the explicit "
+                f"relocation source: {resolved_legacy}"
+            )
+    return source_path, target_path, retirement_tombstone_required
+
+
+def _require_clean_authorization_context(source: Path, target: Path) -> None:
+    incomplete_retirements = _incomplete_retirement_markers(source)
+    if incomplete_retirements:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_BLOCKER: an incomplete source retirement requires "
+            "explicit recovery before identity certification."
+        )
+    stale_paths = (
+        tuple(sorted(target.parent.glob(f"{target.name}.migrating-*")))
+        if target.parent.exists()
+        else ()
+    )
+    if stale_paths:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_BLOCKER: recognized stale relocation temporary "
+            "state requires explicit recovery."
+        )
+
+
+def _require_expected_moa_checkpoint(expected_checkpoint: str) -> None:
+    if not _is_git_checkpoint(expected_checkpoint):
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH: expected MOA checkpoint "
+            "must be a lowercase 40-character hexadecimal commit identity."
+        )
+    actual_checkpoint = _verified_moa_checkout_checkpoint()
+    if actual_checkpoint != expected_checkpoint:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_CHECKPOINT_MISMATCH: expected and running MOA "
+            "checkpoints differ."
+        )
+
+
+def _establish_normalized_relocation_authority(
+    source: Path,
+) -> _NormalizedRelocationAuthority:
+    _validate_database(source)
+    pre_main = _observe_database_file(source)
+    pre_wal = _observe_database_file(Path(f"{source}-wal"))
+    pre_shm = _observe_database_file(Path(f"{source}-shm"))
+    truncate_checkpoint = _checkpoint_source_truncate_neutral(source)
+    connection = _acquire_authorization_exclusion(source)
+    acquired_at = _utc_timestamp()
+    primary_error: BaseException | None = None
+    try:
+        passive_checkpoint = _checkpoint_source_passive_under_exclusion(source)
+        identity = _compute_relocation_authorization_identity(connection, source)
+        source_fingerprint, integrity_check, foreign_key_check = (
+            _validate_held_database_with_evidence(connection, source)
+        )
+        certified_at = _utc_timestamp()
+        return _NormalizedRelocationAuthority(
+            connection=connection,
+            identity=identity,
+            source_fingerprint=source_fingerprint,
+            truncate_checkpoint=truncate_checkpoint,
+            passive_checkpoint=passive_checkpoint,
+            exclusion_acquired_at=acquired_at,
+            certified_at=certified_at,
+            integrity_check=integrity_check,
+            foreign_key_check=foreign_key_check,
+            pre_normalization_main=pre_main,
+            pre_normalization_wal=pre_wal,
+            pre_normalization_shm=pre_shm,
+        )
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if primary_error is not None:
+            _release_source_quiescence(connection, primary_error=primary_error)
 
 
 def _incomplete_retirement_markers(source: Path) -> tuple[Path, ...]:
@@ -514,23 +814,50 @@ def _acquire_authorization_exclusion(source: Path) -> sqlite3.Connection:
         ) from error
 
 
-def _checkpoint_source_passive_under_exclusion(source: Path) -> None:
+def _checkpoint_source_truncate_neutral(source: Path) -> tuple[int, int, int]:
+    connection: sqlite3.Connection | None = None
+    primary_error: BaseException | None = None
+    try:
+        connection = _open_neutral_source_connection(source)
+        journal_mode_row = connection.execute("PRAGMA journal_mode").fetchone()
+        if (
+            journal_mode_row is None
+            or len(journal_mode_row) != 1
+            or str(journal_mode_row[0]).casefold() != "wal"
+        ):
+            raise DatabaseRelocationError(
+                "RELOCATION_AUTHORIZATION_BLOCKER: source journal mode must already be "
+                "WAL; certification will not change it."
+            )
+        row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        checkpoint = _require_complete_checkpoint_result(row, mode="truncate")
+        return checkpoint
+    except DatabaseRelocationError as error:
+        primary_error = error
+        raise
+    except (sqlite3.Error, TypeError, ValueError) as error:
+        primary_error = error
+        raise DatabaseRelocationError(
+            "RELOCATION_AUTHORIZATION_BLOCKER: truncate checkpoint normalization failed."
+        ) from error
+    finally:
+        if connection is not None:
+            _close_checkpoint_connection(
+                connection,
+                mode="truncate",
+                primary_error=primary_error,
+            )
+
+
+def _checkpoint_source_passive_under_exclusion(
+    source: Path,
+) -> tuple[int, int, int]:
     connection: sqlite3.Connection | None = None
     primary_error: BaseException | None = None
     try:
         connection = _open_neutral_source_connection(source)
         row = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-        if row is None or len(row) != 3:
-            raise DatabaseRelocationError(
-                "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint returned no "
-                "complete backfill result."
-            )
-        busy, log_frames, checkpointed_frames = (int(value) for value in row)
-        if busy or log_frames != checkpointed_frames:
-            raise DatabaseRelocationError(
-                "RELOCATION_AUTHORIZATION_BLOCKER: passive checkpoint could not "
-                "completely backfill the normalized source."
-            )
+        return _require_complete_checkpoint_result(row, mode="passive")
     except DatabaseRelocationError as error:
         primary_error = error
         raise
@@ -541,18 +868,48 @@ def _checkpoint_source_passive_under_exclusion(source: Path) -> None:
         ) from error
     finally:
         if connection is not None:
-            try:
-                connection.close()
-            except BaseException as cleanup_error:
-                if primary_error is not None:
-                    primary_error.add_note(
-                        f"Could not close passive checkpoint connection: {cleanup_error}"
-                    )
-                else:
-                    raise DatabaseRelocationError(
-                        "RELOCATION_AUTHORIZATION_BLOCKER: could not close passive "
-                        "checkpoint connection."
-                    ) from cleanup_error
+            _close_checkpoint_connection(
+                connection,
+                mode="passive",
+                primary_error=primary_error,
+            )
+
+
+def _require_complete_checkpoint_result(
+    row: object, *, mode: str
+) -> tuple[int, int, int]:
+    if not isinstance(row, (tuple, sqlite3.Row)) or len(row) != 3:
+        raise DatabaseRelocationError(
+            f"RELOCATION_AUTHORIZATION_BLOCKER: {mode} checkpoint returned no complete "
+            "backfill result."
+        )
+    busy, log_frames, checkpointed_frames = (int(value) for value in row)
+    if busy or log_frames != checkpointed_frames:
+        raise DatabaseRelocationError(
+            f"RELOCATION_AUTHORIZATION_BLOCKER: {mode} checkpoint could not completely "
+            "backfill the normalized source."
+        )
+    return busy, log_frames, checkpointed_frames
+
+
+def _close_checkpoint_connection(
+    connection: sqlite3.Connection,
+    *,
+    mode: str,
+    primary_error: BaseException | None,
+) -> None:
+    try:
+        connection.close()
+    except BaseException as cleanup_error:
+        if primary_error is not None:
+            primary_error.add_note(
+                f"Could not close {mode} checkpoint connection: {cleanup_error}"
+            )
+        else:
+            raise DatabaseRelocationError(
+                f"RELOCATION_AUTHORIZATION_BLOCKER: could not close {mode} checkpoint "
+                "connection."
+            ) from cleanup_error
 
 
 def _release_source_quiescence(
@@ -675,6 +1032,194 @@ def _is_sha256(value: object) -> bool:
 
 def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_git_checkpoint(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 40
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _observe_database_file(path: Path) -> DatabaseFileObservation:
+    if not path.exists():
+        return DatabaseFileObservation(False, None, None)
+    if not path.is_file():
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_BLOCKER: a database representation path is not "
+            f"a regular file: {path}"
+        )
+    try:
+        with path.open("rb") as observed_file:
+            digest = file_digest(observed_file, "sha256").hexdigest()
+            size = os.fstat(observed_file.fileno()).st_size
+    except OSError as error:
+        raise DatabaseRelocationError(
+            "RELOCATION_CERTIFICATION_BLOCKER: a pre-normalization database "
+            "representation could not be observed."
+        ) from error
+    return DatabaseFileObservation(True, size, digest)
+
+
+def _canonical_json(document: dict[str, object]) -> str:
+    return json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def _file_observation_document(observation: DatabaseFileObservation) -> dict[str, object]:
+    return {
+        "present": observation.present,
+        "sha256": observation.sha256,
+        "size": observation.size,
+    }
+
+
+def _authorization_identity_document(
+    identity: DatabaseRelocationAuthorizationIdentity,
+) -> dict[str, object]:
+    return {
+        "generation_1_projection_link_count": identity.generation_1_projection_link_count,
+        "generation_inventory": [list(row) for row in identity.generation_inventory],
+        "migration_identity": [list(row) for row in identity.migration_identity],
+        "normalized_sha256": identity.normalized_sha256,
+        "normalized_size": identity.normalized_size,
+        "projection_gaps": [
+            {
+                "category": finding.category,
+                "check_id": finding.check_id,
+                "entity": finding.entity,
+                "local_identifier": finding.local_identifier,
+                "local_identifier_kind": (
+                    "int" if isinstance(finding.local_identifier, int) else "str"
+                ),
+                "reason": finding.reason,
+            }
+            for finding in identity.projection_gaps
+        ],
+        "retained_source_preflight_fingerprint": (
+            identity.retained_source_preflight_fingerprint
+        ),
+        "source_event_count": identity.source_event_count,
+    }
+
+
+def _later_bound_relocation_argv(
+    source: Path, identity: DatabaseRelocationAuthorizationIdentity
+) -> list[str]:
+    argv = [
+        "catalog",
+        "relocate-database",
+        str(source),
+        "--authorization-bound",
+        "--expected-normalized-sha256",
+        identity.normalized_sha256,
+        "--expected-normalized-size",
+        str(identity.normalized_size),
+    ]
+    for version, name in identity.migration_identity:
+        argv.extend(("--expected-migration-version", str(version)))
+        argv.extend(("--expected-migration-name", name))
+    current_generation_id: int | None = None
+    for generation_id, is_current in identity.generation_inventory:
+        argv.extend(("--expected-generation-id", str(generation_id)))
+        if is_current:
+            current_generation_id = generation_id
+    assert current_generation_id is not None
+    argv.extend(
+        (
+            "--expected-current-generation-id",
+            str(current_generation_id),
+            "--expected-source-event-count",
+            str(identity.source_event_count),
+            "--expected-generation-1-projection-link-count",
+            str(identity.generation_1_projection_link_count),
+        )
+    )
+    projection_gap_fields = (
+        ("--expected-projection-gap-check-id", "check_id"),
+        ("--expected-projection-gap-category", "category"),
+        ("--expected-projection-gap-entity", "entity"),
+        ("--expected-projection-gap-local-identifier-kind", "local_identifier_kind"),
+        ("--expected-projection-gap-local-identifier", "local_identifier"),
+        ("--expected-projection-gap-reason", "reason"),
+    )
+    projection_gap_documents = _authorization_identity_document(identity)["projection_gaps"]
+    assert isinstance(projection_gap_documents, list)
+    for option, field in projection_gap_fields:
+        for finding in projection_gap_documents:
+            assert isinstance(finding, dict)
+            argv.extend((option, str(finding[field])))
+    argv.extend(
+        (
+            "--expected-retained-source-preflight-fingerprint",
+            identity.retained_source_preflight_fingerprint,
+            "--apply",
+        )
+    )
+    return argv
+
+
+def _certification_document(
+    *,
+    run_id: str,
+    certified_at: str,
+    source: Path,
+    destination: Path,
+    moa_checkpoint: str,
+    identity: DatabaseRelocationAuthorizationIdentity,
+    truncate_checkpoint: tuple[int, int, int],
+    passive_checkpoint: tuple[int, int, int],
+    exclusion_acquired_at: str,
+    exclusion_released_at: str,
+    integrity_check: tuple[str, ...],
+    foreign_key_check: tuple[tuple[object, ...], ...],
+    listener_known_writers_stopped_attested: bool,
+    pre_normalization_main: DatabaseFileObservation,
+    pre_normalization_wal: DatabaseFileObservation,
+    pre_normalization_shm: DatabaseFileObservation,
+) -> dict[str, object]:
+    return {
+        "authorization_identity": _authorization_identity_document(identity),
+        "certification_format": _CERTIFICATION_FORMAT,
+        "certification_record_sha256_scope": _CERTIFICATION_HASH_SCOPE,
+        "certification_version": _CERTIFICATION_VERSION,
+        "certified_at": certified_at,
+        "destination": str(destination),
+        "later_bound_relocation_argv": _later_bound_relocation_argv(source, identity),
+        "listener_known_writers_stopped_attested": (
+            listener_known_writers_stopped_attested
+        ),
+        "moa_checkpoint": moa_checkpoint,
+        "normalization": {
+            "passive_checkpoint": list(passive_checkpoint),
+            "truncate_checkpoint": list(truncate_checkpoint),
+        },
+        "post_normalization_main": {
+            "sha256": identity.normalized_sha256,
+            "size": identity.normalized_size,
+        },
+        "pre_normalization": {
+            "main": _file_observation_document(pre_normalization_main),
+            "shm": _file_observation_document(pre_normalization_shm),
+            "wal": _file_observation_document(pre_normalization_wal),
+        },
+        "run_id": run_id,
+        "source": str(source),
+        "sqlite_writer_exclusion": {
+            "acquired": True,
+            "acquired_at": exclusion_acquired_at,
+            "released": True,
+            "released_at": exclusion_released_at,
+        },
+        "validation": {
+            "foreign_key_check": [list(row) for row in foreign_key_check],
+            "integrity_check": list(integrity_check),
+        },
+    }
 
 
 def _normalized_database_file_identity(path: Path) -> tuple[str, int]:
@@ -856,6 +1401,26 @@ def _validate_held_database(
         raise DatabaseRelocationError(
             f"Could not validate MOA SQLite database {path}: {error}"
         ) from error
+
+
+def _validate_held_database_with_evidence(
+    connection: sqlite3.Connection,
+    path: Path,
+) -> tuple[_DatabaseFingerprint, tuple[str, ...], tuple[tuple[object, ...], ...]]:
+    fingerprint = _validate_held_database(connection, path)
+    try:
+        foreign_key_rows = tuple(
+            tuple(row) for row in connection.execute("PRAGMA foreign_key_check").fetchall()
+        )
+    except sqlite3.Error as error:
+        raise DatabaseRelocationError(
+            f"Could not validate MOA SQLite foreign keys for {path}: {error}"
+        ) from error
+    if foreign_key_rows:
+        raise DatabaseRelocationError(
+            f"SQLite foreign-key validation failed for {path}."
+        )
+    return fingerprint, ("ok",), foreign_key_rows
 
 
 def _table_count(connection: sqlite3.Connection, table_name: str) -> int:
