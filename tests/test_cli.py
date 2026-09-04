@@ -5429,12 +5429,269 @@ def _bound_relocation_argv(
     return argv
 
 
+def _journal_mode_preparation_argv(
+    source: Path,
+    destination: Path,
+    *,
+    journal_state: str = "absent",
+    journal_size: int | None = None,
+    journal_sha256: str | None = None,
+    wal_state: str = "absent",
+    shm_state: str = "absent",
+    attested: bool = True,
+    apply: bool = True,
+) -> list[str]:
+    argv = [
+        "catalog",
+        "prepare-relocation-journal-mode",
+        str(source),
+        "--expected-destination",
+        str(destination),
+        "--expected-moa-checkpoint",
+        "e0b21aa3989653f2cc9ff450b9bfd4e5658f7ebd",
+        "--expected-preparation-sha256",
+        "a" * 64,
+        "--expected-preparation-size",
+        "4096",
+        "--expected-journal-mode",
+        "delete",
+        "--expected-journal-state",
+        journal_state,
+        "--expected-wal-state",
+        wal_state,
+        "--expected-shm-state",
+        shm_state,
+        "--authorization-id",
+        "approved-preparation-run-001",
+    ]
+    if journal_size is not None:
+        argv.extend(("--expected-journal-size", str(journal_size)))
+    if journal_sha256 is not None:
+        argv.extend(("--expected-journal-sha256", journal_sha256))
+    if attested:
+        argv.append("--listener-known-writers-stopped")
+    if apply:
+        argv.append("--apply")
+    return argv
+
+
 def _unexpected_relocation(*_args, **_kwargs):
     pytest.fail("relocation primitive must not be called")
 
 
 def _compact_cli_output(output: str) -> str:
     return "".join(output.split())
+
+
+def test_catalog_prepare_relocation_journal_mode_help_is_lazy() -> None:
+    calls: list[int] = []
+
+    def target_path_provider():
+        calls.append(1)
+        return Path("unused.db")
+
+    catalog_app = typer.Typer()
+    catalog_relocate_database_commands_module.register_catalog_relocate_database_command(
+        catalog_app,
+        Console(),
+        target_path_provider,
+    )
+
+    result = CliRunner().invoke(
+        catalog_app,
+        ["prepare-relocation-journal-mode", "--help"],
+        terminal_width=260,
+    )
+
+    assert result.exit_code == 0
+    assert "SOURCE" in result.stdout
+    command = get_command(catalog_app).commands["prepare-relocation-journal-mode"]
+    registered_options = {
+        option
+        for parameter in command.params
+        for option in getattr(parameter, "opts", ())
+    }
+    assert {
+        "--expected-destination",
+        "--expected-moa-checkpoint",
+        "--expected-preparation-sha256",
+        "--expected-preparation-size",
+        "--expected-journal-mode",
+        "--expected-journal-state",
+        "--expected-journal-size",
+        "--expected-journal-sha256",
+        "--expected-wal-state",
+        "--expected-wal-size",
+        "--expected-wal-sha256",
+        "--expected-shm-state",
+        "--expected-shm-size",
+        "--expected-shm-sha256",
+        "--authorization-id",
+        "--listener-known-writers-stopped",
+        "--apply",
+    } <= registered_options
+    assert calls == []
+
+
+def test_catalog_prepare_relocation_journal_mode_preview_is_non_mutating(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "prepare_database_relocation_journal_mode",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _journal_mode_preparation_argv(source, destination, apply=False),
+    )
+
+    assert result.exit_code == 0
+    assert "No changes made" in result.stdout
+    assert "--apply" in result.stdout
+    assert not source.parent.exists()
+    assert not destination.parent.exists()
+
+
+def test_catalog_prepare_relocation_journal_mode_parses_exact_authority_and_json(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    calls = []
+    canonical_json = '{"evidence_format":"test","status":"completed"}'
+
+    def prepare(authority):
+        calls.append(authority)
+        return SimpleNamespace(to_json=lambda: canonical_json)
+
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "prepare_database_relocation_journal_mode",
+        prepare,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "certify_database_relocation_identity",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database",
+        _unexpected_relocation,
+    )
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "relocate_database_with_authorization",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _journal_mode_preparation_argv(
+            source,
+            destination,
+            journal_state="present",
+            journal_size=512,
+            journal_sha256="b" * 64,
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == canonical_json + "\n"
+    assert len(calls) == 1
+    authority = calls[0]
+    assert authority.source == source.resolve()
+    assert authority.intended_destination == destination.resolve()
+    assert authority.expected_moa_checkpoint == (
+        "e0b21aa3989653f2cc9ff450b9bfd4e5658f7ebd"
+    )
+    assert authority.expected_main.present is True
+    assert authority.expected_main.size == 4096
+    assert authority.expected_main.sha256 == "a" * 64
+    assert authority.expected_journal_mode == "delete"
+    assert authority.expected_journal.present is True
+    assert authority.expected_journal.size == 512
+    assert authority.expected_journal.sha256 == "b" * 64
+    assert authority.expected_wal.present is False
+    assert authority.expected_shm.present is False
+    assert authority.listener_known_writers_stopped_attested is True
+    assert authority.authorization_id == "approved-preparation-run-001"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"journal_state": "unknown"},
+        {"journal_state": "present"},
+        {"journal_state": "absent", "journal_size": 1},
+    ),
+)
+def test_catalog_prepare_relocation_journal_mode_bounds_sidecar_authority_errors(
+    monkeypatch, tmp_path, arguments
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "prepare_database_relocation_journal_mode",
+        _unexpected_relocation,
+    )
+
+    result = CliRunner().invoke(
+        main.app,
+        _journal_mode_preparation_argv(source, destination, **arguments),
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid preparation authority" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_catalog_prepare_relocation_journal_mode_bounds_primitive_error(
+    monkeypatch, tmp_path
+) -> None:
+    source = tmp_path / "legacy" / "moa.db"
+    destination = tmp_path / "user-data" / "moa.db"
+
+    def fail(_authority):
+        raise DatabaseRelocationError("RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER")
+
+    monkeypatch.setattr(main, "default_database_path", lambda: destination)
+    monkeypatch.setattr(
+        catalog_relocate_database_commands_module,
+        "prepare_database_relocation_journal_mode",
+        fail,
+    )
+    result = CliRunner().invoke(
+        main.app,
+        _journal_mode_preparation_argv(source, destination),
+    )
+
+    assert result.exit_code == 1
+    assert "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER" in result.stdout
+    assert "Traceback" not in result.stdout
 
 
 def test_catalog_certify_relocation_identity_help_is_lazy() -> None:

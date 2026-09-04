@@ -11,16 +11,21 @@ import pytest
 
 from moa.database import legacy_database_relocation, sqlite
 from moa.database.legacy_database_relocation import (
+    DatabaseFileObservation,
     DatabaseRelocationAuthorizationIdentity,
     DatabaseRelocationError,
+    DatabaseRelocationJournalModePreparationAuthority,
+    DatabaseRelocationJournalModePreparationError,
     LegacyDatabaseAuthorityConflictError,
     LegacyDatabaseRelocationRequiredError,
     certify_database_relocation_identity,
+    prepare_database_relocation_journal_mode,
     relocate_database,
     relocate_database_with_authorization,
 )
 from moa.models.data_health import DataHealthFinding
 from moa.repositories.catalog_repository import CatalogRepository
+from moa.services.listener_process_guard import ListenerProcessGuard
 
 
 CHECKPOINT = "eabe16c0fcf0e61f6b1accf1cfa8afcd82955527"
@@ -158,6 +163,54 @@ def _create_moa_database(path: Path, *, message: str = "representative content")
     gc.collect()
 
 
+def _create_rollback_mode_moa_database(path: Path) -> None:
+    _create_moa_database(path)
+    connection = sqlite3.connect(path)
+    try:
+        assert connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone() == (
+            0,
+            0,
+            0,
+        )
+        assert connection.execute("PRAGMA journal_mode=DELETE").fetchone() == (
+            "delete",
+        )
+    finally:
+        connection.close()
+    gc.collect()
+
+
+def _preparation_authority(
+    source: Path,
+    destination: Path,
+    *,
+    attested: bool = True,
+) -> DatabaseRelocationJournalModePreparationAuthority:
+    connection = sqlite3.connect(source)
+    try:
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0])
+    finally:
+        connection.close()
+    return DatabaseRelocationJournalModePreparationAuthority(
+        source=source.resolve(strict=False),
+        intended_destination=destination.resolve(strict=False),
+        expected_moa_checkpoint=CHECKPOINT,
+        expected_main=legacy_database_relocation._observe_database_file(source),
+        expected_journal_mode=journal_mode,
+        expected_journal=legacy_database_relocation._observe_database_file(
+            Path(f"{source}-journal")
+        ),
+        expected_wal=legacy_database_relocation._observe_database_file(
+            Path(f"{source}-wal")
+        ),
+        expected_shm=legacy_database_relocation._observe_database_file(
+            Path(f"{source}-shm")
+        ),
+        listener_known_writers_stopped_attested=attested,
+        authorization_id="approved-preparation-run-001",
+    )
+
+
 def _authorization_identity(source: Path) -> DatabaseRelocationAuthorizationIdentity:
     legacy_database_relocation._checkpoint_source_for_retirement(source)
     connection = legacy_database_relocation._acquire_authorization_exclusion(source)
@@ -240,6 +293,325 @@ def test_authorization_bound_relocation_matches_normalized_identity_and_relocate
     assert result.target == target.resolve()
     assert target.is_file()
     _assert_valid_tombstone(source, target, result.source_archive)
+
+
+def test_journal_mode_preparation_transitions_exact_authority_and_preserves_catalog(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    pre_sha256 = authority.expected_main.sha256
+    timestamps = iter(
+        (
+            "2026-09-03T01:00:00+00:00",
+            "2026-09-03T01:00:01+00:00",
+            "2026-09-03T01:00:02+00:00",
+            "2026-09-03T01:00:03+00:00",
+        )
+    )
+    monkeypatch.setattr(legacy_database_relocation, "_utc_timestamp", lambda: next(timestamps))
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "uuid4",
+        lambda: "00000000-0000-0000-0000-000000000001",
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("preparation invoked forbidden relocation/certification output")
+
+    for name in (
+        "certify_database_relocation_identity",
+        "relocate_database",
+        "relocate_database_with_authorization",
+        "_prepare_relocation_target",
+        "_backup_database",
+        "_promote_target",
+        "_retire_source",
+        "_install_retirement_tombstone",
+    ):
+        monkeypatch.setattr(legacy_database_relocation, name, forbidden)
+
+    evidence = prepare_database_relocation_journal_mode(authority)
+
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        connection.close()
+    document = json.loads(evidence.to_json())
+    digest = document.pop("evidence_record_sha256")
+    assert digest == sha256(
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
+            "ascii"
+        )
+    ).hexdigest()
+    assert evidence.to_json() == json.dumps(
+        evidence.as_dict(), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    assert document["evidence_format"] == (
+        "moa-database-relocation-journal-mode-preparation-evidence"
+    )
+    assert document["status"] == "completed"
+    assert document["transition"] == {
+        "requested_journal_mode": "wal",
+        "returned_journal_mode": "wal",
+    }
+    assert document["post_transition"]["header_write_version"] == 2
+    assert document["post_transition"]["header_read_version"] == 2
+    assert document["post_transition"]["main"]["sha256"] != pre_sha256
+    assert document["validation"]["semantic_identity_unchanged"] is True
+    assert document["pre_transition"]["semantic_identity"] == document[
+        "post_transition"
+    ]["semantic_identity"]
+    assert document["expected_preparation_authority"]["authorization_id"] == (
+        "approved-preparation-run-001"
+    )
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "match"),
+    (
+        ("sha256", "main file"),
+        ("size", "main file"),
+        ("mode", "journal mode"),
+        ("journal", "rollback journal"),
+        ("wal", "WAL sidecar"),
+        ("shm", "SHM sidecar"),
+    ),
+)
+def test_journal_mode_preparation_rejects_exact_preflight_mismatch_before_transition(
+    monkeypatch, tmp_path, mismatch, match
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    unexpected_file = DatabaseFileObservation(
+        True, 1, sha256(mismatch.encode("ascii")).hexdigest()
+    )
+    if mismatch == "sha256":
+        replacement = {
+            "expected_main": replace(authority.expected_main, sha256="0" * 64)
+        }
+    elif mismatch == "size":
+        assert authority.expected_main.size is not None
+        replacement = {
+            "expected_main": replace(
+                authority.expected_main, size=authority.expected_main.size + 1
+            )
+        }
+    elif mismatch == "mode":
+        replacement = {"expected_journal_mode": "persist"}
+    else:
+        replacement = {f"expected_{mismatch}": unexpected_file}
+    authority = replace(authority, **replacement)
+    invoked = False
+
+    def unexpected_transition(_connection):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("journal transition must not be attempted")
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_transition_journal_mode_to_wal",
+        unexpected_transition,
+    )
+    with pytest.raises(DatabaseRelocationError, match=match):
+        prepare_database_relocation_journal_mode(authority)
+    assert invoked is False
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize(
+    "obstruction", ("destination", "relocation", "certification", "retirement")
+)
+def test_journal_mode_preparation_rejects_context_obstructions_before_transition(
+    monkeypatch, tmp_path, obstruction
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    if obstruction == "destination":
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(b"occupied")
+    elif obstruction == "relocation":
+        destination.parent.mkdir(parents=True)
+        destination.with_name(f"{destination.name}.migrating-stale").write_bytes(b"stale")
+    elif obstruction == "certification":
+        source.with_name(f"{source.name}.certifying-stale").write_bytes(b"stale")
+    else:
+        marker = source.parent / f"{source.name}.migrated-backup-stale"
+        marker.mkdir()
+        (marker / ".moa-relocation-incomplete").write_text("stale", encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError):
+        prepare_database_relocation_journal_mode(authority)
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+    finally:
+        connection.close()
+
+
+def test_journal_mode_preparation_requires_attestation_and_listener_guard(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    with pytest.raises(DatabaseRelocationError, match="attestation"):
+        prepare_database_relocation_journal_mode(
+            replace(authority, listener_known_writers_stopped_attested=False)
+        )
+
+    guard = ListenerProcessGuard(source)
+    guard.acquire()
+    try:
+        with pytest.raises(DatabaseRelocationError, match="listener guard"):
+            prepare_database_relocation_journal_mode(authority)
+    finally:
+        guard.release()
+
+
+def test_journal_mode_preparation_begin_exclusive_contention_fails_before_transition(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    monkeypatch.setattr(
+        legacy_database_relocation, "_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS", 100
+    )
+    writer = sqlite3.connect(source)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(DatabaseRelocationError, match="exclusive source ownership"):
+            prepare_database_relocation_journal_mode(authority)
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+@pytest.mark.parametrize("behavior", ("non-wal", "sqlite-error"))
+def test_journal_mode_preparation_transition_failure_preserves_actual_evidence(
+    monkeypatch, tmp_path, behavior
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    if behavior == "non-wal":
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_transition_journal_mode_to_wal",
+            lambda _connection: "delete",
+        )
+    else:
+
+        def fail_transition(_connection):
+            raise sqlite3.OperationalError("synthetic transition failure")
+
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_transition_journal_mode_to_wal",
+            fail_transition,
+        )
+
+    with pytest.raises(DatabaseRelocationJournalModePreparationError) as raised:
+        prepare_database_relocation_journal_mode(authority)
+    document = json.loads(raised.value.to_json())
+    digest = document.pop("evidence_record_sha256")
+    assert digest == sha256(
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
+            "ascii"
+        )
+    ).hexdigest()
+    assert document["status"] == "failed"
+    assert document["transition"]["automatic_reversal_attempted"] is False
+    assert document["final_observed_state"]["header_write_version"] == 1
+    assert document["listener_guard"] == {"acquired": True, "released": True}
+
+
+@pytest.mark.parametrize("failure", ("integrity", "foreign-key", "semantic"))
+def test_journal_mode_preparation_post_validation_failure_never_reverses_wal(
+    monkeypatch, tmp_path, failure
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_rollback_mode_moa_database(source)
+    authority = _preparation_authority(source, destination)
+    if failure in {"integrity", "foreign-key"}:
+        real_validate = legacy_database_relocation._validate_held_database_with_evidence
+        calls = 0
+
+        def fail_second_validation(connection, path):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise DatabaseRelocationError(f"synthetic {failure} failure")
+            return real_validate(connection, path)
+
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_validate_held_database_with_evidence",
+            fail_second_validation,
+        )
+    else:
+        real_compute = legacy_database_relocation._compute_relocation_authorization_identity
+        calls = 0
+
+        def drift_second_identity(connection, path):
+            nonlocal calls
+            calls += 1
+            identity = real_compute(connection, path)
+            if calls == 2:
+                return replace(identity, source_event_count=identity.source_event_count + 1)
+            return identity
+
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_compute_relocation_authorization_identity",
+            drift_second_identity,
+        )
+
+    with pytest.raises(DatabaseRelocationJournalModePreparationError) as raised:
+        prepare_database_relocation_journal_mode(authority)
+    assert raised.value.evidence["status"] == "failed"
+    assert raised.value.evidence["final_observed_state"]["header_write_version"] == 2
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        connection.close()
+
+
+def test_journal_mode_preparation_rejects_already_wal_under_non_wal_authority(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    destination = tmp_path / "app-data" / "moa.db"
+    _create_moa_database(source)
+    authority = replace(
+        _preparation_authority(source, destination), expected_journal_mode="delete"
+    )
+    with pytest.raises(DatabaseRelocationError, match="observed journal mode"):
+        prepare_database_relocation_journal_mode(authority)
+    connection = sqlite3.connect(source)
+    try:
+        assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        connection.close()
 
 
 def test_certification_returns_canonical_evidence_without_relocation_output(

@@ -7,9 +7,13 @@ import typer
 from rich.console import Console
 
 from moa.database.legacy_database_relocation import (
+    DatabaseFileObservation,
     DatabaseRelocationAuthorizationIdentity,
     DatabaseRelocationError,
+    DatabaseRelocationJournalModePreparationAuthority,
+    DatabaseRelocationJournalModePreparationError,
     certify_database_relocation_identity,
+    prepare_database_relocation_journal_mode,
     relocate_database,
     relocate_database_with_authorization,
 )
@@ -18,6 +22,10 @@ from moa.models.data_health import DataHealthFinding
 
 class _AuthorizationIdentityCliError(ValueError):
     """Bounded invalid-input error for authorization CLI fields."""
+
+
+class _PreparationAuthorityCliError(ValueError):
+    """Bounded invalid-input error for journal-mode preparation authority."""
 
 
 def _is_sha256(value: str) -> bool:
@@ -36,6 +44,36 @@ def _canonical_integer(value: str, *, field: str) -> int:
             f"{field} must use canonical decimal integer spelling."
         )
     return parsed
+
+
+def _build_file_observation(
+    *,
+    state: str,
+    size: int | None,
+    sha256: str | None,
+    field: str,
+) -> DatabaseFileObservation:
+    if state == "absent":
+        if size is not None or sha256 is not None:
+            raise _PreparationAuthorityCliError(
+                f"{field} size/SHA-256 must be omitted when state is absent."
+            )
+        return DatabaseFileObservation(False, None, None)
+    if state != "present":
+        raise _PreparationAuthorityCliError(
+            f"{field} state must be exactly 'absent' or 'present'."
+        )
+    if size is None or sha256 is None:
+        raise _PreparationAuthorityCliError(
+            f"{field} size and SHA-256 are required when state is present."
+        )
+    if size < 0:
+        raise _PreparationAuthorityCliError(f"{field} size must be nonnegative.")
+    if not _is_sha256(sha256):
+        raise _PreparationAuthorityCliError(
+            f"{field} SHA-256 must be exactly 64 lowercase hexadecimal characters."
+        )
+    return DatabaseFileObservation(True, size, sha256)
 
 
 def _build_authorization_identity(
@@ -190,6 +228,173 @@ def register_catalog_relocate_database_command(
     console: Console,
     target_path_provider: Callable[[], Path],
 ) -> None:
+    @catalog_app.command("prepare-relocation-journal-mode")
+    def catalog_prepare_relocation_journal_mode(
+        source: Path = typer.Argument(..., help="Explicit MOA source database path."),
+        expected_destination: Path = typer.Option(
+            ...,
+            "--expected-destination",
+            help="Canonical destination context intended for a later relocation.",
+        ),
+        expected_moa_checkpoint: str = typer.Option(
+            ...,
+            "--expected-moa-checkpoint",
+            help="Exact verified MOA checkout commit for this preparation.",
+        ),
+        expected_preparation_sha256: str = typer.Option(
+            ...,
+            "--expected-preparation-sha256",
+            help="Exact pre-transition source main-file SHA-256.",
+        ),
+        expected_preparation_size: int = typer.Option(
+            ...,
+            "--expected-preparation-size",
+            help="Exact pre-transition source main-file size in bytes.",
+        ),
+        expected_journal_mode: str = typer.Option(
+            ...,
+            "--expected-journal-mode",
+            help="Exact pre-transition persistent rollback-journal mode.",
+        ),
+        expected_journal_state: str = typer.Option(
+            ...,
+            "--expected-journal-state",
+            help="Exact -journal state: absent or present.",
+        ),
+        expected_journal_size: int | None = typer.Option(
+            None,
+            "--expected-journal-size",
+            help="Exact -journal size when present.",
+        ),
+        expected_journal_sha256: str | None = typer.Option(
+            None,
+            "--expected-journal-sha256",
+            help="Exact -journal SHA-256 when present.",
+        ),
+        expected_wal_state: str = typer.Option(
+            ...,
+            "--expected-wal-state",
+            help="Exact -wal state: absent or present.",
+        ),
+        expected_wal_size: int | None = typer.Option(
+            None,
+            "--expected-wal-size",
+            help="Exact -wal size when present.",
+        ),
+        expected_wal_sha256: str | None = typer.Option(
+            None,
+            "--expected-wal-sha256",
+            help="Exact -wal SHA-256 when present.",
+        ),
+        expected_shm_state: str = typer.Option(
+            ...,
+            "--expected-shm-state",
+            help="Exact -shm state: absent or present.",
+        ),
+        expected_shm_size: int | None = typer.Option(
+            None,
+            "--expected-shm-size",
+            help="Exact -shm size when present.",
+        ),
+        expected_shm_sha256: str | None = typer.Option(
+            None,
+            "--expected-shm-sha256",
+            help="Exact -shm SHA-256 when present.",
+        ),
+        authorization_id: str = typer.Option(
+            ...,
+            "--authorization-id",
+            help="Explicit caller-supplied preparation authorization binding.",
+        ),
+        listener_known_writers_stopped: bool = typer.Option(
+            False,
+            "--listener-known-writers-stopped",
+            help="Attest that the listener and known source writers are stopped.",
+        ),
+        apply: bool = typer.Option(
+            False,
+            "--apply",
+            help="Apply only the explicitly authorized journal-mode transition.",
+        ),
+    ) -> None:
+        """Prepare one exact rollback-mode source for later WAL-only certification."""
+        destination = Path(target_path_provider()).resolve(strict=False)
+        supplied_destination = expected_destination.expanduser().resolve(strict=False)
+        resolved_source = source.expanduser().resolve(strict=False)
+        if supplied_destination != destination:
+            console.print(
+                "[red]RELOCATION_JOURNAL_MODE_PREPARATION_DESTINATION_MISMATCH: expected "
+                "destination does not match MOA's current relocation destination.[/red]"
+            )
+            raise typer.Exit(1)
+        if not apply:
+            console.print(f"Source: {resolved_source}")
+            console.print(f"Intended destination: {destination}")
+            console.print(
+                "[yellow]No changes made. Rerun with --apply only after authorizing this "
+                "exact SQLite representation transition and stopping known writers.[/yellow]"
+            )
+            return
+        try:
+            if expected_preparation_size < 0:
+                raise _PreparationAuthorityCliError(
+                    "--expected-preparation-size must be nonnegative."
+                )
+            if not _is_sha256(expected_preparation_sha256):
+                raise _PreparationAuthorityCliError(
+                    "--expected-preparation-sha256 must be exactly 64 lowercase "
+                    "hexadecimal characters."
+                )
+            journal = _build_file_observation(
+                state=expected_journal_state,
+                size=expected_journal_size,
+                sha256=expected_journal_sha256,
+                field="--expected-journal",
+            )
+            wal = _build_file_observation(
+                state=expected_wal_state,
+                size=expected_wal_size,
+                sha256=expected_wal_sha256,
+                field="--expected-wal",
+            )
+            shm = _build_file_observation(
+                state=expected_shm_state,
+                size=expected_shm_size,
+                sha256=expected_shm_sha256,
+                field="--expected-shm",
+            )
+            evidence = prepare_database_relocation_journal_mode(
+                DatabaseRelocationJournalModePreparationAuthority(
+                    source=resolved_source,
+                    intended_destination=destination,
+                    expected_moa_checkpoint=expected_moa_checkpoint,
+                    expected_main=DatabaseFileObservation(
+                        True,
+                        expected_preparation_size,
+                        expected_preparation_sha256,
+                    ),
+                    expected_journal_mode=expected_journal_mode,
+                    expected_journal=journal,
+                    expected_wal=wal,
+                    expected_shm=shm,
+                    listener_known_writers_stopped_attested=(
+                        listener_known_writers_stopped
+                    ),
+                    authorization_id=authorization_id,
+                )
+            )
+        except _PreparationAuthorityCliError as error:
+            console.print(f"[red]Invalid preparation authority: {error}[/red]")
+            raise typer.Exit(1) from None
+        except DatabaseRelocationJournalModePreparationError as error:
+            typer.echo(error.to_json())
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
+        except DatabaseRelocationError as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
+        typer.echo(evidence.to_json())
+
     @catalog_app.command("certify-relocation-identity")
     def catalog_certify_relocation_identity(
         source: Path = typer.Argument(..., help="Explicit MOA source database path."),

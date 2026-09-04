@@ -17,6 +17,10 @@ from uuid import uuid4
 from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_TABLES
 from moa.models.data_health import DataHealthFinding
 from moa.repositories.data_health_repository import DataHealthRepository
+from moa.services.listener_process_guard import (
+    ListenerProcessGuard,
+    ListenerProcessGuardError,
+)
 from moa.services.retained_source_reprojection_preflight_service import (
     RetainedSourceReprojectionPreflightService,
 )
@@ -29,7 +33,17 @@ _RETIREMENT_TOMBSTONE_VERSION = 1
 _CERTIFICATION_FORMAT = "moa-database-relocation-identity-certification"
 _CERTIFICATION_VERSION = 1
 _CERTIFICATION_HASH_SCOPE = "canonical-json-without-certification-record-sha256"
+_JOURNAL_MODE_PREPARATION_FORMAT = (
+    "moa-database-relocation-journal-mode-preparation-evidence"
+)
+_JOURNAL_MODE_PREPARATION_VERSION = 1
+_JOURNAL_MODE_PREPARATION_HASH_SCOPE = (
+    "canonical-json-without-evidence-record-sha256"
+)
 _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS = 5000
+_PERSISTENT_ROLLBACK_JOURNAL_MODES = frozenset(
+    {"delete", "truncate", "persist"}
+)
 
 
 class LegacyDatabaseRelocationError(ValueError):
@@ -46,6 +60,18 @@ class LegacyDatabaseAuthorityConflictError(LegacyDatabaseRelocationError):
 
 class DatabaseRelocationError(LegacyDatabaseRelocationError):
     """Raised when an explicit database relocation cannot complete safely."""
+
+
+class DatabaseRelocationJournalModePreparationError(DatabaseRelocationError):
+    """Raised after a WAL transition attempt with preserved failure evidence."""
+
+    def __init__(self, message: str, evidence: dict[str, object]) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+    def to_json(self) -> str:
+        """Serialize the canonical evidence preserved after a transition attempt."""
+        return _canonical_json(self.evidence)
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +104,96 @@ class DatabaseFileObservation:
     present: bool
     size: int | None
     sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRelocationJournalModePreparationAuthority:
+    """Exact pre-transition representation authorized for WAL preparation."""
+
+    source: Path
+    intended_destination: Path
+    expected_moa_checkpoint: str
+    expected_main: DatabaseFileObservation
+    expected_journal_mode: str
+    expected_journal: DatabaseFileObservation
+    expected_wal: DatabaseFileObservation
+    expected_shm: DatabaseFileObservation
+    listener_known_writers_stopped_attested: bool
+    authorization_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseRelocationJournalModePreparationEvidence:
+    """Canonical evidence for one explicit non-WAL to WAL transition."""
+
+    run_id: str
+    started_at: str
+    completed_at: str
+    authority: DatabaseRelocationJournalModePreparationAuthority
+    sqlite_version: str
+    exclusion_acquired_at: str
+    exclusion_released_at: str
+    pre_transition_main: DatabaseFileObservation
+    pre_transition_journal_mode: str
+    pre_transition_journal: DatabaseFileObservation
+    pre_transition_wal: DatabaseFileObservation
+    pre_transition_shm: DatabaseFileObservation
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity
+    pre_integrity_check: tuple[str, ...]
+    pre_foreign_key_check: tuple[tuple[object, ...], ...]
+    post_integrity_check: tuple[str, ...]
+    post_foreign_key_check: tuple[tuple[object, ...], ...]
+    returned_journal_mode: str
+    header_write_version: int
+    header_read_version: int
+    post_transition_main: DatabaseFileObservation
+    post_transition_journal: DatabaseFileObservation
+    post_transition_wal: DatabaseFileObservation
+    post_transition_shm: DatabaseFileObservation
+    final_post_close_journal: DatabaseFileObservation
+    final_post_close_wal: DatabaseFileObservation
+    final_post_close_shm: DatabaseFileObservation
+    evidence_record_sha256: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return stable preparation evidence including its self-verifying digest."""
+        document = _journal_mode_preparation_document(
+            run_id=self.run_id,
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            authority=self.authority,
+            sqlite_version=self.sqlite_version,
+            exclusion_acquired_at=self.exclusion_acquired_at,
+            exclusion_released_at=self.exclusion_released_at,
+            pre_transition_main=self.pre_transition_main,
+            pre_transition_journal_mode=self.pre_transition_journal_mode,
+            pre_transition_journal=self.pre_transition_journal,
+            pre_transition_wal=self.pre_transition_wal,
+            pre_transition_shm=self.pre_transition_shm,
+            pre_semantic_identity=self.pre_semantic_identity,
+            post_semantic_identity=self.post_semantic_identity,
+            pre_integrity_check=self.pre_integrity_check,
+            pre_foreign_key_check=self.pre_foreign_key_check,
+            post_integrity_check=self.post_integrity_check,
+            post_foreign_key_check=self.post_foreign_key_check,
+            returned_journal_mode=self.returned_journal_mode,
+            header_write_version=self.header_write_version,
+            header_read_version=self.header_read_version,
+            post_transition_main=self.post_transition_main,
+            post_transition_journal=self.post_transition_journal,
+            post_transition_wal=self.post_transition_wal,
+            post_transition_shm=self.post_transition_shm,
+            final_post_close_journal=self.final_post_close_journal,
+            final_post_close_wal=self.final_post_close_wal,
+            final_post_close_shm=self.final_post_close_shm,
+        )
+        document["evidence_record_sha256"] = self.evidence_record_sha256
+        return document
+
+    def to_json(self) -> str:
+        """Serialize canonical machine-readable preparation evidence."""
+        return _canonical_json(self.as_dict())
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +431,373 @@ def relocate_database_with_authorization(
         target,
         expected_identity=expected_identity,
         _test_hook=_test_hook,
+    )
+
+
+def prepare_database_relocation_journal_mode(
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+) -> DatabaseRelocationJournalModePreparationEvidence:
+    """Change one exactly authorized rollback-mode source to persistent WAL mode."""
+    _validate_journal_mode_preparation_authority(authority)
+    source_path, destination_path, _tombstone_required = _resolve_relocation_paths(
+        authority.source, authority.intended_destination
+    )
+    if source_path != authority.source or destination_path != authority.intended_destination:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: source and destination "
+            "authority must contain canonical paths."
+        )
+    _require_clean_journal_mode_preparation_context(source_path, destination_path)
+    _require_expected_moa_checkpoint(authority.expected_moa_checkpoint)
+    if not authority.listener_known_writers_stopped_attested:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: explicit known-writer-stopped "
+            "attestation is required."
+        )
+
+    run_id = str(uuid4())
+    started_at = _utc_timestamp()
+    sqlite_version = sqlite3.sqlite_version
+    guard = ListenerProcessGuard(source_path)
+    try:
+        guard.acquire()
+    except ListenerProcessGuardError as error:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: the source listener guard "
+            "could not be acquired; stop the guard-aware listener."
+        ) from error
+
+    connection: sqlite3.Connection | None = None
+    primary_error: BaseException | None = None
+    transition_attempted = False
+    returned_journal_mode: str | None = None
+    exclusion_acquired_at: str | None = None
+    exclusion_released_at: str | None = None
+    pre_main: DatabaseFileObservation | None = None
+    pre_journal: DatabaseFileObservation | None = None
+    pre_wal: DatabaseFileObservation | None = None
+    pre_shm: DatabaseFileObservation | None = None
+    pre_journal_mode: str | None = None
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity | None = None
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity | None = None
+    pre_integrity_check: tuple[str, ...] | None = None
+    pre_foreign_key_check: tuple[tuple[object, ...], ...] | None = None
+    post_integrity_check: tuple[str, ...] | None = None
+    post_foreign_key_check: tuple[tuple[object, ...], ...] | None = None
+    header_write_version: int | None = None
+    header_read_version: int | None = None
+    post_main: DatabaseFileObservation | None = None
+    post_journal: DatabaseFileObservation | None = None
+    post_wal: DatabaseFileObservation | None = None
+    post_shm: DatabaseFileObservation | None = None
+    final_journal: DatabaseFileObservation | None = None
+    final_wal: DatabaseFileObservation | None = None
+    final_shm: DatabaseFileObservation | None = None
+    guard_released = False
+
+    try:
+        pre_main, pre_journal, pre_wal, pre_shm = _observe_database_representation(
+            source_path
+        )
+        _require_matching_file_observation(
+            authority.expected_main, pre_main, label="main file"
+        )
+        _require_matching_file_observation(
+            authority.expected_journal, pre_journal, label="rollback journal"
+        )
+        _require_matching_file_observation(
+            authority.expected_wal, pre_wal, label="WAL sidecar"
+        )
+        _require_matching_file_observation(
+            authority.expected_shm, pre_shm, label="SHM sidecar"
+        )
+
+        connection = _open_neutral_source_connection(source_path)
+        pre_journal_mode = _query_exact_journal_mode(connection)
+        _require_matching_journal_mode(
+            authority.expected_journal_mode, pre_journal_mode
+        )
+        locking_mode = _query_single_pragma_value(
+            connection, "PRAGMA main.locking_mode=EXCLUSIVE"
+        )
+        if locking_mode.casefold() != "exclusive":
+            raise DatabaseRelocationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: SQLite did not establish "
+                "exclusive connection locking mode."
+            )
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            connection.rollback()
+        except sqlite3.Error as error:
+            raise DatabaseRelocationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: could not acquire bounded "
+                "SQLite exclusive source ownership; stop every source writer."
+            ) from error
+        exclusion_acquired_at = _utc_timestamp()
+
+        locked_main, locked_journal, locked_wal, locked_shm = (
+            _observe_database_representation(source_path)
+        )
+        locked_journal_mode = _query_exact_journal_mode(connection)
+        _require_matching_file_observation(
+            authority.expected_main, locked_main, label="main file under exclusion"
+        )
+        _require_matching_file_observation(
+            authority.expected_journal,
+            locked_journal,
+            label="rollback journal under exclusion",
+        )
+        _require_matching_file_observation(
+            authority.expected_wal, locked_wal, label="WAL sidecar under exclusion"
+        )
+        _require_matching_file_observation(
+            authority.expected_shm, locked_shm, label="SHM sidecar under exclusion"
+        )
+        _require_matching_journal_mode(
+            authority.expected_journal_mode, locked_journal_mode
+        )
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            pre_semantic_identity = _compute_relocation_authorization_identity(
+                connection, source_path
+            )
+            _fingerprint, pre_integrity_check, pre_foreign_key_check = (
+                _validate_held_database_with_evidence(connection, source_path)
+            )
+        finally:
+            connection.rollback()
+
+        transition_attempted = True
+        returned_journal_mode = _transition_journal_mode_to_wal(connection)
+        if returned_journal_mode != "wal":
+            raise DatabaseRelocationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: SQLite did not return WAL "
+                "for the requested journal-mode transition."
+            )
+        if _query_exact_journal_mode(connection) != "wal":
+            raise DatabaseRelocationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: SQLite did not retain WAL "
+                "after the requested journal-mode transition."
+            )
+        header_write_version, header_read_version = _database_header_versions(
+            source_path
+        )
+        if (header_write_version, header_read_version) != (2, 2):
+            raise DatabaseRelocationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: the SQLite main header "
+                "does not encode WAL read/write versions."
+            )
+        post_main, post_journal, post_wal, post_shm = (
+            _observe_database_representation(source_path)
+        )
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            post_semantic_identity = _compute_relocation_authorization_identity(
+                connection, source_path
+            )
+            _fingerprint, post_integrity_check, post_foreign_key_check = (
+                _validate_held_database_with_evidence(connection, source_path)
+            )
+        finally:
+            connection.rollback()
+        _require_unchanged_journal_preparation_semantics(
+            pre_semantic_identity, post_semantic_identity
+        )
+    except BaseException as error:
+        primary_error = error
+    finally:
+        if connection is not None:
+            if connection.in_transaction:
+                try:
+                    connection.rollback()
+                except BaseException as cleanup_error:
+                    if primary_error is None:
+                        primary_error = cleanup_error
+                    else:
+                        primary_error.add_note(
+                            f"Preparation rollback cleanup also failed: {cleanup_error}"
+                        )
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    primary_error = cleanup_error
+                else:
+                    primary_error.add_note(
+                        f"Preparation connection cleanup also failed: {cleanup_error}"
+                    )
+            else:
+                exclusion_released_at = _utc_timestamp()
+        try:
+            final_journal, final_wal, final_shm = _observe_database_sidecars(
+                source_path
+            )
+        except BaseException as cleanup_error:
+            if primary_error is None:
+                primary_error = cleanup_error
+            else:
+                primary_error.add_note(
+                    f"Final post-close sidecar observation also failed: {cleanup_error}"
+                )
+        try:
+            guard.release()
+        except BaseException as cleanup_error:
+            if primary_error is None:
+                primary_error = cleanup_error
+            else:
+                primary_error.add_note(
+                    f"Preparation listener-guard cleanup also failed: {cleanup_error}"
+                )
+        else:
+            guard_released = True
+
+    completed_at = _utc_timestamp()
+    if primary_error is not None:
+        if transition_attempted:
+            assert pre_main is not None
+            assert pre_journal_mode is not None
+            assert pre_journal is not None
+            assert pre_wal is not None
+            assert pre_shm is not None
+            assert pre_semantic_identity is not None
+            assert pre_integrity_check is not None
+            assert pre_foreign_key_check is not None
+            failure_document = _journal_mode_preparation_failure_document(
+                run_id=run_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                authority=authority,
+                sqlite_version=sqlite_version,
+                exclusion_acquired_at=exclusion_acquired_at,
+                exclusion_released_at=exclusion_released_at,
+                returned_journal_mode=returned_journal_mode,
+                failure=primary_error,
+                pre_transition_main=pre_main,
+                pre_transition_journal_mode=pre_journal_mode,
+                pre_transition_journal=pre_journal,
+                pre_transition_wal=pre_wal,
+                pre_transition_shm=pre_shm,
+                pre_semantic_identity=pre_semantic_identity,
+                post_semantic_identity=post_semantic_identity,
+                pre_integrity_check=pre_integrity_check,
+                pre_foreign_key_check=pre_foreign_key_check,
+                post_integrity_check=post_integrity_check,
+                post_foreign_key_check=post_foreign_key_check,
+                listener_guard_released=guard_released,
+                final_journal=final_journal,
+                final_wal=final_wal,
+                final_shm=final_shm,
+            )
+            failure_document["evidence_record_sha256"] = sha256(
+                _canonical_json(failure_document).encode("ascii")
+            ).hexdigest()
+            raise DatabaseRelocationJournalModePreparationError(
+                "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: the transition was "
+                "attempted and was not automatically reversed.",
+                failure_document,
+            ) from primary_error
+        if isinstance(primary_error, DatabaseRelocationError):
+            raise primary_error
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: preparation failed before "
+            "the WAL transition was attempted."
+        ) from primary_error
+
+    if (
+        exclusion_acquired_at is None
+        or exclusion_released_at is None
+        or pre_main is None
+        or pre_journal is None
+        or pre_wal is None
+        or pre_shm is None
+        or pre_journal_mode is None
+        or pre_semantic_identity is None
+        or post_semantic_identity is None
+        or pre_integrity_check is None
+        or pre_foreign_key_check is None
+        or post_integrity_check is None
+        or post_foreign_key_check is None
+        or returned_journal_mode is None
+        or header_write_version is None
+        or header_read_version is None
+        or post_main is None
+        or post_journal is None
+        or post_wal is None
+        or post_shm is None
+        or final_journal is None
+        or final_wal is None
+        or final_shm is None
+        or not guard_released
+    ):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: completed evidence is "
+            "internally incomplete."
+        )
+    document = _journal_mode_preparation_document(
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        authority=authority,
+        sqlite_version=sqlite_version,
+        exclusion_acquired_at=exclusion_acquired_at,
+        exclusion_released_at=exclusion_released_at,
+        pre_transition_main=pre_main,
+        pre_transition_journal_mode=pre_journal_mode,
+        pre_transition_journal=pre_journal,
+        pre_transition_wal=pre_wal,
+        pre_transition_shm=pre_shm,
+        pre_semantic_identity=pre_semantic_identity,
+        post_semantic_identity=post_semantic_identity,
+        pre_integrity_check=pre_integrity_check,
+        pre_foreign_key_check=pre_foreign_key_check,
+        post_integrity_check=post_integrity_check,
+        post_foreign_key_check=post_foreign_key_check,
+        returned_journal_mode=returned_journal_mode,
+        header_write_version=header_write_version,
+        header_read_version=header_read_version,
+        post_transition_main=post_main,
+        post_transition_journal=post_journal,
+        post_transition_wal=post_wal,
+        post_transition_shm=post_shm,
+        final_post_close_journal=final_journal,
+        final_post_close_wal=final_wal,
+        final_post_close_shm=final_shm,
+    )
+    evidence_record_sha256 = sha256(
+        _canonical_json(document).encode("ascii")
+    ).hexdigest()
+    return DatabaseRelocationJournalModePreparationEvidence(
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        authority=authority,
+        sqlite_version=sqlite_version,
+        exclusion_acquired_at=exclusion_acquired_at,
+        exclusion_released_at=exclusion_released_at,
+        pre_transition_main=pre_main,
+        pre_transition_journal_mode=pre_journal_mode,
+        pre_transition_journal=pre_journal,
+        pre_transition_wal=pre_wal,
+        pre_transition_shm=pre_shm,
+        pre_semantic_identity=pre_semantic_identity,
+        post_semantic_identity=post_semantic_identity,
+        pre_integrity_check=pre_integrity_check,
+        pre_foreign_key_check=pre_foreign_key_check,
+        post_integrity_check=post_integrity_check,
+        post_foreign_key_check=post_foreign_key_check,
+        returned_journal_mode=returned_journal_mode,
+        header_write_version=header_write_version,
+        header_read_version=header_read_version,
+        post_transition_main=post_main,
+        post_transition_journal=post_journal,
+        post_transition_wal=post_wal,
+        post_transition_shm=post_shm,
+        final_post_close_journal=final_journal,
+        final_post_close_wal=final_wal,
+        final_post_close_shm=final_shm,
+        evidence_record_sha256=evidence_record_sha256,
     )
 
 
@@ -591,6 +1074,29 @@ def _require_clean_authorization_context(source: Path, target: Path) -> None:
         )
 
 
+def _require_clean_journal_mode_preparation_context(
+    source: Path, target: Path
+) -> None:
+    if _incomplete_retirement_markers(source):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: an incomplete source "
+            "retirement requires explicit recovery."
+        )
+    stale_certification_paths = tuple(
+        sorted(source.parent.glob(f"{source.name}.certifying-*"))
+    )
+    stale_relocation_paths = (
+        tuple(sorted(target.parent.glob(f"{target.name}.migrating-*")))
+        if target.parent.exists()
+        else ()
+    )
+    if stale_certification_paths or stale_relocation_paths:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_BLOCKER: recognized stale "
+            "certification or relocation temporary state requires explicit recovery."
+        )
+
+
 def _require_expected_moa_checkpoint(expected_checkpoint: str) -> None:
     if not _is_git_checkpoint(expected_checkpoint):
         raise DatabaseRelocationError(
@@ -769,6 +1275,81 @@ def _open_neutral_source_connection(source: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute(f"PRAGMA busy_timeout = {_SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS}")
     return connection
+
+
+def _query_single_pragma_value(connection: sqlite3.Connection, sql: str) -> str:
+    rows = connection.execute(sql).fetchall()
+    if len(rows) != 1 or len(rows[0]) != 1 or not isinstance(rows[0][0], str):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: SQLite returned an invalid "
+            "PRAGMA result."
+        )
+    return str(rows[0][0])
+
+
+def _query_exact_journal_mode(connection: sqlite3.Connection) -> str:
+    mode = _query_single_pragma_value(connection, "PRAGMA journal_mode").casefold()
+    if mode not in {*_PERSISTENT_ROLLBACK_JOURNAL_MODES, "memory", "off", "wal"}:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: SQLite returned an unknown "
+            "journal mode."
+        )
+    return mode
+
+
+def _transition_journal_mode_to_wal(connection: sqlite3.Connection) -> str:
+    if connection.in_transaction:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: journal mode cannot be "
+            "changed inside an active SQL transaction."
+        )
+    return _query_single_pragma_value(
+        connection, "PRAGMA journal_mode=WAL"
+    ).casefold()
+
+
+def _observe_database_representation(
+    source: Path,
+) -> tuple[
+    DatabaseFileObservation,
+    DatabaseFileObservation,
+    DatabaseFileObservation,
+    DatabaseFileObservation,
+]:
+    return (
+        _observe_database_file(source),
+        _observe_database_file(Path(f"{source}-journal")),
+        _observe_database_file(Path(f"{source}-wal")),
+        _observe_database_file(Path(f"{source}-shm")),
+    )
+
+
+def _observe_database_sidecars(
+    source: Path,
+) -> tuple[
+    DatabaseFileObservation,
+    DatabaseFileObservation,
+    DatabaseFileObservation,
+]:
+    _main, journal, wal, shm = _observe_database_representation(source)
+    return journal, wal, shm
+
+
+def _database_header_versions(source: Path) -> tuple[int, int]:
+    try:
+        with source.open("rb") as database_file:
+            header = database_file.read(20)
+    except OSError as error:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: the SQLite main header "
+            "could not be observed."
+        ) from error
+    if len(header) != 20 or header[:16] != b"SQLite format 3\x00":
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: the source does not have a "
+            "valid SQLite main header."
+        )
+    return header[18], header[19]
 
 
 def _acquire_source_quiescence(source: Path) -> sqlite3.Connection:
@@ -1022,6 +1603,88 @@ def _validate_expected_authorization_identity(
         )
 
 
+def _validate_journal_mode_preparation_authority(
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+) -> None:
+    if not isinstance(authority, DatabaseRelocationJournalModePreparationAuthority):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: a typed preparation "
+            "authority is required."
+        )
+    if not _is_git_checkpoint(authority.expected_moa_checkpoint):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: expected MOA checkpoint "
+            "must be a lowercase 40-character hexadecimal commit identity."
+        )
+    if (
+        authority.expected_journal_mode
+        not in _PERSISTENT_ROLLBACK_JOURNAL_MODES
+    ):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: expected journal mode "
+            "must name one exact persistent rollback-journal mode."
+        )
+    if not isinstance(authority.authorization_id, str) or not authority.authorization_id:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: a non-empty authorization "
+            "binding is required."
+        )
+    if not isinstance(authority.listener_known_writers_stopped_attested, bool):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: known-writer attestation "
+            "must be an explicit boolean."
+        )
+    _validate_file_observation(authority.expected_main, label="main file")
+    if not authority.expected_main.present:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: expected main-file "
+            "authority must describe a present file."
+        )
+    _validate_file_observation(
+        authority.expected_journal, label="rollback journal"
+    )
+    _validate_file_observation(authority.expected_wal, label="WAL sidecar")
+    _validate_file_observation(authority.expected_shm, label="SHM sidecar")
+
+
+def _validate_file_observation(
+    observation: DatabaseFileObservation, *, label: str
+) -> None:
+    valid = isinstance(observation, DatabaseFileObservation)
+    if valid and observation.present:
+        valid = _is_nonnegative_int(observation.size) and _is_sha256(
+            observation.sha256
+        )
+    elif valid:
+        valid = observation.size is None and observation.sha256 is None
+    if not valid:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: expected "
+            f"{label} authority is incomplete or malformed."
+        )
+
+
+def _require_matching_file_observation(
+    expected: DatabaseFileObservation,
+    actual: DatabaseFileObservation,
+    *,
+    label: str,
+) -> None:
+    if expected != actual:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: observed "
+            f"{label} state differs from the explicit preparation authority."
+        )
+
+
+def _require_matching_journal_mode(expected: str, actual: str) -> None:
+    if expected != actual:
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_MISMATCH: observed journal mode "
+            "differs from the explicit preparation authority."
+        )
+
+
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -1078,6 +1741,12 @@ def _file_observation_document(observation: DatabaseFileObservation) -> dict[str
     }
 
 
+def _optional_file_observation_document(
+    observation: DatabaseFileObservation | None,
+) -> dict[str, object] | None:
+    return _file_observation_document(observation) if observation is not None else None
+
+
 def _authorization_identity_document(
     identity: DatabaseRelocationAuthorizationIdentity,
 ) -> dict[str, object]:
@@ -1104,6 +1773,276 @@ def _authorization_identity_document(
             identity.retained_source_preflight_fingerprint
         ),
         "source_event_count": identity.source_event_count,
+    }
+
+
+def _journal_preparation_semantic_identity_document(
+    identity: DatabaseRelocationAuthorizationIdentity,
+) -> dict[str, object]:
+    document = _authorization_identity_document(identity)
+    del document["normalized_sha256"]
+    del document["normalized_size"]
+    return document
+
+
+def _require_unchanged_journal_preparation_semantics(
+    before: DatabaseRelocationAuthorizationIdentity,
+    after: DatabaseRelocationAuthorizationIdentity,
+) -> None:
+    if _journal_preparation_semantic_identity_document(
+        before
+    ) != _journal_preparation_semantic_identity_document(after):
+        raise DatabaseRelocationError(
+            "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: logical catalog identity "
+            "changed across the journal-mode transition."
+        )
+
+
+def _journal_mode_preparation_authority_document(
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+) -> dict[str, object]:
+    return {
+        "authorization_id": authority.authorization_id,
+        "expected_journal_mode": authority.expected_journal_mode,
+        "expected_main": _file_observation_document(authority.expected_main),
+        "expected_moa_checkpoint": authority.expected_moa_checkpoint,
+        "expected_sidecars": {
+            "journal": _file_observation_document(authority.expected_journal),
+            "shm": _file_observation_document(authority.expected_shm),
+            "wal": _file_observation_document(authority.expected_wal),
+        },
+        "intended_destination": str(authority.intended_destination),
+        "listener_known_writers_stopped_attested": (
+            authority.listener_known_writers_stopped_attested
+        ),
+        "source": str(authority.source),
+    }
+
+
+def _journal_mode_preparation_document(
+    *,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+    sqlite_version: str,
+    exclusion_acquired_at: str,
+    exclusion_released_at: str,
+    pre_transition_main: DatabaseFileObservation,
+    pre_transition_journal_mode: str,
+    pre_transition_journal: DatabaseFileObservation,
+    pre_transition_wal: DatabaseFileObservation,
+    pre_transition_shm: DatabaseFileObservation,
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity,
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity,
+    pre_integrity_check: tuple[str, ...],
+    pre_foreign_key_check: tuple[tuple[object, ...], ...],
+    post_integrity_check: tuple[str, ...],
+    post_foreign_key_check: tuple[tuple[object, ...], ...],
+    returned_journal_mode: str,
+    header_write_version: int,
+    header_read_version: int,
+    post_transition_main: DatabaseFileObservation,
+    post_transition_journal: DatabaseFileObservation,
+    post_transition_wal: DatabaseFileObservation,
+    post_transition_shm: DatabaseFileObservation,
+    final_post_close_journal: DatabaseFileObservation,
+    final_post_close_wal: DatabaseFileObservation,
+    final_post_close_shm: DatabaseFileObservation,
+) -> dict[str, object]:
+    pre_semantic_document = _journal_preparation_semantic_identity_document(
+        pre_semantic_identity
+    )
+    post_semantic_document = _journal_preparation_semantic_identity_document(
+        post_semantic_identity
+    )
+    return {
+        "authorization_id": authority.authorization_id,
+        "completed_at": completed_at,
+        "evidence_format": _JOURNAL_MODE_PREPARATION_FORMAT,
+        "evidence_record_sha256_scope": _JOURNAL_MODE_PREPARATION_HASH_SCOPE,
+        "evidence_version": _JOURNAL_MODE_PREPARATION_VERSION,
+        "expected_preparation_authority": (
+            _journal_mode_preparation_authority_document(authority)
+        ),
+        "final_post_close_sidecars": {
+            "journal": _file_observation_document(final_post_close_journal),
+            "shm": _file_observation_document(final_post_close_shm),
+            "wal": _file_observation_document(final_post_close_wal),
+        },
+        "intended_destination": str(authority.intended_destination),
+        "listener_guard": {"acquired": True, "released": True},
+        "listener_known_writers_stopped_attested": (
+            authority.listener_known_writers_stopped_attested
+        ),
+        "moa_checkpoint": authority.expected_moa_checkpoint,
+        "post_transition": {
+            "header_read_version": header_read_version,
+            "header_write_version": header_write_version,
+            "main": _file_observation_document(post_transition_main),
+            "semantic_identity": post_semantic_document,
+            "sidecars": {
+                "journal": _file_observation_document(post_transition_journal),
+                "shm": _file_observation_document(post_transition_shm),
+                "wal": _file_observation_document(post_transition_wal),
+            },
+        },
+        "pre_transition": {
+            "journal_mode": pre_transition_journal_mode,
+            "main": _file_observation_document(pre_transition_main),
+            "semantic_identity": pre_semantic_document,
+            "sidecars": {
+                "journal": _file_observation_document(pre_transition_journal),
+                "shm": _file_observation_document(pre_transition_shm),
+                "wal": _file_observation_document(pre_transition_wal),
+            },
+        },
+        "run_id": run_id,
+        "source": str(authority.source),
+        "sqlite_runtime_version": sqlite_version,
+        "sqlite_writer_exclusion": {
+            "acquired": True,
+            "acquired_at": exclusion_acquired_at,
+            "begin_mode": "exclusive",
+            "busy_timeout_ms": _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS,
+            "connection_locking_mode": "exclusive",
+            "released": True,
+            "released_at": exclusion_released_at,
+        },
+        "started_at": started_at,
+        "status": "completed",
+        "transition": {
+            "requested_journal_mode": "wal",
+            "returned_journal_mode": returned_journal_mode,
+        },
+        "validation": {
+            "post_foreign_key_check": [list(row) for row in post_foreign_key_check],
+            "post_integrity_check": list(post_integrity_check),
+            "pre_foreign_key_check": [list(row) for row in pre_foreign_key_check],
+            "pre_integrity_check": list(pre_integrity_check),
+            "semantic_identity_unchanged": pre_semantic_document
+            == post_semantic_document,
+        },
+    }
+
+
+def _journal_mode_preparation_failure_document(
+    *,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+    sqlite_version: str,
+    exclusion_acquired_at: str | None,
+    exclusion_released_at: str | None,
+    returned_journal_mode: str | None,
+    failure: BaseException,
+    pre_transition_main: DatabaseFileObservation,
+    pre_transition_journal_mode: str,
+    pre_transition_journal: DatabaseFileObservation,
+    pre_transition_wal: DatabaseFileObservation,
+    pre_transition_shm: DatabaseFileObservation,
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity,
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity | None,
+    pre_integrity_check: tuple[str, ...],
+    pre_foreign_key_check: tuple[tuple[object, ...], ...],
+    post_integrity_check: tuple[str, ...] | None,
+    post_foreign_key_check: tuple[tuple[object, ...], ...] | None,
+    listener_guard_released: bool,
+    final_journal: DatabaseFileObservation | None,
+    final_wal: DatabaseFileObservation | None,
+    final_shm: DatabaseFileObservation | None,
+) -> dict[str, object]:
+    final_main = _observe_database_file(authority.source)
+    header_write_version, header_read_version = _database_header_versions(
+        authority.source
+    )
+    pre_semantic_document = _journal_preparation_semantic_identity_document(
+        pre_semantic_identity
+    )
+    post_semantic_document = (
+        _journal_preparation_semantic_identity_document(post_semantic_identity)
+        if post_semantic_identity is not None
+        else None
+    )
+    return {
+        "authorization_id": authority.authorization_id,
+        "completed_at": completed_at,
+        "evidence_format": _JOURNAL_MODE_PREPARATION_FORMAT,
+        "evidence_record_sha256_scope": _JOURNAL_MODE_PREPARATION_HASH_SCOPE,
+        "evidence_version": _JOURNAL_MODE_PREPARATION_VERSION,
+        "expected_preparation_authority": (
+            _journal_mode_preparation_authority_document(authority)
+        ),
+        "failure": {
+            "reason": str(failure),
+            "type": type(failure).__name__,
+        },
+        "final_observed_state": {
+            "header_read_version": header_read_version,
+            "header_write_version": header_write_version,
+            "main": _file_observation_document(final_main),
+            "sidecars": {
+                "journal": _optional_file_observation_document(final_journal),
+                "shm": _optional_file_observation_document(final_shm),
+                "wal": _optional_file_observation_document(final_wal),
+            },
+        },
+        "intended_destination": str(authority.intended_destination),
+        "listener_guard": {"acquired": True, "released": listener_guard_released},
+        "listener_known_writers_stopped_attested": (
+            authority.listener_known_writers_stopped_attested
+        ),
+        "moa_checkpoint": authority.expected_moa_checkpoint,
+        "pre_transition": {
+            "journal_mode": pre_transition_journal_mode,
+            "main": _file_observation_document(pre_transition_main),
+            "semantic_identity": pre_semantic_document,
+            "sidecars": {
+                "journal": _file_observation_document(pre_transition_journal),
+                "shm": _file_observation_document(pre_transition_shm),
+                "wal": _file_observation_document(pre_transition_wal),
+            },
+        },
+        "run_id": run_id,
+        "source": str(authority.source),
+        "sqlite_runtime_version": sqlite_version,
+        "sqlite_writer_exclusion": {
+            "acquired": exclusion_acquired_at is not None,
+            "acquired_at": exclusion_acquired_at,
+            "begin_mode": "exclusive",
+            "busy_timeout_ms": _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS,
+            "connection_locking_mode": "exclusive",
+            "released": exclusion_released_at is not None,
+            "released_at": exclusion_released_at,
+        },
+        "started_at": started_at,
+        "status": "failed",
+        "transition": {
+            "automatic_reversal_attempted": False,
+            "requested_journal_mode": "wal",
+            "returned_journal_mode": returned_journal_mode,
+        },
+        "validation": {
+            "post_foreign_key_check": (
+                [list(row) for row in post_foreign_key_check]
+                if post_foreign_key_check is not None
+                else None
+            ),
+            "post_integrity_check": (
+                list(post_integrity_check)
+                if post_integrity_check is not None
+                else None
+            ),
+            "post_semantic_identity": post_semantic_document,
+            "pre_foreign_key_check": [list(row) for row in pre_foreign_key_check],
+            "pre_integrity_check": list(pre_integrity_check),
+            "semantic_identity_unchanged": (
+                pre_semantic_document == post_semantic_document
+                if post_semantic_document is not None
+                else None
+            ),
+        },
     }
 
 
