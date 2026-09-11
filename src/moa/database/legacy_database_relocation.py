@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,7 +31,8 @@ from moa.services.retained_source_reprojection_preflight_service import (
 _INCOMPLETE_RETIREMENT_MARKER_NAME = ".moa-relocation-incomplete"
 _RETIREMENT_TOMBSTONE_MARKER_NAME = ".moa-relocated"
 _RETIREMENT_TOMBSTONE_FORMAT = "moa-legacy-database-retirement"
-_RETIREMENT_TOMBSTONE_VERSION = 1
+_RETIREMENT_TOMBSTONE_V1_VERSION = 1
+_RETIREMENT_TOMBSTONE_V2_VERSION = 2
 _CERTIFICATION_FORMAT = "moa-database-relocation-identity-certification"
 _CERTIFICATION_VERSION = 1
 _CERTIFICATION_HASH_SCOPE = "canonical-json-without-certification-record-sha256"
@@ -407,8 +410,11 @@ class _NormalizedRelocationAuthority:
 
 @dataclass(frozen=True, slots=True)
 class _RetirementTombstone:
+    version: int
     target: Path
     archive: Path
+    archive_sha256: str | None = None
+    archive_size: int | None = None
 
 
 def _source_file_path() -> Path:
@@ -1615,11 +1621,23 @@ def _install_retirement_tombstone(source: Path, target: Path, archive: Path) -> 
         ) from error
 
     marker = source / _RETIREMENT_TOMBSTONE_MARKER_NAME
+    canonical_target = target.resolve(strict=False)
+    canonical_archive = archive.resolve(strict=False)
+    try:
+        archive_sha256, archive_size = _archive_file_identity(canonical_archive)
+    except BaseException as error:
+        raise DatabaseRelocationError(
+            "LEGACY_PATH_RECREATION_BLOCKER: the retirement tombstone directory now "
+            "blocks legacy database recreation, but the final archive identity could "
+            f"not be collected at {canonical_archive}: {error}"
+        ) from error
     payload = {
         "format": _RETIREMENT_TOMBSTONE_FORMAT,
-        "version": _RETIREMENT_TOMBSTONE_VERSION,
-        "target": str(target.resolve(strict=False)),
-        "archive": str(archive.resolve(strict=False)),
+        "version": _RETIREMENT_TOMBSTONE_V2_VERSION,
+        "target": str(canonical_target),
+        "archive": str(canonical_archive),
+        "archiveSha256": archive_sha256,
+        "archiveSize": archive_size,
     }
     try:
         _write_retirement_tombstone_marker(marker, payload)
@@ -1661,24 +1679,27 @@ def _validate_retirement_tombstone(
         raise DatabaseRelocationError(
             f"Could not read legacy retirement tombstone marker {marker}: {error}"
         ) from error
-    expected_keys = {"format", "version", "target", "archive"}
-    if not isinstance(payload, dict) or set(payload) != expected_keys:
+    if not isinstance(payload, dict):
         raise DatabaseRelocationError(
             f"Legacy retirement tombstone marker has an invalid structure: {marker}"
         )
+    version = payload.get("version")
     if (
-        payload["format"] != _RETIREMENT_TOMBSTONE_FORMAT
-        or payload["version"] != _RETIREMENT_TOMBSTONE_VERSION
-        or not isinstance(payload["target"], str)
-        or not isinstance(payload["archive"], str)
+        payload.get("format") != _RETIREMENT_TOMBSTONE_FORMAT
+        or not isinstance(version, int)
+        or isinstance(version, bool)
     ):
         raise DatabaseRelocationError(
             f"Legacy retirement tombstone marker has an unsupported identity: {marker}"
         )
-    tombstone = _RetirementTombstone(
-        Path(payload["target"]).resolve(strict=False),
-        Path(payload["archive"]).resolve(strict=False),
-    )
+    if version == _RETIREMENT_TOMBSTONE_V1_VERSION:
+        tombstone = _parse_retirement_tombstone_v1(payload, marker)
+    elif version == _RETIREMENT_TOMBSTONE_V2_VERSION:
+        tombstone = _parse_retirement_tombstone_v2(payload, marker)
+    else:
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an unsupported identity: {marker}"
+        )
     resolved_target = target.resolve(strict=False)
     if tombstone.target != resolved_target:
         raise DatabaseRelocationError(
@@ -1692,11 +1713,160 @@ def _validate_retirement_tombstone(
             "Legacy retirement tombstone archive does not match this relocation. "
             f"Marker: {tombstone.archive}. Relocation: {expected_archive.resolve(strict=False)}."
         )
-    if not tombstone.archive.is_file():
+    if tombstone.version == _RETIREMENT_TOMBSTONE_V1_VERSION:
+        archive_is_valid = tombstone.archive.is_file()
+    else:
+        assert tombstone.archive_sha256 is not None
+        assert tombstone.archive_size is not None
+        actual_sha256, actual_size = _archive_file_identity(tombstone.archive)
+        archive_is_valid = (
+            actual_sha256 == tombstone.archive_sha256
+            and actual_size == tombstone.archive_size
+        )
+    if not archive_is_valid:
         raise DatabaseRelocationError(
-            f"Legacy retirement tombstone archive is missing or is not a file: {tombstone.archive}"
+            "Legacy retirement tombstone archive is missing, unsafe, or does not match "
+            f"the recorded identity: {tombstone.archive}"
         )
     return tombstone
+
+
+def _parse_retirement_tombstone_v1(
+    payload: dict[str, object], marker: Path
+) -> _RetirementTombstone:
+    expected_keys = {"format", "version", "target", "archive"}
+    if set(payload) != expected_keys:
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an invalid v1 structure: {marker}"
+        )
+    target = payload["target"]
+    archive = payload["archive"]
+    if not isinstance(target, str) or not isinstance(archive, str):
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an unsupported v1 identity: {marker}"
+        )
+    return _RetirementTombstone(
+        version=_RETIREMENT_TOMBSTONE_V1_VERSION,
+        target=Path(target).resolve(strict=False),
+        archive=Path(archive).resolve(strict=False),
+    )
+
+
+def _parse_retirement_tombstone_v2(
+    payload: dict[str, object], marker: Path
+) -> _RetirementTombstone:
+    expected_keys = {
+        "format",
+        "version",
+        "target",
+        "archive",
+        "archiveSha256",
+        "archiveSize",
+    }
+    if set(payload) != expected_keys:
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an invalid v2 structure: {marker}"
+        )
+    target = payload["target"]
+    archive = payload["archive"]
+    archive_sha256 = payload["archiveSha256"]
+    archive_size = payload["archiveSize"]
+    if (
+        not isinstance(target, str)
+        or not isinstance(archive, str)
+        or not _is_sha256(archive_sha256)
+        or not _is_positive_safe_int(archive_size)
+    ):
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has an unsupported v2 identity: {marker}"
+        )
+    assert isinstance(archive_sha256, str)
+    assert isinstance(archive_size, int) and not isinstance(archive_size, bool)
+    canonical_target = Path(target).expanduser().resolve(strict=False)
+    canonical_archive = Path(archive).expanduser().resolve(strict=False)
+    if target != str(canonical_target) or archive != str(canonical_archive):
+        raise DatabaseRelocationError(
+            f"Legacy retirement tombstone marker has a noncanonical v2 path: {marker}"
+        )
+    return _RetirementTombstone(
+        version=_RETIREMENT_TOMBSTONE_V2_VERSION,
+        target=canonical_target,
+        archive=canonical_archive,
+        archive_sha256=archive_sha256,
+        archive_size=archive_size,
+    )
+
+
+def _archive_file_identity(archive: Path) -> tuple[str, int]:
+    size = _archive_file_size(archive)
+    digest = _archive_file_sha256(archive)
+    if _archive_file_size(archive) != size:
+        raise DatabaseRelocationError(
+            f"Legacy retirement archive changed while its identity was collected: {archive}"
+        )
+    return digest, size
+
+
+def _archive_file_size(archive: Path) -> int:
+    metadata = _safe_archive_leaf_metadata(archive)
+    if not _is_positive_safe_int(metadata.st_size):
+        raise DatabaseRelocationError(
+            f"Legacy retirement archive has an invalid byte size: {archive}"
+        )
+    return metadata.st_size
+
+
+def _archive_file_sha256(archive: Path) -> str:
+    initial_metadata = _safe_archive_leaf_metadata(archive)
+    try:
+        with archive.open("rb") as archive_file:
+            opened_metadata = os.fstat(archive_file.fileno())
+            if not stat.S_ISREG(opened_metadata.st_mode) or not os.path.samestat(
+                initial_metadata, opened_metadata
+            ):
+                raise DatabaseRelocationError(
+                    f"Legacy retirement archive leaf changed before hashing: {archive}"
+                )
+            digest = file_digest(archive_file, "sha256").hexdigest()
+            final_open_metadata = os.fstat(archive_file.fileno())
+    except DatabaseRelocationError:
+        raise
+    except OSError as error:
+        raise DatabaseRelocationError(
+            f"Legacy retirement archive could not be hashed: {archive}"
+        ) from error
+    final_path_metadata = _safe_archive_leaf_metadata(archive)
+    if (
+        not os.path.samestat(initial_metadata, final_open_metadata)
+        or not os.path.samestat(initial_metadata, final_path_metadata)
+        or initial_metadata.st_size != final_open_metadata.st_size
+        or initial_metadata.st_size != final_path_metadata.st_size
+    ):
+        raise DatabaseRelocationError(
+            f"Legacy retirement archive changed while it was hashed: {archive}"
+        )
+    return digest
+
+
+def _safe_archive_leaf_metadata(archive: Path) -> os.stat_result:
+    try:
+        metadata = archive.lstat()
+    except OSError as error:
+        raise DatabaseRelocationError(
+            f"Legacy retirement archive is missing or unavailable: {archive}"
+        ) from error
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(metadata, "st_file_attributes", 0)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISREG(metadata.st_mode)
+        or bool(file_attributes & reparse_flag)
+    ):
+        raise DatabaseRelocationError(
+            "Legacy retirement archive leaf must be a regular file and must not be a "
+            f"symlink or reparse point: {archive}"
+        )
+    return metadata
 
 
 def _notify_test_hook(hook: Callable[[str], None] | None, stage: str) -> None:
@@ -2375,6 +2545,14 @@ def _is_sha256(value: object) -> bool:
 
 def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_positive_safe_int(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 < value <= sys.maxsize
+    )
 
 
 def _is_git_checkpoint(value: object) -> bool:

@@ -3,9 +3,11 @@ import json
 import multiprocessing
 import os
 import sqlite3
+import sys
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -363,8 +365,35 @@ def _assert_valid_tombstone(source: Path, target: Path, archive: Path) -> None:
     )
     assert source.is_dir()
     assert (source / ".moa-relocated").is_file()
+    assert tombstone.version == 2
     assert tombstone.target == target.resolve()
     assert tombstone.archive == archive.resolve()
+    assert tombstone.archive_sha256 == sha256(archive.read_bytes()).hexdigest()
+    assert tombstone.archive_size == archive.stat().st_size
+
+
+def _retirement_marker_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, dict[str, object]]:
+    source = tmp_path / "checkout" / "data" / "database" / "moa.db"
+    source.mkdir(parents=True)
+    target = tmp_path / "user-data" / "moa.db"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"current destination")
+    archive = source.with_name("moa.db.migrated-backup-test") / "moa.db"
+    archive.parent.mkdir()
+    archive.write_bytes(b"final archived database")
+    marker = source / ".moa-relocated"
+    payload: dict[str, object] = {
+        "format": "moa-legacy-database-retirement",
+        "version": 2,
+        "target": str(target.resolve(strict=False)),
+        "archive": str(archive.resolve(strict=False)),
+        "archiveSha256": sha256(archive.read_bytes()).hexdigest(),
+        "archiveSize": archive.stat().st_size,
+    }
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+    return source, target, archive, marker, payload
 
 
 def test_wal_recovery_authority_is_strict_bound_and_not_relocation_authority(
@@ -741,6 +770,23 @@ def test_successful_relocation_validates_promotes_and_retires_source(
     assert result.source_archive.is_file()
     assert result.source_archive.name == "moa.db"
     assert result.source_archive.parent.name.startswith("moa.db.migrated-backup-")
+    marker_document = json.loads((source / ".moa-relocated").read_text(encoding="utf-8"))
+    assert set(marker_document) == {
+        "format",
+        "version",
+        "target",
+        "archive",
+        "archiveSha256",
+        "archiveSize",
+    }
+    assert marker_document == {
+        "format": "moa-legacy-database-retirement",
+        "version": 2,
+        "target": str(target.resolve(strict=False)),
+        "archive": str(result.source_archive.resolve(strict=False)),
+        "archiveSha256": sha256(result.source_archive.read_bytes()).hexdigest(),
+        "archiveSize": result.source_archive.stat().st_size,
+    }
     assert not Path(f"{source}-wal").exists()
     assert not Path(f"{source}-shm").exists()
     assert list(target.parent.glob("moa.db.migrating-*")) == []
@@ -1845,6 +1891,309 @@ def test_valid_tombstone_without_target_fails_closed(monkeypatch, tmp_path) -> N
 
     assert not target.exists()
     _assert_valid_tombstone(source, target, result.source_archive)
+
+
+def test_valid_v1_retirement_marker_remains_accepted_and_is_not_upgraded(tmp_path) -> None:
+    source, target, archive, marker, _payload = _retirement_marker_fixture(tmp_path)
+    v1_payload = {
+        "format": "moa-legacy-database-retirement",
+        "version": 1,
+        "target": str(target.resolve(strict=False)),
+        "archive": str(archive.resolve(strict=False)),
+    }
+    original_marker_text = json.dumps(v1_payload)
+    marker.write_text(original_marker_text, encoding="utf-8")
+
+    tombstone = legacy_database_relocation._validate_retirement_tombstone(
+        source, target, expected_archive=archive
+    )
+
+    assert tombstone.version == 1
+    assert tombstone.archive_sha256 is None
+    assert tombstone.archive_size is None
+    assert marker.read_text(encoding="utf-8") == original_marker_text
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("format", "wrong-format", "unsupported identity"),
+        ("version", 3, "unsupported identity"),
+        ("archiveSha256", "A" * 64, "unsupported v2 identity"),
+        ("archiveSha256", "0" * 63, "unsupported v2 identity"),
+        ("archiveSha256", "g" * 64, "unsupported v2 identity"),
+        ("archiveSize", 0, "unsupported v2 identity"),
+        ("archiveSize", -1, "unsupported v2 identity"),
+        ("archiveSize", 1.5, "unsupported v2 identity"),
+        ("archiveSize", True, "unsupported v2 identity"),
+        ("archiveSize", sys.maxsize + 1, "unsupported v2 identity"),
+    ],
+)
+def test_v2_retirement_marker_rejects_invalid_identity_fields(
+    tmp_path, field: str, value: object, message: str
+) -> None:
+    source, target, archive, marker, payload = _retirement_marker_fixture(tmp_path)
+    payload[field] = value
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match=message):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+@pytest.mark.parametrize("change", ["unknown", "missing"])
+def test_v2_retirement_marker_requires_exact_six_field_schema(
+    tmp_path, change: str
+) -> None:
+    source, target, archive, marker, payload = _retirement_marker_fixture(tmp_path)
+    if change == "unknown":
+        payload["unexpected"] = "rejected"
+    else:
+        del payload["archiveSize"]
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match="invalid v2 structure"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+@pytest.mark.parametrize("field", ["target", "archive"])
+def test_v2_retirement_marker_rejects_noncanonical_serialized_paths(
+    tmp_path, field: str
+) -> None:
+    source, target, archive, marker, payload = _retirement_marker_fixture(tmp_path)
+    path = target if field == "target" else archive
+    payload[field] = str(path.parent) + os.sep + "." + os.sep + path.name
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match="noncanonical v2 path"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+def test_v2_retirement_marker_rejects_archive_directory(tmp_path) -> None:
+    source, target, archive, marker, payload = _retirement_marker_fixture(tmp_path)
+    archive.unlink()
+    archive.mkdir()
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match="regular file"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+def test_v2_retirement_marker_rejects_missing_archive(tmp_path) -> None:
+    source, target, archive, _marker, _payload = _retirement_marker_fixture(tmp_path)
+    archive.unlink()
+
+    with pytest.raises(DatabaseRelocationError, match="missing or unavailable"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+def test_v2_retirement_marker_rejects_symlinked_archive_leaf(tmp_path) -> None:
+    source, target, archive, marker, payload = _retirement_marker_fixture(tmp_path)
+    archive.unlink()
+    real_archive = archive.with_name("real.db")
+    real_archive.write_bytes(b"final archived database")
+    try:
+        archive.symlink_to(real_archive)
+    except OSError as error:
+        pytest.skip(f"symlink creation is unavailable: {error}")
+    payload["archive"] = str(archive)
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(DatabaseRelocationError, match="noncanonical|symlink"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+    with pytest.raises(DatabaseRelocationError, match="symlink or reparse point"):
+        legacy_database_relocation._safe_archive_leaf_metadata(archive)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse attribute semantics")
+def test_v2_archive_leaf_rejects_windows_reparse_attribute(
+    monkeypatch, tmp_path
+) -> None:
+    archive = tmp_path / "archive.db"
+    archive.write_bytes(b"archive")
+    real_metadata = archive.lstat()
+    reparse_metadata = SimpleNamespace(
+        st_mode=real_metadata.st_mode,
+        st_size=real_metadata.st_size,
+        st_file_attributes=getattr(os.stat(archive), "st_file_attributes", 0) | 0x400,
+    )
+    original_lstat = Path.lstat
+
+    def marked_reparse(path: Path):
+        return reparse_metadata if path == archive else original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", marked_reparse)
+
+    with pytest.raises(DatabaseRelocationError, match="reparse point"):
+        legacy_database_relocation._safe_archive_leaf_metadata(archive)
+
+
+@pytest.mark.parametrize("replacement", [b"FINAL ARCHIVED DATABASE", b"short"])
+def test_v2_retirement_marker_rejects_archive_content_or_size_change(
+    tmp_path, replacement: bytes
+) -> None:
+    source, target, archive, _marker, _payload = _retirement_marker_fixture(tmp_path)
+    archive.write_bytes(replacement)
+
+    with pytest.raises(DatabaseRelocationError, match="does not match"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, target, expected_archive=archive
+        )
+
+
+@pytest.mark.parametrize("mismatch", ["target", "archive"])
+def test_v2_retirement_marker_rejects_expected_path_mismatch(
+    tmp_path, mismatch: str
+) -> None:
+    source, target, archive, _marker, _payload = _retirement_marker_fixture(tmp_path)
+    expected_target = target.with_name("different.db") if mismatch == "target" else target
+    expected_archive = (
+        archive.with_name("different.db") if mismatch == "archive" else archive
+    )
+
+    with pytest.raises(DatabaseRelocationError, match=f"{mismatch} does not match"):
+        legacy_database_relocation._validate_retirement_tombstone(
+            source, expected_target, expected_archive=expected_archive
+        )
+
+
+@pytest.mark.parametrize("failure_function", ["_archive_file_sha256", "_archive_file_size"])
+def test_archive_identity_collection_failure_retains_incomplete_marker(
+    monkeypatch, tmp_path, failure_function: str
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+
+    def fail_identity(_archive: Path):
+        raise OSError(f"injected {failure_function} failure")
+
+    monkeypatch.setattr(legacy_database_relocation, failure_function, fail_identity)
+
+    with pytest.raises(DatabaseRelocationError, match="dual-authority") as error:
+        relocate_database(source, target)
+
+    assert "final archive identity could not be collected" in str(error.value.__cause__)
+    assert source.is_dir()
+    assert not (source / ".moa-relocated").exists()
+    incomplete_markers = list(
+        source.parent.glob("moa.db.migrated-backup-*/.moa-relocation-incomplete")
+    )
+    assert len(incomplete_markers) == 1
+    assert (incomplete_markers[0].parent / "moa.db").is_file()
+
+
+def test_invalid_newly_written_v2_marker_retains_incomplete_marker(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    original_writer = legacy_database_relocation._write_retirement_tombstone_marker
+
+    def write_invalid_marker(marker: Path, payload: dict[str, object]) -> None:
+        invalid_payload = dict(payload)
+        invalid_payload["archiveSha256"] = "A" * 64
+        original_writer(marker, invalid_payload)
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_write_retirement_tombstone_marker",
+        write_invalid_marker,
+    )
+
+    with pytest.raises(DatabaseRelocationError, match="dual-authority"):
+        relocate_database(source, target)
+
+    assert source.is_dir()
+    assert (source / ".moa-relocated").is_file()
+    assert len(
+        list(source.parent.glob("moa.db.migrated-backup-*/.moa-relocation-incomplete"))
+    ) == 1
+
+
+def test_post_write_archive_identity_mismatch_retains_incomplete_marker(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    original_identity = legacy_database_relocation._archive_file_identity
+    observations = 0
+
+    def mismatch_after_write(archive: Path) -> tuple[str, int]:
+        nonlocal observations
+        observations += 1
+        digest, size = original_identity(archive)
+        if observations == 2:
+            digest = "0" * 64 if digest != "0" * 64 else "1" * 64
+        return digest, size
+
+    monkeypatch.setattr(
+        legacy_database_relocation, "_archive_file_identity", mismatch_after_write
+    )
+
+    with pytest.raises(DatabaseRelocationError, match="dual-authority"):
+        relocate_database(source, target)
+
+    assert observations == 2
+    assert len(
+        list(source.parent.glob("moa.db.migrated-backup-*/.moa-relocation-incomplete"))
+    ) == 1
+
+
+def test_successful_v2_validation_precedes_incomplete_marker_removal(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    target = tmp_path / "user-data" / "moa.db"
+    original_validator = legacy_database_relocation._validate_retirement_tombstone
+    original_completion = legacy_database_relocation._complete_source_retirement
+    validation_barriers: list[bool] = []
+
+    def validate_with_barrier(*args, **kwargs):
+        expected_archive = kwargs.get("expected_archive")
+        if expected_archive is not None:
+            validation_barriers.append(
+                (Path(expected_archive).parent / ".moa-relocation-incomplete").is_file()
+            )
+        return original_validator(*args, **kwargs)
+
+    def complete_after_validation(archive: Path) -> None:
+        assert len(validation_barriers) >= 2
+        assert all(validation_barriers)
+        original_completion(archive)
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_validate_retirement_tombstone",
+        validate_with_barrier,
+    )
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_complete_source_retirement",
+        complete_after_validation,
+    )
+
+    result = relocate_database(source, target)
+
+    assert len(validation_barriers) >= 2
+    assert all(validation_barriers)
+    assert not (
+        result.source_archive.parent / ".moa-relocation-incomplete"
+    ).exists()
 
 
 @pytest.mark.parametrize("marker_content", [None, "{"])
