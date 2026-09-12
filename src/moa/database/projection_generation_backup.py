@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sqlite3
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,10 @@ class _DatabaseValidation:
     preflight_fingerprint: str
 
 
+_OperationalDatabaseAuthority = tuple[str, Path]
+_FilesystemObjectIdentity = tuple[int, int]
+
+
 def create_projection_generation_backup(
     source: Path,
     backup: Path,
@@ -67,15 +72,26 @@ def create_projection_generation_backup(
     source_path = _require_source(source)
     backup_path = _require_output(backup, label="backup")
     restore_path = _require_output(restore_probe, label="restore probe")
-    _reject_operational_database_paths(source_path, backup_path, restore_path)
+    operational_authorities = _operational_database_authorities()
+    _reject_operational_database_paths(
+        source_path,
+        backup_path,
+        restore_path,
+        authorities=operational_authorities,
+    )
     root_path = _require_worktree_root(worktree_root)
     _validate_path_relationships(source_path, backup_path, restore_path, root_path)
+    source_object_identity = _filesystem_object_identity(source_path, label="source")
 
     source_connection: sqlite3.Connection | None = None
     primary_error: BaseException | None = None
     created_outputs: list[Path] = []
     try:
-        source_connection = _acquire_writer_exclusion(source_path)
+        source_connection = _acquire_writer_exclusion(
+            source_path,
+            operational_authorities=operational_authorities,
+            expected_object_identity=source_object_identity,
+        )
         source_identity = _file_identity(source_path)
         source_validation = _validate_connection(source_connection)
 
@@ -140,34 +156,109 @@ def create_projection_generation_backup(
 
 def _require_source(path: Path) -> Path:
     raw = _ordinary_path(path, label="source")
-    if raw.is_symlink() or not raw.is_file():
+    try:
+        details = raw.lstat()
+    except OSError as error:
         raise ProjectionGenerationBackupError(
-            "Source must be an existing regular non-symlink file."
+            "Source must be an existing regular non-symlink, non-reparse file."
+        ) from error
+    if not stat.S_ISREG(details.st_mode) or _is_reparse(details):
+        raise ProjectionGenerationBackupError(
+            "Source must be an existing regular non-symlink, non-reparse file."
         )
     return raw.resolve(strict=True)
 
 
-def _reject_operational_database_paths(*paths: Path) -> None:
+def _operational_database_authorities() -> tuple[_OperationalDatabaseAuthority, ...]:
     canonical_default = default_database_path().expanduser().resolve(strict=False)
-    if canonical_default in paths:
-        raise ProjectionGenerationBackupError(
-            "The canonical MOA default database is not an allowed isolated backup path."
-        )
     from moa.database.legacy_database_relocation import verified_legacy_database_path
 
     legacy = verified_legacy_database_path()
-    if legacy is not None and legacy.expanduser().resolve(strict=False) in paths:
-        raise ProjectionGenerationBackupError(
-            "The verified legacy MOA database is not an allowed isolated backup path."
+    authorities: list[_OperationalDatabaseAuthority] = [
+        ("canonical MOA default database", canonical_default)
+    ]
+    if legacy is not None:
+        authorities.append(
+            (
+                "verified legacy MOA database",
+                legacy.expanduser().resolve(strict=False),
+            )
         )
+    return tuple(authorities)
+
+
+def _reject_operational_database_paths(
+    *paths: Path,
+    authorities: tuple[_OperationalDatabaseAuthority, ...] | None = None,
+) -> None:
+    protected = authorities or _operational_database_authorities()
+    for path in paths:
+        for label, authority in protected:
+            if path == authority or _same_existing_file(path, authority):
+                raise ProjectionGenerationBackupError(
+                    f"The {label} is not an allowed isolated backup path."
+                )
+
+
+def _same_existing_file(candidate: Path, authority: Path) -> bool:
+    candidate_exists = _path_exists_for_identity(candidate)
+    authority_exists = _path_exists_for_identity(authority)
+    if not candidate_exists or not authority_exists:
+        return False
+    try:
+        return os.path.samefile(candidate, authority)
+    except OSError as error:
+        raise ProjectionGenerationBackupError(
+            "Could not establish filesystem object identity for an isolated backup path."
+        ) from error
+
+
+def _path_exists_for_identity(path: Path) -> bool:
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as error:
+        raise ProjectionGenerationBackupError(
+            "Could not establish filesystem object identity for an isolated backup path."
+        ) from error
+    return True
+
+
+def _filesystem_object_identity(path: Path, *, label: str) -> _FilesystemObjectIdentity:
+    try:
+        details = path.stat()
+    except OSError as error:
+        raise ProjectionGenerationBackupError(
+            f"Could not establish filesystem object identity for the {label}."
+        ) from error
+    if not stat.S_ISREG(details.st_mode):
+        raise ProjectionGenerationBackupError(
+            f"The {label.capitalize()} is no longer a regular file."
+        )
+    return details.st_dev, details.st_ino
+
+
+def _is_reparse(details: os.stat_result) -> bool:
+    attributes = getattr(details, "st_file_attributes", 0)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & reparse_flag)
 
 
 def _require_output(path: Path, *, label: str) -> Path:
     raw = _ordinary_path(path, label=label)
     parent = raw.parent
-    if parent.is_symlink() or not parent.is_dir():
+    try:
+        parent_details = parent.lstat()
+    except OSError as error:
         raise ProjectionGenerationBackupError(
-            f"{label.capitalize()} parent must be an existing non-symlink directory."
+            f"{label.capitalize()} parent must be an existing non-symlink, "
+            "non-reparse directory."
+        ) from error
+    if not stat.S_ISDIR(parent_details.st_mode) or _is_reparse(parent_details):
+        raise ProjectionGenerationBackupError(
+            f"{label.capitalize()} parent must be an existing non-symlink, "
+            "non-reparse directory."
         )
     resolved = raw.resolve(strict=False)
     if raw.exists() or raw.is_symlink() or resolved.exists():
@@ -212,15 +303,37 @@ def _validate_path_relationships(
             raise ProjectionGenerationBackupError(f"{label} output must be outside the worktree.")
 
 
-def _acquire_writer_exclusion(path: Path) -> sqlite3.Connection:
+def _acquire_writer_exclusion(
+    path: Path,
+    *,
+    operational_authorities: tuple[_OperationalDatabaseAuthority, ...],
+    expected_object_identity: _FilesystemObjectIdentity,
+) -> sqlite3.Connection:
     connection: sqlite3.Connection | None = None
     try:
+        _reject_operational_database_paths(path, authorities=operational_authorities)
+        if _filesystem_object_identity(path, label="source") != expected_object_identity:
+            raise ProjectionGenerationBackupError(
+                "Source filesystem object identity changed before writer exclusion."
+            )
         connection = sqlite3.connect(path)
+        if _filesystem_object_identity(path, label="opened source") != expected_object_identity:
+            raise ProjectionGenerationBackupError(
+                "Source filesystem object identity changed while opening writer exclusion."
+            )
+        _reject_operational_database_paths(path, authorities=operational_authorities)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {_WRITER_EXCLUSION_TIMEOUT_MS}")
         connection.execute("BEGIN IMMEDIATE")
         return connection
+    except ProjectionGenerationBackupError as error:
+        if connection is not None:
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                error.add_note(f"Could not close rejected source connection: {cleanup_error}")
+        raise
     except sqlite3.Error as error:
         if connection is not None:
             try:

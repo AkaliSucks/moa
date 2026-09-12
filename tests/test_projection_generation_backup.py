@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import stat
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -14,6 +18,24 @@ from moa.database.projection_generation_backup import (
 from moa.database.sqlite import connect
 from moa.database.writer_lease import try_acquire_exclusive_database_quiescence
 from moa.repositories.catalog_repository import CatalogRepository
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operational_database_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import moa.database.legacy_database_relocation as relocation_module
+
+    monkeypatch.setattr(
+        backup_module,
+        "default_database_path",
+        lambda: tmp_path / "operational-default" / "moa.db",
+    )
+    monkeypatch.setattr(
+        relocation_module,
+        "verified_legacy_database_path",
+        lambda: tmp_path / "operational-legacy" / "moa.db",
+    )
 
 
 def _paths(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -113,6 +135,136 @@ def test_verified_legacy_database_cannot_use_isolated_backup_bypass(
     assert not restore.exists()
 
 
+def test_hard_link_alias_of_canonical_default_is_rejected_by_same_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    alias = tmp_path / "default-hard-link.sqlite3"
+    os.link(source, alias)
+    assert alias != source.resolve()
+    assert os.path.samefile(alias, source)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="canonical MOA default"):
+        create_projection_generation_backup(alias, backup, restore, worktree)
+
+    writer_exclusion.assert_not_called()
+    assert not backup.exists()
+    assert not restore.exists()
+
+
+def test_hard_link_alias_of_verified_legacy_is_rejected_by_same_file_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import moa.database.legacy_database_relocation as relocation_module
+
+    source, backup, restore, worktree = _paths(tmp_path)
+    alias = tmp_path / "legacy-hard-link.sqlite3"
+    os.link(source, alias)
+    assert alias != source.resolve()
+    assert os.path.samefile(alias, source)
+    monkeypatch.setattr(
+        backup_module, "default_database_path", lambda: tmp_path / "other.db"
+    )
+    monkeypatch.setattr(relocation_module, "verified_legacy_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="verified legacy"):
+        create_projection_generation_backup(alias, backup, restore, worktree)
+
+    writer_exclusion.assert_not_called()
+    assert not backup.exists()
+    assert not restore.exists()
+
+
+def test_different_file_with_identical_bytes_remains_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    operational = tmp_path / "operational-copy.sqlite3"
+    shutil.copyfile(source, operational)
+    assert source.read_bytes() == operational.read_bytes()
+    assert not os.path.samefile(source, operational)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: operational)
+
+    result = create_projection_generation_backup(source, backup, restore, worktree)
+
+    assert result.source_path == source.resolve()
+    assert result.backup_path == backup.resolve()
+    assert result.restore_probe_path == restore.resolve()
+
+
+def test_operational_identity_error_fails_closed_before_writer_exclusion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    operational = tmp_path / "operational.sqlite3"
+    shutil.copyfile(source, operational)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: operational)
+    monkeypatch.setattr(
+        backup_module.os.path,
+        "samefile",
+        Mock(side_effect=PermissionError("identity unavailable")),
+    )
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="filesystem object identity"):
+        create_projection_generation_backup(source, backup, restore, worktree)
+
+    writer_exclusion.assert_not_called()
+    assert not backup.exists()
+    assert not restore.exists()
+
+
+def test_source_identity_is_revalidated_after_sqlite_open_before_begin_immediate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    real_identity = backup_module._filesystem_object_identity(source, label="source")
+    identities = iter((real_identity, real_identity, (real_identity[0], real_identity[1] + 1)))
+    identity = Mock(side_effect=lambda *_args, **_kwargs: next(identities))
+    connection = Mock()
+    sqlite_connect = Mock(return_value=connection)
+    monkeypatch.setattr(backup_module, "_filesystem_object_identity", identity)
+    monkeypatch.setattr(backup_module.sqlite3, "connect", sqlite_connect)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="changed while opening"):
+        create_projection_generation_backup(source, backup, restore, worktree)
+
+    sqlite_connect.assert_called_once_with(source.resolve())
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+
+
+def test_exclusive_quiescence_plus_operational_hard_link_alias_never_reaches_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    alias = tmp_path / "quiescence-hard-link.sqlite3"
+    os.link(source, alias)
+    assert os.path.samefile(alias, source)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+    source_before = source.read_bytes()
+    attempt = try_acquire_exclusive_database_quiescence()
+    assert attempt.lease is not None
+    try:
+        with pytest.raises(ProjectionGenerationBackupError, match="canonical MOA default"):
+            create_projection_generation_backup(alias, backup, restore, worktree)
+    finally:
+        attempt.lease.release()
+
+    writer_exclusion.assert_not_called()
+    assert source.read_bytes() == source_before
+    assert not backup.exists()
+    assert not restore.exists()
+
+
 def test_isolated_backup_remains_independent_of_operational_quiescence(
     tmp_path: Path,
 ) -> None:
@@ -163,6 +315,73 @@ def test_source_must_be_regular_and_not_a_symlink(tmp_path: Path) -> None:
 
     with pytest.raises(ProjectionGenerationBackupError, match="non-symlink"):
         create_projection_generation_backup(link, backup, restore, worktree)
+
+
+def test_symlink_alias_of_operational_database_is_rejected_before_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    link = tmp_path / "operational-link.sqlite3"
+    try:
+        link.symlink_to(source)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="non-reparse"):
+        create_projection_generation_backup(link, backup, restore, worktree)
+
+    writer_exclusion.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reparse-point behavior")
+def test_windows_reparse_directory_alias_of_operational_database_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operational_directory = tmp_path / "operational-directory"
+    operational_directory.mkdir()
+    source = operational_directory / "moa.db"
+    CatalogRepository(source)
+    alias_directory = tmp_path / "reparse-alias"
+    try:
+        alias_directory.symlink_to(operational_directory, target_is_directory=True)
+    except OSError:
+        junction = subprocess.run(
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                str(alias_directory),
+                str(operational_directory),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if junction.returncode != 0:
+            pytest.skip("directory reparse-point creation is unavailable")
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    assert alias_directory.lstat().st_file_attributes & reparse_flag
+    outputs = tmp_path / "outputs"
+    worktree = tmp_path / "worktree"
+    outputs.mkdir()
+    worktree.mkdir()
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: source)
+    writer_exclusion = Mock(side_effect=AssertionError("writer exclusion was reached"))
+    monkeypatch.setattr(backup_module, "_acquire_writer_exclusion", writer_exclusion)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="canonical MOA default"):
+        create_projection_generation_backup(
+            alias_directory / "moa.db",
+            outputs / "backup.sqlite3",
+            outputs / "restore.sqlite3",
+            worktree,
+        )
+
+    writer_exclusion.assert_not_called()
 
 
 def test_destination_parent_must_exist_and_not_be_a_symlink(tmp_path: Path) -> None:
