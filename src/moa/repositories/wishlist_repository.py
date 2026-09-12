@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import WishlistImportResult, WishlistObservation
 from moa.models.character import WishlistSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_account, upsert_server
@@ -108,7 +108,7 @@ class WishlistRepository:
 
     def wishlist(self, server_name: str, account_name: str) -> WishlistObservation | None:
         """Return the latest `$wl` snapshot for one server/account pair."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT wishlist_observations.*, server_contexts.name AS server_name,

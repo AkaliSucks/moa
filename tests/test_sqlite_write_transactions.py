@@ -1,12 +1,14 @@
 import sqlite3
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 import moa.database.sqlite as sqlite_module
 from moa.database.sqlite import connect, run_write_transaction
+from moa.database.writer_lease import DatabaseWriterLeaseContendedError
 
 
 _THREAD_TIMEOUT = 5.0
@@ -549,3 +551,126 @@ def test_special_database_targets_fail_closed(database_path) -> None:
         ValueError, match="write transactions require a file-backed SQLite database path"
     ):
         run_write_transaction(database_path, lambda connection: None)
+
+
+def test_global_writer_lease_precedes_open_and_outlives_commit_and_close(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+
+    class ObservedConnection:
+        in_transaction = False
+
+        def execute(self, sql: str):
+            events.append(sql)
+            if sql == "BEGIN IMMEDIATE":
+                self.in_transaction = True
+            return self
+
+        def commit(self) -> None:
+            events.append("commit")
+            self.in_transaction = False
+
+        def close(self) -> None:
+            events.append("close")
+
+    @contextmanager
+    def observed_lease():
+        events.append("lease-enter")
+        yield object()
+        events.append("lease-exit")
+
+    def observed_connect(_path):
+        events.append("connect")
+        return ObservedConnection()
+
+    monkeypatch.setattr(sqlite_module, "shared_database_writer_lease", observed_lease)
+    monkeypatch.setattr(sqlite_module, "connect", observed_connect)
+
+    run_write_transaction(
+        tmp_path / "lifetime.db",
+        lambda connection: connection.execute("INSERT sentinel"),
+    )
+
+    assert events == [
+        "lease-enter",
+        "connect",
+        "BEGIN IMMEDIATE",
+        "INSERT sentinel",
+        "commit",
+        "close",
+        "lease-exit",
+    ]
+
+
+def test_global_writer_lease_outlives_rollback_and_connection_close(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    failure = RuntimeError("callback failed")
+
+    class ObservedConnection:
+        in_transaction = False
+
+        def execute(self, sql: str):
+            events.append(sql)
+            if sql == "BEGIN IMMEDIATE":
+                self.in_transaction = True
+            return self
+
+        def rollback(self) -> None:
+            events.append("rollback")
+            self.in_transaction = False
+
+        def close(self) -> None:
+            events.append("close")
+
+    @contextmanager
+    def observed_lease():
+        events.append("lease-enter")
+        try:
+            yield object()
+        finally:
+            events.append("lease-exit")
+
+    monkeypatch.setattr(sqlite_module, "shared_database_writer_lease", observed_lease)
+    monkeypatch.setattr(sqlite_module, "connect", lambda _path: ObservedConnection())
+
+    with pytest.raises(RuntimeError) as raised:
+        run_write_transaction(
+            tmp_path / "rollback-lifetime.db",
+            lambda _connection: (_ for _ in ()).throw(failure),
+        )
+
+    assert raised.value is failure
+    assert events == [
+        "lease-enter",
+        "BEGIN IMMEDIATE",
+        "rollback",
+        "close",
+        "lease-exit",
+    ]
+
+
+def test_writer_lease_failure_prevents_write_capable_connection_open(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection_opened = False
+
+    @contextmanager
+    def rejected_lease():
+        raise DatabaseWriterLeaseContendedError("exclusive observer active")
+        yield object()
+
+    def unexpected_connect(_path):
+        nonlocal connection_opened
+        connection_opened = True
+        raise AssertionError("write-capable connection opened without a lease")
+
+    monkeypatch.setattr(sqlite_module, "shared_database_writer_lease", rejected_lease)
+    monkeypatch.setattr(sqlite_module, "connect", unexpected_connect)
+
+    with pytest.raises(DatabaseWriterLeaseContendedError):
+        run_write_transaction(tmp_path / "blocked.db", lambda _connection: None)
+
+    assert not connection_opened

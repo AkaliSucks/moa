@@ -12,6 +12,7 @@ from moa.database.projection_generation_backup import (
     create_projection_generation_backup,
 )
 from moa.database.sqlite import connect
+from moa.database.writer_lease import try_acquire_exclusive_database_quiescence
 from moa.repositories.catalog_repository import CatalogRepository
 
 
@@ -77,6 +78,54 @@ def test_canonical_default_database_is_refused_before_backup_work(
     backup_promotion.assert_not_called()
     assert not backup.exists()
     assert not restore.exists()
+
+
+def test_canonical_default_database_cannot_be_an_isolated_output(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: backup)
+
+    with pytest.raises(ProjectionGenerationBackupError, match="canonical MOA default"):
+        create_projection_generation_backup(source, backup, restore, worktree)
+
+    assert not backup.exists()
+    assert not restore.exists()
+
+
+def test_verified_legacy_database_cannot_use_isolated_backup_bypass(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import moa.database.legacy_database_relocation as relocation_module
+
+    source, backup, restore, worktree = _paths(tmp_path)
+    monkeypatch.setattr(backup_module, "default_database_path", lambda: tmp_path / "other.db")
+    monkeypatch.setattr(
+        relocation_module,
+        "verified_legacy_database_path",
+        lambda: source,
+    )
+
+    with pytest.raises(ProjectionGenerationBackupError, match="verified legacy"):
+        create_projection_generation_backup(source, backup, restore, worktree)
+
+    assert not backup.exists()
+    assert not restore.exists()
+
+
+def test_isolated_backup_remains_independent_of_operational_quiescence(
+    tmp_path: Path,
+) -> None:
+    source, backup, restore, worktree = _paths(tmp_path)
+    attempt = try_acquire_exclusive_database_quiescence()
+    assert attempt.lease is not None
+    try:
+        result = create_projection_generation_backup(source, backup, restore, worktree)
+    finally:
+        attempt.lease.release()
+
+    assert result.backup_path == backup.resolve()
+    assert result.restore_probe_path == restore.resolve()
 
 
 @pytest.mark.parametrize("target_name", ["backup", "restore"])

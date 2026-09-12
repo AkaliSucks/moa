@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import MudapinImportResult, MudapinObservation
 from moa.models.character import MudapinSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_account, upsert_server
@@ -104,7 +104,7 @@ class MudapinsRepository:
 
     def mudapins(self, server_name: str, account_name: str) -> MudapinObservation | None:
         """Return the latest `$mp` inventory for one account."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT mudapin_observations.*, server_contexts.name AS server_name,

@@ -5,7 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import (
     CatalogCharacter,
     HaremKeyImportResult,
@@ -671,7 +671,7 @@ class HaremRepository:
         return int(row["id"]) if row is not None else None
 
     def _connection(self) -> sqlite3.Connection:
-        return connect(self._database_path)
+        return connect_read_only(self._database_path)
 
     @staticmethod
     def _roulette_types(row: sqlite3.Row) -> tuple[str, ...] | None:

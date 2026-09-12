@@ -8,6 +8,8 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from moa.database.writer_lease import shared_database_writer_lease
+
 
 def register_catalog_reset_command(
     catalog_app: typer.Typer,
@@ -32,21 +34,31 @@ def register_catalog_reset_command(
             console.print("Run `uv run moa catalog reset --confirm` after stopping the listener.")
             return
 
-        if not database_path.exists():
-            console.print("[green]No catalog database exists; it will be created on the next import.[/green]")
-            return
+        with shared_database_writer_lease():
+            if not database_path.exists():
+                console.print(
+                    "[green]No catalog database exists; it will be created on the next "
+                    "import.[/green]"
+                )
+                return
 
-        backup_path = database_path.with_name(
-            f"{database_path.name}.bak-full-reset-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-        )
-        suffix = 1
-        while backup_path.exists():
             backup_path = database_path.with_name(
                 f"{database_path.name}.bak-full-reset-"
-                f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+                f"{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             )
-            suffix += 1
-        shutil.copy2(database_path, backup_path)
-        database_path.unlink()
+            suffix = 1
+            while backup_path.exists():
+                backup_path = database_path.with_name(
+                    f"{database_path.name}.bak-full-reset-"
+                    f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{suffix}"
+                )
+                suffix += 1
+            shutil.copy2(database_path, backup_path)
+            database_path.unlink()
+            for sidecar in (
+                Path(f"{database_path}-wal"),
+                Path(f"{database_path}-shm"),
+            ):
+                sidecar.unlink(missing_ok=True)
         console.print("[green]Catalog database reset. MOA config was preserved.[/green]")
         console.print(f"Backup saved to: {backup_path}")

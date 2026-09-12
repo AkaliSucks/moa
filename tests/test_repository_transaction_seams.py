@@ -5758,7 +5758,9 @@ def test_profile_helper_is_transaction_neutral_on_supplied_connection(
     def unexpected_runner(*args, **kwargs):
         raise AssertionError("profile helper started an independent transaction")
 
-    monkeypatch.setattr(profile_repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(
+        profile_repository_module, "connect_read_only", unexpected_connection
+    )
     monkeypatch.setattr(profile_repository_module, "run_write_transaction", unexpected_runner)
 
     with connect(database_path) as connection:

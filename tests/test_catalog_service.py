@@ -199,7 +199,7 @@ def test_claim_reader_contains_ambiguous_name_only_divorce_by_canonical_id(
     assert unresolved.character_id is None
 
     timestamp = "2026-08-14T00:00:00+00:00"
-    with repository._connection() as connection:
+    with repository._write_connection() as connection:
         account_id = int(connection.execute("SELECT id FROM account_contexts").fetchone()[0])
         characters = connection.execute(
             "SELECT id, series FROM characters WHERE normalized_name = 'duplicate'"
@@ -229,7 +229,7 @@ def test_claim_reader_contains_ambiguous_name_only_divorce_by_canonical_id(
     )
     assert sum(claim.character is None for claim in claims) == 1
 
-    with repository._connection() as connection:
+    with repository._write_connection() as connection:
         unresolved_divorce_event_id = int(
             connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) "
@@ -253,7 +253,7 @@ def test_claim_reader_contains_ambiguous_name_only_divorce_by_canonical_id(
         if claim.character is not None
     } == set(character_ids.values())
 
-    with repository._connection() as connection:
+    with repository._write_connection() as connection:
         exact_divorce_event_id = int(
             connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) "
@@ -765,7 +765,7 @@ def test_repair_bugged_imports_preserves_post_parse_divorce_reference(
     character_name = "Each kakera button consumes 100% of your reaction power."
     character_series = "Your characters with 10+ keys consume half the power (50%)"
 
-    with repository._connection() as connection:
+    with repository._write_connection() as connection:
         character_id = int(
             connection.execute(
                 """

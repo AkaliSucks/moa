@@ -8,7 +8,11 @@ import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect, run_write_transaction
+from moa.database.sqlite import (
+    DEFAULT_DATABASE_PATH,
+    connect_read_only,
+    run_write_transaction,
+)
 from moa.models.discord_identity import MessageAggregateKey, MessageRevisionKey, SourcePlatform
 from moa.repositories.catalog_repository import CatalogRepository
 
@@ -1414,7 +1418,7 @@ class DiscordMessageRepository:
         )
 
     def _connection(self) -> sqlite3.Connection:
-        return connect(self._database_path)
+        return connect_read_only(self._database_path)
 
     @staticmethod
     def _validate_processing_identity(**values: int) -> None:

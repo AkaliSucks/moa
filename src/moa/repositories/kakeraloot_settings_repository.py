@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import KakeralootSettingsImportResult, KakeralootSettingsObservation
 from moa.models.character import KakeralootSettingsSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_server
@@ -100,7 +100,7 @@ class KakeralootSettingsRepository:
 
     def kakeraloot_settings(self, server_name: str) -> KakeralootSettingsObservation | None:
         """Return the latest `$infokl` price configuration for one server."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT kakeraloot_settings_observations.*, server_contexts.name AS server_name

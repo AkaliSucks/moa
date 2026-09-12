@@ -123,7 +123,9 @@ def test_supplied_connection_seam_does_not_open_or_start_transaction(
     def unexpected_runner(*args, **kwargs):
         raise AssertionError("player-bonus helper started an independent transaction")
 
-    monkeypatch.setattr(player_bonus_repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(
+        player_bonus_repository_module, "connect_read_only", unexpected_connection
+    )
     monkeypatch.setattr(
         player_bonus_repository_module, "run_write_transaction", unexpected_runner
     )

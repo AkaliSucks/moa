@@ -803,7 +803,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         return FaultingScriptConnection(connect(repository._database_path))
 
     with monkeypatch.context() as fault:
-        fault.setattr(CatalogRepository, "_connection", faulting_connection)
+        fault.setattr(CatalogRepository, "_write_connection", faulting_connection)
         with pytest.raises(
             sqlite3.OperationalError,
             match="no such table: injected_missing_bootstrap_table",
@@ -904,7 +904,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         connection = connect(database_path)
         repository = object.__new__(CatalogRepository)
         repository._database_path = database_path
-        repository._connection = lambda: ObservedScriptConnection(connection, role)
+        repository._write_connection = lambda: ObservedScriptConnection(connection, role)
         ready.set()
         try:
             assert start.wait(5), f"{role} bootstrap was not started"

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import (
     KakeraProgressPoint,
     KakeraStateImportResult,
@@ -108,7 +108,7 @@ class KakeraStateRepository:
 
     def kakera_state(self, server_name: str, account_name: str) -> KakeraStateObservation | None:
         """Return the latest `$k` snapshot for one server/account pair."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT kakera_state_observations.*, server_contexts.name AS server_name,
@@ -139,7 +139,7 @@ class KakeraStateRepository:
         self, server_name: str, account_name: str
     ) -> tuple[KakeraProgressPoint, ...]:
         """Return every imported `$k` snapshot in chronological order."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             rows = connection.execute(
                 """
                 SELECT kakera_state_observations.*, server_contexts.name AS server_name,

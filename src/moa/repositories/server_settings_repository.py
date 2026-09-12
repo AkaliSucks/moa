@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import ServerSettingsImportResult, ServerSettingsObservation
 from moa.models.character import ServerSettingsSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_server
@@ -114,7 +114,7 @@ class ServerSettingsRepository:
 
     def server_settings(self, server_name: str) -> ServerSettingsObservation | None:
         """Return the latest `$settings` snapshot for one server."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT server_settings_observations.*, server_contexts.name AS server_name

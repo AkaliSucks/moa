@@ -190,7 +190,7 @@ def test_timer_state_repository_requires_initialized_explicit_path(tmp_path) -> 
 
     assert repository.database_path == database_path
     assert not database_path.exists()
-    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
         repository.timer_state("Server", "Account")
 
     initialized = _initialized_timer_repository(database_path)
@@ -257,7 +257,7 @@ def test_timer_state_repository_supplied_connection_is_neutral_and_caller_commit
     def unexpected_runner(*args, **kwargs):
         raise AssertionError("supplied helper started an independent transaction")
 
-    monkeypatch.setattr(repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(repository_module, "connect_read_only", unexpected_connection)
     monkeypatch.setattr(repository_module, "run_write_transaction", unexpected_runner)
 
     with connect(database_path) as connection:

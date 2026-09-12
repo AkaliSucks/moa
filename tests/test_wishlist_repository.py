@@ -152,7 +152,7 @@ def test_supplied_connection_helper_is_transaction_neutral_and_rolls_back(tmp_pa
     def forbidden(*_args, **_kwargs):
         raise AssertionError("supplied helper opened or owned another transaction")
 
-    monkeypatch.setattr(wishlist_repository_module, "connect", forbidden)
+    monkeypatch.setattr(wishlist_repository_module, "connect_read_only", forbidden)
     monkeypatch.setattr(wishlist_repository_module, "run_write_transaction", forbidden)
 
     with connect(database_path) as connection:

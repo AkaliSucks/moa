@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import TimerStateImportResult, TimerStateObservation
 from moa.models.character import TimerStateSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_account, upsert_server
@@ -98,7 +98,7 @@ class TimerStateRepository:
 
     def timer_state(self, server_name: str, account_name: str) -> TimerStateObservation | None:
         """Return the newest imported `$tu` snapshot for one account."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT timer_state_observations.*, server_contexts.name AS server_name,

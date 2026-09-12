@@ -1,4 +1,5 @@
 import re
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -5312,9 +5313,22 @@ def test_catalog_reset_backs_up_bytes_before_unlink_and_uses_collision_suffix(
 
     monkeypatch.setattr(catalog_reset_commands_module, "datetime", FixedDateTime)
     operations: list[str] = []
+    lease_active = False
     original_copy2 = catalog_reset_commands_module.shutil.copy2
 
+    @contextmanager
+    def observed_lease():
+        nonlocal lease_active
+        lease_active = True
+        operations.append("lease-enter")
+        try:
+            yield object()
+        finally:
+            operations.append("lease-exit")
+            lease_active = False
+
     def copy2(source, destination):
+        assert lease_active
         operations.append("backup")
         result = original_copy2(source, destination)
         assert source.read_bytes() == b"catalog\x00bytes"
@@ -5324,9 +5338,18 @@ def test_catalog_reset_backs_up_bytes_before_unlink_and_uses_collision_suffix(
 
     def unlink(path, *args, **kwargs):
         if path == database_path:
+            assert lease_active
             operations.append("unlink")
+        elif path in {Path(f"{database_path}-wal"), Path(f"{database_path}-shm")}:
+            assert lease_active
+            operations.append(f"unlink-{path.name.rsplit('-', 1)[-1]}")
         return original_unlink(path, *args, **kwargs)
 
+    monkeypatch.setattr(
+        catalog_reset_commands_module,
+        "shared_database_writer_lease",
+        observed_lease,
+    )
     monkeypatch.setattr(catalog_reset_commands_module.shutil, "copy2", copy2)
     monkeypatch.setattr(Path, "unlink", unlink)
 
@@ -5334,7 +5357,14 @@ def test_catalog_reset_backs_up_bytes_before_unlink_and_uses_collision_suffix(
 
     second_backup = tmp_path / f"moa.db.bak-full-reset-{timestamp}-1"
     assert result.exit_code == 0
-    assert operations == ["backup", "unlink"]
+    assert operations == [
+        "lease-enter",
+        "backup",
+        "unlink",
+        "unlink-wal",
+        "unlink-shm",
+        "lease-exit",
+    ]
     assert not database_path.exists()
     assert first_backup.read_bytes() == b"existing-backup"
     assert second_backup.read_bytes() == b"catalog\x00bytes"
@@ -6632,12 +6662,29 @@ def test_catalog_repair_backs_up_before_repair_and_uses_collision_suffix(
     timestamp = "20260828-120000"
     first_backup = database_path.with_name(f"moa.db.bak-{timestamp}")
     first_backup.write_bytes(b"existing-backup")
+    events: list[str] = []
+    lease_active = False
+
+    @contextmanager
+    def observed_lease():
+        nonlocal lease_active
+        lease_active = True
+        events.append("lease-enter")
+        try:
+            yield object()
+        finally:
+            events.append("lease-exit")
+            lease_active = False
 
     class RecordingCatalogService:
         def inspect_bugged_imports(self):
+            assert lease_active
+            events.append("inspect")
             return 1, 0
 
         def repair_bugged_imports(self):
+            assert lease_active
+            events.append("repair")
             assert first_backup.read_bytes() == b"existing-backup"
             assert (database_path.parent / f"moa.db.bak-{timestamp}-1").read_bytes() == b"catalog-bytes"
             return 1, 0
@@ -6651,12 +6698,30 @@ def test_catalog_repair_backs_up_before_repair_and_uses_collision_suffix(
         def now():
             return FixedNow()
 
+    original_copy2 = catalog_repair_bugged_data_commands_module.shutil.copy2
+
+    def observed_copy2(source, destination):
+        assert lease_active
+        events.append("backup")
+        return original_copy2(source, destination)
+
     monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "CatalogService", RecordingCatalogService)
     monkeypatch.setattr(catalog_repair_bugged_data_commands_module, "datetime", FixedDateTime)
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module,
+        "shared_database_writer_lease",
+        observed_lease,
+    )
+    monkeypatch.setattr(
+        catalog_repair_bugged_data_commands_module.shutil,
+        "copy2",
+        observed_copy2,
+    )
 
     result = CliRunner().invoke(main.app, ["catalog", "repair-bugged-data", "--apply"])
 
     assert result.exit_code == 0
+    assert events == ["lease-enter", "inspect", "backup", "repair", "lease-exit"]
     assert database_path.read_bytes() == b"catalog-bytes"
     collision_backup = database_path.parent / f"moa.db.bak-{timestamp}-1"
     assert collision_backup.read_bytes() == b"catalog-bytes"

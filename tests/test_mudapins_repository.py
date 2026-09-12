@@ -40,7 +40,7 @@ def test_constructor_requires_initialized_explicit_path_and_preserves_absence(tm
     assert repository.database_path == database_path
     assert not database_path.exists()
 
-    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
         repository.mudapins("Server", "Account")
 
     initialized = _initialize(database_path)
@@ -156,7 +156,7 @@ def test_supplied_connection_is_neutral_and_caller_commit_persists(tmp_path, mon
     def unexpected_runner(*args, **kwargs):
         raise AssertionError("supplied helper started an independent transaction")
 
-    monkeypatch.setattr(repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(repository_module, "connect_read_only", unexpected_connection)
     monkeypatch.setattr(repository_module, "run_write_transaction", unexpected_runner)
 
     with connect(database_path) as connection:

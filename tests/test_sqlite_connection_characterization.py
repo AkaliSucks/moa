@@ -1,8 +1,9 @@
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from moa.database.sqlite import connect
+from moa.database.sqlite import connect, connect_read_only
 
 
 def _pragma_value(connection: sqlite3.Connection, name: str):
@@ -101,3 +102,17 @@ def test_wal_second_writer_can_reuse_connection_after_contention(tmp_path) -> No
         assert verification_connection.execute(
             "SELECT value FROM values_table"
         ).fetchone()[0] == 3
+
+
+def test_read_only_connection_does_not_enable_wal_or_create_sidecars(tmp_path) -> None:
+    database_path = tmp_path / "read-only.db"
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == "delete"
+        connection.execute("CREATE TABLE values_table (value INTEGER NOT NULL)")
+
+    with connect_read_only(database_path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert connection.execute("SELECT COUNT(*) FROM values_table").fetchone()[0] == 0
+
+    assert not Path(f"{database_path}-wal").exists()
+    assert not Path(f"{database_path}-shm").exists()

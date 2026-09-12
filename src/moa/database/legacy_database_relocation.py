@@ -17,6 +17,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from moa.database.migrations import CATALOG_MIGRATIONS, CATALOG_TABLES
+from moa.database.writer_lease import shared_database_writer_lease
 from moa.models.data_health import DataHealthFinding
 from moa.repositories.data_health_repository import DataHealthRepository
 from moa.services.listener_process_guard import (
@@ -571,6 +572,16 @@ def recover_database_wal(
     *,
     _test_hook: Callable[[str], None] | None = None,
 ) -> DatabaseWalRecoveryEvidence:
+    """Normalize one authorized WAL source under the global writer lease."""
+    with shared_database_writer_lease():
+        return _recover_database_wal(authority, _test_hook=_test_hook)
+
+
+def _recover_database_wal(
+    authority: DatabaseWalRecoveryAuthority,
+    *,
+    _test_hook: Callable[[str], None] | None = None,
+) -> DatabaseWalRecoveryEvidence:
     """Normalize one exactly authorized WAL source without relocating it."""
     _validate_wal_recovery_authority(authority)
     source_path, destination_path = _resolve_wal_recovery_paths(
@@ -867,6 +878,14 @@ def recover_database_wal(
 
 
 def prepare_database_relocation_journal_mode(
+    authority: DatabaseRelocationJournalModePreparationAuthority,
+) -> DatabaseRelocationJournalModePreparationEvidence:
+    """Prepare journal mode under the profile-global writer lease."""
+    with shared_database_writer_lease():
+        return _prepare_database_relocation_journal_mode(authority)
+
+
+def _prepare_database_relocation_journal_mode(
     authority: DatabaseRelocationJournalModePreparationAuthority,
 ) -> DatabaseRelocationJournalModePreparationEvidence:
     """Change one exactly authorized rollback-mode source to persistent WAL mode."""
@@ -1240,6 +1259,25 @@ def certify_database_relocation_identity(
     *,
     listener_known_writers_stopped_attested: bool = False,
 ) -> DatabaseRelocationIdentityCertification:
+    """Certify normalized relocation identity under the global writer lease."""
+    with shared_database_writer_lease():
+        return _certify_database_relocation_identity(
+            source,
+            intended_destination,
+            expected_moa_checkpoint,
+            listener_known_writers_stopped_attested=(
+                listener_known_writers_stopped_attested
+            ),
+        )
+
+
+def _certify_database_relocation_identity(
+    source: Path,
+    intended_destination: Path,
+    expected_moa_checkpoint: str,
+    *,
+    listener_known_writers_stopped_attested: bool = False,
+) -> DatabaseRelocationIdentityCertification:
     """Certify one normalized source identity without performing relocation."""
     source_path, destination_path, _tombstone_required = _resolve_relocation_paths(
         source, intended_destination
@@ -1300,6 +1338,22 @@ def certify_database_relocation_identity(
 
 
 def _relocate_database(
+    source: Path,
+    target: Path,
+    *,
+    expected_identity: DatabaseRelocationAuthorizationIdentity | None,
+    _test_hook: Callable[[str], None] | None,
+) -> DatabaseRelocationResult:
+    with shared_database_writer_lease():
+        return _relocate_database_under_writer_lease(
+            source,
+            target,
+            expected_identity=expected_identity,
+            _test_hook=_test_hook,
+        )
+
+
+def _relocate_database_under_writer_lease(
     source: Path,
     target: Path,
     *,

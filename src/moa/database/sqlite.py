@@ -9,6 +9,8 @@ from typing import TypeVar
 
 from platformdirs import user_data_path
 
+from moa.database.writer_lease import shared_database_writer_lease
+
 
 def default_database_path() -> Path:
     """Return MOA's per-user, platform-native live database path."""
@@ -121,24 +123,25 @@ def run_write_transaction(
         raise RuntimeError("nested write transactions are not supported")
 
     lock = _writer_lock(canonical_path)
-    _write_transaction_state.active = True
-    try:
-        with lock:
-            connection = connect(canonical_path)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                result = callback(connection)
-                connection.commit()
-            except BaseException:
-                _rollback_if_active(connection)
+    with shared_database_writer_lease():
+        _write_transaction_state.active = True
+        try:
+            with lock:
+                connection = connect(canonical_path)
                 try:
-                    connection.close()
-                except Exception:
-                    # Cleanup must not replace the transaction failure being propagated.
-                    pass
-                raise
-            connection.close()
-    finally:
-        _write_transaction_state.active = False
+                    connection.execute("BEGIN IMMEDIATE")
+                    result = callback(connection)
+                    connection.commit()
+                except BaseException:
+                    _rollback_if_active(connection)
+                    try:
+                        connection.close()
+                    except Exception:
+                        # Cleanup must not replace the callback or commit failure.
+                        pass
+                    raise
+                connection.close()
+        finally:
+            _write_transaction_state.active = False
 
     return result

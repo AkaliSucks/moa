@@ -138,7 +138,7 @@ def test_supplied_connection_seam_is_transaction_neutral(tmp_path, monkeypatch) 
     def unexpected_runner(*args, **kwargs):
         raise AssertionError("Kakera-state helper started an independent transaction")
 
-    monkeypatch.setattr(repository_module, "connect", unexpected_connection)
+    monkeypatch.setattr(repository_module, "connect_read_only", unexpected_connection)
     monkeypatch.setattr(repository_module, "run_write_transaction", unexpected_runner)
 
     with connect(database_path) as connection:

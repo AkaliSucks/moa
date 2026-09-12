@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
-from moa.database.sqlite import DEFAULT_DATABASE_PATH, connect, run_write_transaction
+from moa.database.sqlite import (
+    DEFAULT_DATABASE_PATH,
+    connect,
+    connect_read_only,
+    run_write_transaction,
+)
+from moa.database.writer_lease import shared_database_writer_lease
 from moa.database.migrations import (
     CATALOG_MIGRATIONS,
     run_migrations,
@@ -2985,37 +2991,38 @@ class CatalogRepository:
         return False
 
     def _initialize(self) -> None:
-        with self._connection() as connection:
-            has_catalog_tables = connection.execute(
-                """
-                SELECT 1
-                FROM sqlite_master
-                WHERE type = 'table'
-                  AND name NOT LIKE 'sqlite_%'
-                  AND name != 'schema_migrations'
-                LIMIT 1
-                """
-            ).fetchone() is not None
-            has_migration_metadata = connection.execute(
-                """
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = 'schema_migrations'
-                """
-            ).fetchone() is not None
-            if has_catalog_tables and not has_migration_metadata:
-                validate_catalog_schema(connection)
-                run_migrations(connection, CATALOG_MIGRATIONS)
-                return
-            if has_migration_metadata:
-                run_migrations(connection, CATALOG_MIGRATIONS)
+        with shared_database_writer_lease():
+            with self._write_connection() as connection:
+                has_catalog_tables = connection.execute(
+                    """
+                    SELECT 1
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                      AND name NOT LIKE 'sqlite_%'
+                      AND name != 'schema_migrations'
+                    LIMIT 1
+                    """
+                ).fetchone() is not None
+                has_migration_metadata = connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'schema_migrations'
+                    """
+                ).fetchone() is not None
+                if has_catalog_tables and not has_migration_metadata:
+                    validate_catalog_schema(connection)
+                    run_migrations(connection, CATALOG_MIGRATIONS)
+                    return
+                if has_migration_metadata:
+                    run_migrations(connection, CATALOG_MIGRATIONS)
 
-        self._create_schema()
+            self._create_schema()
 
-        with self._connection() as connection:
-            run_migrations(connection, CATALOG_MIGRATIONS)
+            with self._write_connection() as connection:
+                run_migrations(connection, CATALOG_MIGRATIONS)
 
     def _create_schema(self) -> None:
-        with self._connection() as connection, _schema_bootstrap_transaction(connection):
+        with self._write_connection() as connection, _schema_bootstrap_transaction(connection):
             connection.executescript(
                 """
                 BEGIN IMMEDIATE;
@@ -3635,6 +3642,9 @@ class CatalogRepository:
         )
 
     def _connection(self) -> sqlite3.Connection:
+        return connect_read_only(self._database_path)
+
+    def _write_connection(self) -> sqlite3.Connection:
         return connect(self._database_path)
 
     def _upsert_character(

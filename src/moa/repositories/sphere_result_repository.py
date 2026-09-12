@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from moa.database.sqlite import connect, run_write_transaction
+from moa.database.sqlite import connect_read_only, run_write_transaction
 from moa.models.catalog import SphereResultImportResult, SphereResultObservation
 from moa.models.character import SphereResultSnapshot
 from moa.repositories._catalog_identity import normalize, upsert_account, upsert_server
@@ -106,7 +106,7 @@ class SphereResultRepository:
 
     def sphere_result(self, server_name: str, account_name: str) -> SphereResultObservation | None:
         """Return the newest imported `$oq` result for one account."""
-        with connect(self._database_path) as connection:
+        with connect_read_only(self._database_path) as connection:
             row = connection.execute(
                 """
                 SELECT sphere_result_observations.*, server_contexts.name AS server_name,

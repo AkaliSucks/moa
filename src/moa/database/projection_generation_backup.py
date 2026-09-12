@@ -65,9 +65,9 @@ def create_projection_generation_backup(
     """Back up one explicit isolated database and prove an exact disposable restore."""
 
     source_path = _require_source(source)
-    _reject_default_database(source_path)
     backup_path = _require_output(backup, label="backup")
     restore_path = _require_output(restore_probe, label="restore probe")
+    _reject_operational_database_paths(source_path, backup_path, restore_path)
     root_path = _require_worktree_root(worktree_root)
     _validate_path_relationships(source_path, backup_path, restore_path, root_path)
 
@@ -147,11 +147,18 @@ def _require_source(path: Path) -> Path:
     return raw.resolve(strict=True)
 
 
-def _reject_default_database(source: Path) -> None:
+def _reject_operational_database_paths(*paths: Path) -> None:
     canonical_default = default_database_path().expanduser().resolve(strict=False)
-    if source == canonical_default:
+    if canonical_default in paths:
         raise ProjectionGenerationBackupError(
-            "The canonical MOA default database is not an allowed backup source."
+            "The canonical MOA default database is not an allowed isolated backup path."
+        )
+    from moa.database.legacy_database_relocation import verified_legacy_database_path
+
+    legacy = verified_legacy_database_path()
+    if legacy is not None and legacy.expanduser().resolve(strict=False) in paths:
+        raise ProjectionGenerationBackupError(
+            "The verified legacy MOA database is not an allowed isolated backup path."
         )
 
 
