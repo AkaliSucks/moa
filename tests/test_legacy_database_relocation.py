@@ -8,7 +8,13 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import typer
+from rich.console import Console
+from typer.testing import CliRunner
 
+from moa.cli.catalog_relocate_database_commands import (
+    register_catalog_relocate_database_command,
+)
 from moa.database import legacy_database_relocation, sqlite
 from moa.database.legacy_database_relocation import (
     DatabaseFileObservation,
@@ -16,10 +22,13 @@ from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     DatabaseRelocationJournalModePreparationAuthority,
     DatabaseRelocationJournalModePreparationError,
+    DatabaseSidecarObservation,
+    DatabaseWalRecoveryAuthority,
     LegacyDatabaseAuthorityConflictError,
     LegacyDatabaseRelocationRequiredError,
     certify_database_relocation_identity,
     prepare_database_relocation_journal_mode,
+    recover_database_wal,
     relocate_database,
     relocate_database_with_authorization,
 )
@@ -122,6 +131,19 @@ def _create_fresh_legacy_database_process(database: str, start, finished, result
         finished.set()
 
 
+def _leave_committed_wal_process(database: str, committed) -> None:
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA wal_autocheckpoint = 0")
+    connection.execute(
+        "INSERT INTO import_events (kind, source, observed_at, raw_message) "
+        "VALUES ('command_observation', 'wal-recovery-fixture', "
+        "'2026-09-04T00:00:00+00:00', 'committed only in WAL')"
+    )
+    connection.commit()
+    committed.set()
+    os._exit(0)
+
+
 def _join_process(process: multiprocessing.Process) -> None:
     process.join(10)
     if process.is_alive():
@@ -211,6 +233,103 @@ def _preparation_authority(
     )
 
 
+def _recovery_authority(
+    source: Path,
+    destination: Path,
+    *,
+    authorization_id: str = "approved-wal-recovery-001",
+) -> DatabaseWalRecoveryAuthority:
+    authority = DatabaseWalRecoveryAuthority(
+        authorization_format="moa-database-wal-recovery-authorization",
+        authorization_version=1,
+        action="AUTHORIZE_ONE_DATABASE_WAL_RECOVERY_ATTEMPT",
+        authorization_id=authorization_id,
+        source=source.resolve(strict=False),
+        intended_destination=destination.resolve(strict=False),
+        expected_moa_checkpoint=CHECKPOINT,
+        expected_main=legacy_database_relocation._observe_database_file(source),
+        expected_wal=legacy_database_relocation._observe_database_file(
+            Path(f"{source}-wal")
+        ),
+        expected_shm=legacy_database_relocation._observe_sidecar_presence(
+            Path(f"{source}-shm")
+        ),
+        expected_journal_mode="wal",
+        listener_known_writers_stopped_attested=True,
+        max_attempts=1,
+        authorization_record_sha256="0" * 64,
+    )
+    digest = sha256(
+        legacy_database_relocation._canonical_json(
+            legacy_database_relocation._wal_recovery_authority_document(authority)
+        ).encode("ascii")
+    ).hexdigest()
+    return replace(authority, authorization_record_sha256=digest)
+
+
+def _create_crash_left_wal(source: Path) -> None:
+    _create_moa_database(source)
+    context = multiprocessing.get_context("spawn")
+    committed = context.Event()
+    process = context.Process(
+        target=_leave_committed_wal_process,
+        args=(str(source), committed),
+    )
+    process.start()
+    assert committed.wait(10)
+    _join_process(process)
+    assert Path(f"{source}-wal").stat().st_size > 0
+
+
+def _recovery_cli_arguments(
+    authority: DatabaseWalRecoveryAuthority,
+) -> list[str]:
+    arguments = [
+        "recover-database-wal",
+        str(authority.source),
+        "--expected-destination",
+        str(authority.intended_destination),
+        "--expected-moa-checkpoint",
+        authority.expected_moa_checkpoint,
+        "--authorization-format",
+        authority.authorization_format,
+        "--authorization-version",
+        str(authority.authorization_version),
+        "--authorization-action",
+        authority.action,
+        "--authorization-id",
+        authority.authorization_id,
+        "--authorization-sha256",
+        authority.authorization_record_sha256,
+        "--max-attempts",
+        str(authority.max_attempts),
+        "--expected-main-sha256",
+        str(authority.expected_main.sha256),
+        "--expected-main-size",
+        str(authority.expected_main.size),
+        "--expected-wal-state",
+        "present" if authority.expected_wal.present else "absent",
+        "--expected-shm-state",
+        "present" if authority.expected_shm.present else "absent",
+        "--expected-journal-mode",
+        authority.expected_journal_mode,
+        "--listener-known-writers-stopped",
+        "--apply",
+    ]
+    if authority.expected_wal.present:
+        arguments.extend(
+            (
+                "--expected-wal-size",
+                str(authority.expected_wal.size),
+                "--expected-wal-sha256",
+                str(authority.expected_wal.sha256),
+            )
+        )
+    if authority.expected_shm.present:
+        arguments.extend(("--expected-shm-size", str(authority.expected_shm.size)))
+    return arguments
+
+
 def _authorization_identity(source: Path) -> DatabaseRelocationAuthorizationIdentity:
     legacy_database_relocation._checkpoint_source_for_retirement(source)
     connection = legacy_database_relocation._acquire_authorization_exclusion(source)
@@ -246,6 +365,363 @@ def _assert_valid_tombstone(source: Path, target: Path, archive: Path) -> None:
     assert (source / ".moa-relocated").is_file()
     assert tombstone.target == target.resolve()
     assert tombstone.archive == archive.resolve()
+
+
+def test_wal_recovery_authority_is_strict_bound_and_not_relocation_authority(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+
+    assert authority.as_dict()["action"] == (
+        "AUTHORIZE_ONE_DATABASE_WAL_RECOVERY_ATTEMPT"
+    )
+    assert authority.as_dict()["max_attempts"] == 1
+    with pytest.raises(DatabaseRelocationError, match="invalid action"):
+        invalid_action = replace(
+            authority,
+            action="AUTHORIZE_ONE_DATABASE_RELOCATION_ATTEMPT",
+            authorization_record_sha256="0" * 64,
+        )
+        recover_database_wal(invalid_action)
+    with pytest.raises(DatabaseRelocationError, match="typed recovery-only"):
+        recover_database_wal(_authorization_identity(source))  # type: ignore[arg-type]
+    with pytest.raises(DatabaseRelocationError, match="invalid typed representation"):
+        relocate_database_with_authorization(
+            source,
+            destination,
+            authority,  # type: ignore[arg-type]
+        )
+
+
+def test_wal_recovery_rejects_digest_path_and_destination_mismatches_before_guard(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+
+    with pytest.raises(DatabaseRelocationError, match="authorization digest"):
+        recover_database_wal(
+            replace(authority, authorization_record_sha256="1" * 64)
+        )
+
+    (source.parent / "nested").mkdir()
+    noncanonical = replace(
+        authority,
+        source=source.parent / "nested" / ".." / source.name,
+        authorization_record_sha256="0" * 64,
+    )
+    noncanonical = replace(
+        noncanonical,
+        authorization_record_sha256=sha256(
+            legacy_database_relocation._canonical_json(
+                legacy_database_relocation._wal_recovery_authority_document(
+                    noncanonical
+                )
+            ).encode("ascii")
+        ).hexdigest(),
+    )
+    with pytest.raises(DatabaseRelocationError, match="canonical paths"):
+        recover_database_wal(noncanonical)
+
+    destination.parent.mkdir()
+    destination.write_bytes(b"must remain untouched")
+    with pytest.raises(DatabaseRelocationError, match="must remain absent"):
+        recover_database_wal(authority)
+    assert destination.read_bytes() == b"must remain untouched"
+
+
+def test_wal_recovery_normalizes_committed_wal_visible_data_and_emits_evidence(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    destination = tmp_path / "destination-never-created" / "moa.db"
+    authority = _recovery_authority(source, destination)
+    pre_main = authority.expected_main
+    stages: list[str] = []
+    original_unlink = Path.unlink
+
+    def reject_manual_sidecar_unlink(path: Path, *args, **kwargs):
+        if path in (Path(f"{source}-wal"), Path(f"{source}-shm")):
+            raise AssertionError("recovery must never manually unlink source sidecars")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", reject_manual_sidecar_unlink)
+
+    result = recover_database_wal(authority, _test_hook=stages.append)
+
+    assert result.status == "RECOVERY_COMPLETED"
+    assert result.truncate_checkpoint == (0, 0, 0)
+    assert result.normalized_main.present
+    assert (
+        result.normalized_main.sha256 != pre_main.sha256
+        or result.normalized_main.size != pre_main.size
+    )
+    assert stages == [
+        "LISTENER_GUARD_ACQUIRED",
+        "SQLITE_EXCLUSIVE_ACQUIRED",
+        "PRE_SEMANTIC_VALIDATED",
+        "TRUNCATE_CHECKPOINT_COMPLETED",
+        "RECOVERY_VALIDATED",
+    ]
+    assert not destination.exists()
+    assert not destination.parent.exists()
+    assert list(source.parent.glob(f"{source.name}.migrated-backup-*")) == []
+    assert source.is_file()
+    with sqlite3.connect(source) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM import_events WHERE raw_message = ?",
+            ("committed only in WAL",),
+        ).fetchone()[0] == 1
+
+    document = result.as_dict()
+    digest = document.pop("evidence_record_sha256")
+    assert digest == sha256(
+        legacy_database_relocation._canonical_json(document).encode("ascii")
+    ).hexdigest()
+    assert result.to_json() == json.dumps(
+        result.as_dict(), ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    assert document["validation"]["semantic_identity_unchanged"] is True
+    assert document["pre_normalization_under_exclusive_ownership"][
+        "semantic_identity"
+    ] == document["post_normalization"]["semantic_identity"]
+    assert "sha256" not in document["pre_lock"]["sidecars"]["shm"]
+    assert "sha256" not in document["post_normalization"]["sidecars"]["shm"]
+    assert "sha256" not in document["final_post_close_sidecars"]["shm"]
+    assert document["recovery_scope_declarations"] == {
+        "activation_performed": False,
+        "destination_created": False,
+        "projection_performed": False,
+        "relocation_performed": False,
+        "reprojection_performed": False,
+        "retention_performed": False,
+        "source_retired_archived_or_tombstoned": False,
+        "wal_or_shm_manually_unlinked": False,
+    }
+    assert document["relocation_requirements_after_recovery"] == {
+        "requires_fresh_bound_relocation_authorization": True,
+        "requires_fresh_relocation_certification": True,
+    }
+    assert document["authorization_consumption"] == {
+        "durable_cross_process_enforcement": False,
+        "host_operation_layer_must_consume_once": True,
+        "max_attempts": 1,
+    }
+
+
+def test_wal_recovery_already_normalized_is_explicit_and_skips_checkpoint(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_moa_database(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+
+    def forbidden_checkpoint(_connection):
+        raise AssertionError("already-normalized recovery must not checkpoint")
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_checkpoint_wal_truncate_on_owned_connection",
+        forbidden_checkpoint,
+    )
+    result = recover_database_wal(authority)
+
+    assert result.status == "NO_ACTION_ALREADY_NORMALIZED"
+    assert result.truncate_checkpoint is None
+    assert result.as_dict()["normalization"] == {
+        "checkpoint_mode": "none-already-normalized",
+        "truncate_checkpoint": None,
+    }
+    assert not destination.exists()
+
+
+def test_wal_recovery_cli_requires_bound_authority_and_renders_canonical_evidence(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+    app = typer.Typer()
+    register_catalog_relocate_database_command(
+        app, Console(), lambda: destination
+    )
+
+    result = CliRunner().invoke(app, _recovery_cli_arguments(authority))
+
+    assert result.exit_code == 0, result.output
+    document = json.loads(result.stdout)
+    assert result.stdout.strip() == json.dumps(
+        document, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+    )
+    assert document["status"] == "RECOVERY_COMPLETED"
+    assert document["authorization"]["action"] == (
+        "AUTHORIZE_ONE_DATABASE_WAL_RECOVERY_ATTEMPT"
+    )
+    assert not destination.exists()
+
+
+def test_wal_recovery_listener_guard_precedes_sqlite_and_exclusive_blocks_access(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+    real_open = legacy_database_relocation._open_neutral_source_connection
+
+    def checked_open(path: Path):
+        competing_guard = ListenerProcessGuard(path)
+        with pytest.raises(Exception, match="already running|owns database|lock"):
+            competing_guard.acquire()
+        return real_open(path)
+
+    def assert_exclusive(stage: str) -> None:
+        if stage != "SQLITE_EXCLUSIVE_ACQUIRED":
+            return
+        reader = sqlite3.connect(source, timeout=0.05)
+        reader.execute("PRAGMA busy_timeout = 50")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                reader.execute("SELECT COUNT(*) FROM import_events").fetchone()
+        finally:
+            reader.close()
+        writer = sqlite3.connect(source, timeout=0.05)
+        writer.execute("PRAGMA busy_timeout = 50")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+        finally:
+            writer.close()
+
+    monkeypatch.setattr(
+        legacy_database_relocation, "_open_neutral_source_connection", checked_open
+    )
+    recover_database_wal(authority, _test_hook=assert_exclusive)
+
+
+def test_wal_recovery_semantic_drift_and_checkpoint_failure_fail_closed_and_release(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+    real_validation = legacy_database_relocation._compute_recovery_semantic_validation
+    calls = 0
+
+    def drift_on_post(connection, path):
+        nonlocal calls
+        calls += 1
+        identity, integrity, foreign_keys = real_validation(connection, path)
+        if calls == 2:
+            identity = replace(identity, source_event_count=identity.source_event_count + 1)
+        return identity, integrity, foreign_keys
+
+    monkeypatch.setattr(
+        legacy_database_relocation,
+        "_compute_recovery_semantic_validation",
+        drift_on_post,
+    )
+    with pytest.raises(DatabaseRelocationError, match="logical catalog identity changed"):
+        recover_database_wal(authority)
+    guard = ListenerProcessGuard(source)
+    guard.acquire()
+    guard.release()
+    with sqlite3.connect(source, timeout=0.1) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.rollback()
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    "failure_message",
+    ["integrity failure", "foreign key failure", "checkpoint incomplete"],
+)
+def test_wal_recovery_validation_failures_release_resources(
+    monkeypatch, tmp_path, failure_message: str
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    destination = tmp_path / "absent" / "moa.db"
+    authority = _recovery_authority(source, destination)
+
+    if failure_message == "checkpoint incomplete":
+        def fail_checkpoint(_connection):
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_FAILURE: checkpoint incomplete"
+            )
+
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_checkpoint_wal_truncate_on_owned_connection",
+            fail_checkpoint,
+        )
+    else:
+        def fail_validation(_connection, _source):
+            raise DatabaseRelocationError(failure_message)
+
+        monkeypatch.setattr(
+            legacy_database_relocation,
+            "_compute_recovery_semantic_validation",
+            fail_validation,
+        )
+
+    with pytest.raises(DatabaseRelocationError, match=failure_message):
+        recover_database_wal(authority)
+    guard = ListenerProcessGuard(source)
+    guard.acquire()
+    guard.release()
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("row", [(1, 0, 0), (0, 1, 1), (0, 1, 0)])
+def test_wal_recovery_checkpoint_requires_exact_zero_result(row) -> None:
+    class _Cursor:
+        def fetchone(self):
+            return row
+
+    class _Connection:
+        in_transaction = False
+
+        def execute(self, sql: str):
+            assert sql == "PRAGMA wal_checkpoint(TRUNCATE)"
+            return _Cursor()
+
+    with pytest.raises(DatabaseRelocationError, match="exact success"):
+        legacy_database_relocation._checkpoint_wal_truncate_on_owned_connection(
+            _Connection()
+        )
+
+
+def test_wal_recovery_evidence_failure_occurs_after_resource_release(
+    monkeypatch, tmp_path
+) -> None:
+    _checkout, source = _configure_checkout(monkeypatch, tmp_path)
+    _create_crash_left_wal(source)
+    authority = _recovery_authority(source, tmp_path / "absent" / "moa.db")
+
+    def fail_evidence(**_kwargs):
+        guard = ListenerProcessGuard(source)
+        guard.acquire()
+        guard.release()
+        with sqlite3.connect(source, timeout=0.1) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.rollback()
+        raise RuntimeError("injected evidence failure")
+
+    monkeypatch.setattr(
+        legacy_database_relocation, "_wal_recovery_evidence_document", fail_evidence
+    )
+    with pytest.raises(RuntimeError, match="injected evidence failure"):
+        recover_database_wal(authority)
 
 
 def test_successful_relocation_validates_promotes_and_retires_source(

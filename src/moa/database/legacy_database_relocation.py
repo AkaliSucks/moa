@@ -40,6 +40,18 @@ _JOURNAL_MODE_PREPARATION_VERSION = 1
 _JOURNAL_MODE_PREPARATION_HASH_SCOPE = (
     "canonical-json-without-evidence-record-sha256"
 )
+_WAL_RECOVERY_AUTHORIZATION_FORMAT = "moa-database-wal-recovery-authorization"
+_WAL_RECOVERY_AUTHORIZATION_VERSION = 1
+_WAL_RECOVERY_ACTION = "AUTHORIZE_ONE_DATABASE_WAL_RECOVERY_ATTEMPT"
+_WAL_RECOVERY_MAX_ATTEMPTS = 1
+_WAL_RECOVERY_AUTHORIZATION_HASH_SCOPE = (
+    "canonical-json-without-authorization-record-sha256"
+)
+_WAL_RECOVERY_EVIDENCE_FORMAT = "moa-database-wal-recovery-evidence"
+_WAL_RECOVERY_EVIDENCE_VERSION = 1
+_WAL_RECOVERY_EVIDENCE_HASH_SCOPE = "canonical-json-without-evidence-record-sha256"
+_WAL_RECOVERY_COMPLETED = "RECOVERY_COMPLETED"
+_WAL_RECOVERY_NO_ACTION = "NO_ACTION_ALREADY_NORMALIZED"
 _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS = 5000
 _PERSISTENT_ROLLBACK_JOURNAL_MODES = frozenset(
     {"delete", "truncate", "persist"}
@@ -104,6 +116,120 @@ class DatabaseFileObservation:
     present: bool
     size: int | None
     sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseSidecarObservation:
+    """Non-semantic sidecar presence and size observation."""
+
+    present: bool
+    size: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseWalRecoveryAuthority:
+    """Exact, one-attempt authority for recovery-only WAL normalization."""
+
+    authorization_format: str
+    authorization_version: int
+    action: str
+    authorization_id: str
+    source: Path
+    intended_destination: Path
+    expected_moa_checkpoint: str
+    expected_main: DatabaseFileObservation
+    expected_wal: DatabaseFileObservation
+    expected_shm: DatabaseSidecarObservation
+    expected_journal_mode: str
+    listener_known_writers_stopped_attested: bool
+    max_attempts: int
+    authorization_record_sha256: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the canonical bound authority including its supplied digest."""
+        document = _wal_recovery_authority_document(self)
+        document["authorization_record_sha256"] = self.authorization_record_sha256
+        return document
+
+    def to_json(self) -> str:
+        """Serialize the canonical bound recovery authority."""
+        return _canonical_json(self.as_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class DatabaseWalRecoveryEvidence:
+    """Canonical evidence for one recovery-only WAL normalization attempt."""
+
+    status: str
+    run_id: str
+    started_at: str
+    completed_at: str
+    authority: DatabaseWalRecoveryAuthority
+    sqlite_version: str
+    listener_guard_acquired_at: str
+    listener_guard_released_at: str
+    sqlite_exclusive_acquired_at: str
+    sqlite_exclusive_released_at: str
+    pre_lock_main: DatabaseFileObservation
+    pre_lock_wal: DatabaseFileObservation
+    pre_lock_shm: DatabaseSidecarObservation
+    locked_main: DatabaseFileObservation
+    locked_wal: DatabaseFileObservation
+    locked_shm: DatabaseSidecarObservation
+    pre_normalization_journal_mode: str
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity
+    pre_integrity_check: tuple[str, ...]
+    pre_foreign_key_check: tuple[tuple[object, ...], ...]
+    truncate_checkpoint: tuple[int, int, int] | None
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity
+    post_integrity_check: tuple[str, ...]
+    post_foreign_key_check: tuple[tuple[object, ...], ...]
+    normalized_main: DatabaseFileObservation
+    post_normalization_wal: DatabaseFileObservation
+    post_normalization_shm: DatabaseSidecarObservation
+    final_post_close_wal: DatabaseFileObservation
+    final_post_close_shm: DatabaseSidecarObservation
+    evidence_record_sha256: str
+
+    def as_dict(self) -> dict[str, object]:
+        """Return stable recovery evidence including its self-verifying digest."""
+        document = _wal_recovery_evidence_document(
+            status=self.status,
+            run_id=self.run_id,
+            started_at=self.started_at,
+            completed_at=self.completed_at,
+            authority=self.authority,
+            sqlite_version=self.sqlite_version,
+            listener_guard_acquired_at=self.listener_guard_acquired_at,
+            listener_guard_released_at=self.listener_guard_released_at,
+            sqlite_exclusive_acquired_at=self.sqlite_exclusive_acquired_at,
+            sqlite_exclusive_released_at=self.sqlite_exclusive_released_at,
+            pre_lock_main=self.pre_lock_main,
+            pre_lock_wal=self.pre_lock_wal,
+            pre_lock_shm=self.pre_lock_shm,
+            locked_main=self.locked_main,
+            locked_wal=self.locked_wal,
+            locked_shm=self.locked_shm,
+            pre_normalization_journal_mode=self.pre_normalization_journal_mode,
+            pre_semantic_identity=self.pre_semantic_identity,
+            pre_integrity_check=self.pre_integrity_check,
+            pre_foreign_key_check=self.pre_foreign_key_check,
+            truncate_checkpoint=self.truncate_checkpoint,
+            post_semantic_identity=self.post_semantic_identity,
+            post_integrity_check=self.post_integrity_check,
+            post_foreign_key_check=self.post_foreign_key_check,
+            normalized_main=self.normalized_main,
+            post_normalization_wal=self.post_normalization_wal,
+            post_normalization_shm=self.post_normalization_shm,
+            final_post_close_wal=self.final_post_close_wal,
+            final_post_close_shm=self.final_post_close_shm,
+        )
+        document["evidence_record_sha256"] = self.evidence_record_sha256
+        return document
+
+    def to_json(self) -> str:
+        """Serialize canonical machine-readable recovery evidence."""
+        return _canonical_json(self.as_dict())
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,6 +557,306 @@ def relocate_database_with_authorization(
         target,
         expected_identity=expected_identity,
         _test_hook=_test_hook,
+    )
+
+
+def recover_database_wal(
+    authority: DatabaseWalRecoveryAuthority,
+    *,
+    _test_hook: Callable[[str], None] | None = None,
+) -> DatabaseWalRecoveryEvidence:
+    """Normalize one exactly authorized WAL source without relocating it."""
+    _validate_wal_recovery_authority(authority)
+    source_path, destination_path = _resolve_wal_recovery_paths(
+        authority.source, authority.intended_destination
+    )
+    if source_path != authority.source or destination_path != authority.intended_destination:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: source and intended "
+            "destination authority must contain canonical paths."
+        )
+    _require_expected_moa_checkpoint(authority.expected_moa_checkpoint)
+    if not authority.listener_known_writers_stopped_attested:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: explicit known-writer-stopped attestation "
+            "is required."
+        )
+
+    pre_lock_main = _observe_database_file(source_path)
+    pre_lock_wal = _observe_database_file(Path(f"{source_path}-wal"))
+    pre_lock_shm = _observe_sidecar_presence(Path(f"{source_path}-shm"))
+    _require_matching_recovery_file_observation(
+        authority.expected_main, pre_lock_main, label="main file"
+    )
+    _require_matching_recovery_file_observation(
+        authority.expected_wal, pre_lock_wal, label="WAL sidecar"
+    )
+    _require_matching_recovery_sidecar_observation(
+        authority.expected_shm, pre_lock_shm, label="SHM sidecar"
+    )
+
+    run_id = str(uuid4())
+    started_at = _utc_timestamp()
+    sqlite_version = sqlite3.sqlite_version
+    guard = ListenerProcessGuard(source_path)
+    try:
+        guard.acquire()
+    except ListenerProcessGuardError as error:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: the source listener guard could not be "
+            "acquired; stop the guard-aware listener."
+        ) from error
+    listener_guard_acquired_at = _utc_timestamp()
+    _notify_test_hook(_test_hook, "LISTENER_GUARD_ACQUIRED")
+
+    connection: sqlite3.Connection | None = None
+    primary_error: BaseException | None = None
+    sqlite_exclusive_acquired_at: str | None = None
+    sqlite_exclusive_released_at: str | None = None
+    listener_guard_released_at: str | None = None
+    locked_main: DatabaseFileObservation | None = None
+    locked_wal: DatabaseFileObservation | None = None
+    locked_shm: DatabaseSidecarObservation | None = None
+    pre_journal_mode: str | None = None
+    pre_identity: DatabaseRelocationAuthorizationIdentity | None = None
+    pre_integrity: tuple[str, ...] | None = None
+    pre_foreign_keys: tuple[tuple[object, ...], ...] | None = None
+    truncate_checkpoint: tuple[int, int, int] | None = None
+    post_identity: DatabaseRelocationAuthorizationIdentity | None = None
+    post_integrity: tuple[str, ...] | None = None
+    post_foreign_keys: tuple[tuple[object, ...], ...] | None = None
+    normalized_main: DatabaseFileObservation | None = None
+    post_wal: DatabaseFileObservation | None = None
+    post_shm: DatabaseSidecarObservation | None = None
+    final_wal: DatabaseFileObservation | None = None
+    final_shm: DatabaseSidecarObservation | None = None
+    status: str | None = None
+
+    try:
+        guarded_main = _observe_database_file(source_path)
+        guarded_wal = _observe_database_file(Path(f"{source_path}-wal"))
+        guarded_shm = _observe_sidecar_presence(Path(f"{source_path}-shm"))
+        _require_matching_recovery_file_observation(
+            authority.expected_main, guarded_main, label="guarded main file"
+        )
+        _require_matching_recovery_file_observation(
+            authority.expected_wal, guarded_wal, label="guarded WAL sidecar"
+        )
+        _require_matching_recovery_sidecar_observation(
+            authority.expected_shm, guarded_shm, label="guarded SHM sidecar"
+        )
+
+        connection = _open_neutral_source_connection(source_path)
+        pre_journal_mode = _query_exact_journal_mode(connection)
+        if pre_journal_mode != authority.expected_journal_mode:
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: observed journal mode "
+                "differs from the explicit recovery authority."
+            )
+        if pre_journal_mode != "wal":
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_BLOCKER: source journal mode must already be WAL."
+            )
+        locking_mode = _query_single_pragma_value(
+            connection, "PRAGMA main.locking_mode=EXCLUSIVE"
+        )
+        if locking_mode.casefold() != "exclusive":
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_BLOCKER: SQLite did not establish exclusive "
+                "connection locking mode."
+            )
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            connection.rollback()
+        except sqlite3.Error as error:
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_BLOCKER: could not acquire bounded SQLite "
+                "exclusive source ownership; stop every source reader and writer."
+            ) from error
+        sqlite_exclusive_acquired_at = _utc_timestamp()
+        _notify_test_hook(_test_hook, "SQLITE_EXCLUSIVE_ACQUIRED")
+
+        locked_main = _observe_database_file(source_path)
+        locked_wal = _observe_database_file(Path(f"{source_path}-wal"))
+        locked_shm = _observe_sidecar_presence(Path(f"{source_path}-shm"))
+        _require_matching_recovery_file_observation(
+            authority.expected_main, locked_main, label="locked main file"
+        )
+        _require_equivalent_locked_wal(authority.expected_wal, locked_wal)
+        if _query_exact_journal_mode(connection) != "wal":
+            raise DatabaseRelocationError(
+                "DATABASE_WAL_RECOVERY_BLOCKER: WAL journal mode was not retained under "
+                "exclusive ownership."
+            )
+
+        pre_identity, pre_integrity, pre_foreign_keys = (
+            _compute_recovery_semantic_validation(connection, source_path)
+        )
+        _notify_test_hook(_test_hook, "PRE_SEMANTIC_VALIDATED")
+
+        already_normalized = not locked_wal.present or locked_wal.size == 0
+        if already_normalized:
+            status = _WAL_RECOVERY_NO_ACTION
+        else:
+            truncate_checkpoint = _checkpoint_wal_truncate_on_owned_connection(
+                connection
+            )
+            _notify_test_hook(_test_hook, "TRUNCATE_CHECKPOINT_COMPLETED")
+            status = _WAL_RECOVERY_COMPLETED
+
+        post_identity, post_integrity, post_foreign_keys = (
+            _compute_recovery_semantic_validation(connection, source_path)
+        )
+        _require_unchanged_wal_recovery_semantics(pre_identity, post_identity)
+        normalized_main = _observe_database_file(source_path)
+        post_wal = _observe_database_file(Path(f"{source_path}-wal"))
+        post_shm = _observe_sidecar_presence(Path(f"{source_path}-shm"))
+        _notify_test_hook(_test_hook, "RECOVERY_VALIDATED")
+    except BaseException as error:
+        primary_error = error
+    finally:
+        if connection is not None:
+            try:
+                if connection.in_transaction:
+                    connection.rollback()
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    primary_error = cleanup_error
+                else:
+                    primary_error.add_note(
+                        f"Recovery rollback cleanup also failed: {cleanup_error}"
+                    )
+            try:
+                connection.close()
+            except BaseException as cleanup_error:
+                if primary_error is None:
+                    primary_error = cleanup_error
+                else:
+                    primary_error.add_note(
+                        f"Recovery connection cleanup also failed: {cleanup_error}"
+                    )
+            else:
+                if sqlite_exclusive_acquired_at is not None:
+                    sqlite_exclusive_released_at = _utc_timestamp()
+        try:
+            final_wal = _observe_database_file(Path(f"{source_path}-wal"))
+            final_shm = _observe_sidecar_presence(Path(f"{source_path}-shm"))
+        except BaseException as cleanup_error:
+            if primary_error is None:
+                primary_error = cleanup_error
+            else:
+                primary_error.add_note(
+                    f"Final post-close recovery observation also failed: {cleanup_error}"
+                )
+        try:
+            guard.release()
+        except BaseException as cleanup_error:
+            if primary_error is None:
+                primary_error = cleanup_error
+            else:
+                primary_error.add_note(
+                    f"Recovery listener-guard cleanup also failed: {cleanup_error}"
+                )
+        else:
+            listener_guard_released_at = _utc_timestamp()
+
+    if primary_error is not None:
+        if isinstance(primary_error, DatabaseRelocationError):
+            raise primary_error
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: recovery failed closed."
+        ) from primary_error
+    if (
+        status is None
+        or sqlite_exclusive_acquired_at is None
+        or sqlite_exclusive_released_at is None
+        or listener_guard_released_at is None
+        or locked_main is None
+        or locked_wal is None
+        or locked_shm is None
+        or pre_journal_mode is None
+        or pre_identity is None
+        or pre_integrity is None
+        or pre_foreign_keys is None
+        or post_identity is None
+        or post_integrity is None
+        or post_foreign_keys is None
+        or normalized_main is None
+        or post_wal is None
+        or post_shm is None
+        or final_wal is None
+        or final_shm is None
+    ):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: completed evidence is internally incomplete."
+        )
+
+    completed_at = _utc_timestamp()
+    document = _wal_recovery_evidence_document(
+        status=status,
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        authority=authority,
+        sqlite_version=sqlite_version,
+        listener_guard_acquired_at=listener_guard_acquired_at,
+        listener_guard_released_at=listener_guard_released_at,
+        sqlite_exclusive_acquired_at=sqlite_exclusive_acquired_at,
+        sqlite_exclusive_released_at=sqlite_exclusive_released_at,
+        pre_lock_main=pre_lock_main,
+        pre_lock_wal=pre_lock_wal,
+        pre_lock_shm=pre_lock_shm,
+        locked_main=locked_main,
+        locked_wal=locked_wal,
+        locked_shm=locked_shm,
+        pre_normalization_journal_mode=pre_journal_mode,
+        pre_semantic_identity=pre_identity,
+        pre_integrity_check=pre_integrity,
+        pre_foreign_key_check=pre_foreign_keys,
+        truncate_checkpoint=truncate_checkpoint,
+        post_semantic_identity=post_identity,
+        post_integrity_check=post_integrity,
+        post_foreign_key_check=post_foreign_keys,
+        normalized_main=normalized_main,
+        post_normalization_wal=post_wal,
+        post_normalization_shm=post_shm,
+        final_post_close_wal=final_wal,
+        final_post_close_shm=final_shm,
+    )
+    evidence_record_sha256 = sha256(
+        _canonical_json(document).encode("ascii")
+    ).hexdigest()
+    return DatabaseWalRecoveryEvidence(
+        status=status,
+        run_id=run_id,
+        started_at=started_at,
+        completed_at=completed_at,
+        authority=authority,
+        sqlite_version=sqlite_version,
+        listener_guard_acquired_at=listener_guard_acquired_at,
+        listener_guard_released_at=listener_guard_released_at,
+        sqlite_exclusive_acquired_at=sqlite_exclusive_acquired_at,
+        sqlite_exclusive_released_at=sqlite_exclusive_released_at,
+        pre_lock_main=pre_lock_main,
+        pre_lock_wal=pre_lock_wal,
+        pre_lock_shm=pre_lock_shm,
+        locked_main=locked_main,
+        locked_wal=locked_wal,
+        locked_shm=locked_shm,
+        pre_normalization_journal_mode=pre_journal_mode,
+        pre_semantic_identity=pre_identity,
+        pre_integrity_check=pre_integrity,
+        pre_foreign_key_check=pre_foreign_keys,
+        truncate_checkpoint=truncate_checkpoint,
+        post_semantic_identity=post_identity,
+        post_integrity_check=post_integrity,
+        post_foreign_key_check=post_foreign_keys,
+        normalized_main=normalized_main,
+        post_normalization_wal=post_wal,
+        post_normalization_shm=post_shm,
+        final_post_close_wal=final_wal,
+        final_post_close_shm=final_shm,
+        evidence_record_sha256=evidence_record_sha256,
     )
 
 
@@ -1055,6 +1481,29 @@ def _resolve_relocation_paths(
     return source_path, target_path, retirement_tombstone_required
 
 
+def _resolve_wal_recovery_paths(source: Path, destination: Path) -> tuple[Path, Path]:
+    source_path = _canonical_file_path(source, label="recovery source")
+    destination_path = _canonical_file_path(
+        destination, label="intended recovery destination"
+    )
+    if source_path == destination_path:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: source and intended "
+            "destination must be distinct paths."
+        )
+    if not source_path.is_file():
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: source does not exist as an ordinary file: "
+            f"{source_path}"
+        )
+    if destination_path.exists():
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: intended relocation destination must remain "
+            f"absent: {destination_path}"
+        )
+    return source_path, destination_path
+
+
 def _require_clean_authorization_context(source: Path, target: Path) -> None:
     incomplete_retirements = _incomplete_retirement_markers(source)
     if incomplete_retirements:
@@ -1333,6 +1782,89 @@ def _observe_database_sidecars(
 ]:
     _main, journal, wal, shm = _observe_database_representation(source)
     return journal, wal, shm
+
+
+def _observe_sidecar_presence(path: Path) -> DatabaseSidecarObservation:
+    if not path.exists():
+        return DatabaseSidecarObservation(False, None)
+    if not path.is_file():
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: a sidecar path is not a regular file: "
+            f"{path}"
+        )
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_BLOCKER: sidecar presence/size could not be "
+            "observed."
+        ) from error
+    return DatabaseSidecarObservation(True, size)
+
+
+def _compute_recovery_semantic_validation(
+    connection: sqlite3.Connection,
+    source: Path,
+) -> tuple[
+    DatabaseRelocationAuthorizationIdentity,
+    tuple[str, ...],
+    tuple[tuple[object, ...], ...],
+]:
+    if connection.in_transaction:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: semantic validation cannot start inside "
+            "an active transaction."
+        )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        identity = _compute_relocation_authorization_identity(connection, source)
+        _fingerprint, integrity_check, foreign_key_check = (
+            _validate_held_database_with_evidence(connection, source)
+        )
+        return identity, integrity_check, foreign_key_check
+    except DatabaseRelocationError:
+        raise
+    except sqlite3.Error as error:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: semantic validation could not complete."
+        ) from error
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+
+
+def _checkpoint_wal_truncate_on_owned_connection(
+    connection: sqlite3.Connection,
+) -> tuple[int, int, int]:
+    if connection.in_transaction:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: TRUNCATE checkpoint cannot run inside an "
+            "active transaction."
+        )
+    try:
+        row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as error:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: TRUNCATE checkpoint failed."
+        ) from error
+    if not isinstance(row, (tuple, sqlite3.Row)) or len(row) != 3:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: TRUNCATE checkpoint returned an invalid "
+            "result."
+        )
+    try:
+        checkpoint = tuple(int(value) for value in row)
+    except (TypeError, ValueError) as error:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: TRUNCATE checkpoint returned an invalid "
+            "result."
+        ) from error
+    if checkpoint != (0, 0, 0):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: TRUNCATE checkpoint did not return exact "
+            "success (0, 0, 0)."
+        )
+    return 0, 0, 0
 
 
 def _database_header_versions(source: Path) -> tuple[int, int]:
@@ -1647,6 +2179,154 @@ def _validate_journal_mode_preparation_authority(
     _validate_file_observation(authority.expected_shm, label="SHM sidecar")
 
 
+def _validate_wal_recovery_authority(authority: DatabaseWalRecoveryAuthority) -> None:
+    if not isinstance(authority, DatabaseWalRecoveryAuthority):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: a typed recovery-only "
+            "authority is required."
+        )
+    exact_fields = (
+        (
+            "authorization format",
+            authority.authorization_format,
+            _WAL_RECOVERY_AUTHORIZATION_FORMAT,
+        ),
+        (
+            "authorization version",
+            authority.authorization_version,
+            _WAL_RECOVERY_AUTHORIZATION_VERSION,
+        ),
+        ("action", authority.action, _WAL_RECOVERY_ACTION),
+        ("max attempts", authority.max_attempts, _WAL_RECOVERY_MAX_ATTEMPTS),
+        ("expected journal mode", authority.expected_journal_mode, "wal"),
+    )
+    mismatches = tuple(
+        label for label, actual, expected in exact_fields if actual != expected
+    )
+    if mismatches:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: invalid "
+            + ", ".join(mismatches)
+            + "."
+        )
+    if not isinstance(authority.authorization_id, str) or not authority.authorization_id:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: a non-empty authorization "
+            "ID is required."
+        )
+    if not isinstance(authority.source, Path) or not isinstance(
+        authority.intended_destination, Path
+    ):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: source and intended "
+            "destination must be typed paths."
+        )
+    if not _is_git_checkpoint(authority.expected_moa_checkpoint):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: expected MOA checkpoint "
+            "must be a lowercase 40-character hexadecimal commit identity."
+        )
+    if not isinstance(authority.listener_known_writers_stopped_attested, bool):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: known-writer attestation "
+            "must be an explicit boolean."
+        )
+    _validate_recovery_file_observation(authority.expected_main, label="main file")
+    if not authority.expected_main.present:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: expected main file must be "
+            "present."
+        )
+    _validate_recovery_file_observation(authority.expected_wal, label="WAL sidecar")
+    _validate_recovery_sidecar_observation(authority.expected_shm, label="SHM sidecar")
+    if not _is_sha256(authority.authorization_record_sha256):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: authorization digest must "
+            "be exactly 64 lowercase hexadecimal characters."
+        )
+    expected_digest = sha256(
+        _canonical_json(_wal_recovery_authority_document(authority)).encode("ascii")
+    ).hexdigest()
+    if authority.authorization_record_sha256 != expected_digest:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: authorization digest does "
+            "not bind the supplied recovery authority."
+        )
+
+
+def _validate_recovery_file_observation(
+    observation: DatabaseFileObservation, *, label: str
+) -> None:
+    valid = isinstance(observation, DatabaseFileObservation)
+    if valid and observation.present:
+        valid = _is_nonnegative_int(observation.size) and _is_sha256(
+            observation.sha256
+        )
+    elif valid:
+        valid = observation.size is None and observation.sha256 is None
+    if not valid:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: expected "
+            f"{label} observation is incomplete or malformed."
+        )
+
+
+def _validate_recovery_sidecar_observation(
+    observation: DatabaseSidecarObservation, *, label: str
+) -> None:
+    valid = isinstance(observation, DatabaseSidecarObservation)
+    if valid and observation.present:
+        valid = _is_nonnegative_int(observation.size)
+    elif valid:
+        valid = observation.size is None
+    if not valid:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: expected "
+            f"{label} presence/size is incomplete or malformed."
+        )
+
+
+def _require_matching_recovery_file_observation(
+    expected: DatabaseFileObservation,
+    actual: DatabaseFileObservation,
+    *,
+    label: str,
+) -> None:
+    if expected != actual:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: observed "
+            f"{label} differs from the explicit recovery authority."
+        )
+
+
+def _require_matching_recovery_sidecar_observation(
+    expected: DatabaseSidecarObservation,
+    actual: DatabaseSidecarObservation,
+    *,
+    label: str,
+) -> None:
+    if expected != actual:
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: observed "
+            f"{label} differs from the explicit recovery authority."
+        )
+
+
+def _require_equivalent_locked_wal(
+    expected: DatabaseFileObservation, actual: DatabaseFileObservation
+) -> None:
+    if expected == actual:
+        return
+    expected_empty = not expected.present or expected.size == 0
+    actual_empty = not actual.present or actual.size == 0
+    if expected_empty and actual_empty:
+        return
+    raise DatabaseRelocationError(
+        "DATABASE_WAL_RECOVERY_AUTHORIZATION_MISMATCH: locked WAL representation "
+        "differs from the authorized pre-recovery state."
+    )
+
+
 def _validate_file_observation(
     observation: DatabaseFileObservation, *, label: str
 ) -> None:
@@ -1796,6 +2476,188 @@ def _require_unchanged_journal_preparation_semantics(
             "RELOCATION_JOURNAL_MODE_PREPARATION_FAILURE: logical catalog identity "
             "changed across the journal-mode transition."
         )
+
+
+def _require_unchanged_wal_recovery_semantics(
+    before: DatabaseRelocationAuthorizationIdentity,
+    after: DatabaseRelocationAuthorizationIdentity,
+) -> None:
+    if _journal_preparation_semantic_identity_document(
+        before
+    ) != _journal_preparation_semantic_identity_document(after):
+        raise DatabaseRelocationError(
+            "DATABASE_WAL_RECOVERY_FAILURE: logical catalog identity changed across "
+            "TRUNCATE normalization."
+        )
+
+
+def _sidecar_observation_document(
+    observation: DatabaseSidecarObservation,
+) -> dict[str, object]:
+    return {"present": observation.present, "size": observation.size}
+
+
+def _wal_recovery_authority_document(
+    authority: DatabaseWalRecoveryAuthority,
+) -> dict[str, object]:
+    return {
+        "action": authority.action,
+        "authorization_format": authority.authorization_format,
+        "authorization_record_sha256_scope": (
+            _WAL_RECOVERY_AUTHORIZATION_HASH_SCOPE
+        ),
+        "authorization_version": authority.authorization_version,
+        "authorization_id": authority.authorization_id,
+        "expected_journal_mode": authority.expected_journal_mode,
+        "expected_main": _file_observation_document(authority.expected_main),
+        "expected_moa_checkpoint": authority.expected_moa_checkpoint,
+        "expected_shm": _sidecar_observation_document(authority.expected_shm),
+        "expected_wal": _file_observation_document(authority.expected_wal),
+        "intended_destination": str(authority.intended_destination),
+        "listener_known_writers_stopped_attested": (
+            authority.listener_known_writers_stopped_attested
+        ),
+        "max_attempts": authority.max_attempts,
+        "source": str(authority.source),
+    }
+
+
+def _wal_recovery_evidence_document(
+    *,
+    status: str,
+    run_id: str,
+    started_at: str,
+    completed_at: str,
+    authority: DatabaseWalRecoveryAuthority,
+    sqlite_version: str,
+    listener_guard_acquired_at: str,
+    listener_guard_released_at: str,
+    sqlite_exclusive_acquired_at: str,
+    sqlite_exclusive_released_at: str,
+    pre_lock_main: DatabaseFileObservation,
+    pre_lock_wal: DatabaseFileObservation,
+    pre_lock_shm: DatabaseSidecarObservation,
+    locked_main: DatabaseFileObservation,
+    locked_wal: DatabaseFileObservation,
+    locked_shm: DatabaseSidecarObservation,
+    pre_normalization_journal_mode: str,
+    pre_semantic_identity: DatabaseRelocationAuthorizationIdentity,
+    pre_integrity_check: tuple[str, ...],
+    pre_foreign_key_check: tuple[tuple[object, ...], ...],
+    truncate_checkpoint: tuple[int, int, int] | None,
+    post_semantic_identity: DatabaseRelocationAuthorizationIdentity,
+    post_integrity_check: tuple[str, ...],
+    post_foreign_key_check: tuple[tuple[object, ...], ...],
+    normalized_main: DatabaseFileObservation,
+    post_normalization_wal: DatabaseFileObservation,
+    post_normalization_shm: DatabaseSidecarObservation,
+    final_post_close_wal: DatabaseFileObservation,
+    final_post_close_shm: DatabaseSidecarObservation,
+) -> dict[str, object]:
+    pre_semantic_document = _journal_preparation_semantic_identity_document(
+        pre_semantic_identity
+    )
+    post_semantic_document = _journal_preparation_semantic_identity_document(
+        post_semantic_identity
+    )
+    return {
+        "authorization": authority.as_dict(),
+        "authorization_consumption": {
+            "durable_cross_process_enforcement": False,
+            "host_operation_layer_must_consume_once": True,
+            "max_attempts": authority.max_attempts,
+        },
+        "authorization_id": authority.authorization_id,
+        "authorization_record_sha256": authority.authorization_record_sha256,
+        "completed_at": completed_at,
+        "evidence_format": _WAL_RECOVERY_EVIDENCE_FORMAT,
+        "evidence_record_sha256_scope": _WAL_RECOVERY_EVIDENCE_HASH_SCOPE,
+        "evidence_version": _WAL_RECOVERY_EVIDENCE_VERSION,
+        "final_post_close_sidecars": {
+            "shm": _sidecar_observation_document(final_post_close_shm),
+            "wal": _file_observation_document(final_post_close_wal),
+        },
+        "intended_destination": str(authority.intended_destination),
+        "listener_guard": {
+            "acquired": True,
+            "acquired_at": listener_guard_acquired_at,
+            "released": True,
+            "released_at": listener_guard_released_at,
+        },
+        "moa_checkpoint": authority.expected_moa_checkpoint,
+        "normalization": {
+            "checkpoint_mode": (
+                "none-already-normalized"
+                if truncate_checkpoint is None
+                else "truncate"
+            ),
+            "truncate_checkpoint": (
+                list(truncate_checkpoint)
+                if truncate_checkpoint is not None
+                else None
+            ),
+        },
+        "post_normalization": {
+            "main": _file_observation_document(normalized_main),
+            "semantic_identity": post_semantic_document,
+            "sidecars": {
+                "shm": _sidecar_observation_document(post_normalization_shm),
+                "wal": _file_observation_document(post_normalization_wal),
+            },
+        },
+        "pre_lock": {
+            "main": _file_observation_document(pre_lock_main),
+            "sidecars": {
+                "shm": _sidecar_observation_document(pre_lock_shm),
+                "wal": _file_observation_document(pre_lock_wal),
+            },
+        },
+        "pre_normalization_under_exclusive_ownership": {
+            "journal_mode": pre_normalization_journal_mode,
+            "main": _file_observation_document(locked_main),
+            "semantic_identity": pre_semantic_document,
+            "sidecars": {
+                "shm": _sidecar_observation_document(locked_shm),
+                "wal": _file_observation_document(locked_wal),
+            },
+        },
+        "recovery_scope_declarations": {
+            "activation_performed": False,
+            "destination_created": False,
+            "projection_performed": False,
+            "relocation_performed": False,
+            "reprojection_performed": False,
+            "retention_performed": False,
+            "source_retired_archived_or_tombstoned": False,
+            "wal_or_shm_manually_unlinked": False,
+        },
+        "relocation_requirements_after_recovery": {
+            "requires_fresh_bound_relocation_authorization": True,
+            "requires_fresh_relocation_certification": True,
+        },
+        "run_id": run_id,
+        "source": str(authority.source),
+        "sqlite_runtime_version": sqlite_version,
+        "sqlite_writer_exclusion": {
+            "acquired": True,
+            "acquired_at": sqlite_exclusive_acquired_at,
+            "begin_mode": "exclusive",
+            "busy_timeout_ms": _SOURCE_QUIESCENCE_BUSY_TIMEOUT_MS,
+            "connection_locking_mode": "exclusive",
+            "released": True,
+            "released_at": sqlite_exclusive_released_at,
+        },
+        "started_at": started_at,
+        "status": status,
+        "validation": {
+            "post_foreign_key_check": [list(row) for row in post_foreign_key_check],
+            "post_integrity_check": list(post_integrity_check),
+            "pre_foreign_key_check": [list(row) for row in pre_foreign_key_check],
+            "pre_integrity_check": list(pre_integrity_check),
+            "semantic_identity_unchanged": pre_semantic_document
+            == post_semantic_document,
+        },
+    }
 
 
 def _journal_mode_preparation_authority_document(

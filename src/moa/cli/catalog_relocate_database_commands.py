@@ -12,8 +12,11 @@ from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     DatabaseRelocationJournalModePreparationAuthority,
     DatabaseRelocationJournalModePreparationError,
+    DatabaseSidecarObservation,
+    DatabaseWalRecoveryAuthority,
     certify_database_relocation_identity,
     prepare_database_relocation_journal_mode,
+    recover_database_wal,
     relocate_database,
     relocate_database_with_authorization,
 )
@@ -26,6 +29,10 @@ class _AuthorizationIdentityCliError(ValueError):
 
 class _PreparationAuthorityCliError(ValueError):
     """Bounded invalid-input error for journal-mode preparation authority."""
+
+
+class _RecoveryAuthorityCliError(ValueError):
+    """Bounded invalid-input error for WAL-recovery authority."""
 
 
 def _is_sha256(value: str) -> bool:
@@ -74,6 +81,44 @@ def _build_file_observation(
             f"{field} SHA-256 must be exactly 64 lowercase hexadecimal characters."
         )
     return DatabaseFileObservation(True, size, sha256)
+
+
+def _build_recovery_file_observation(
+    *,
+    state: str,
+    size: int | None,
+    sha256: str | None,
+    field: str,
+) -> DatabaseFileObservation:
+    try:
+        return _build_file_observation(
+            state=state,
+            size=size,
+            sha256=sha256,
+            field=field,
+        )
+    except _PreparationAuthorityCliError as error:
+        raise _RecoveryAuthorityCliError(str(error)) from None
+
+
+def _build_recovery_sidecar_observation(
+    *, state: str, size: int | None, field: str
+) -> DatabaseSidecarObservation:
+    if state == "absent":
+        if size is not None:
+            raise _RecoveryAuthorityCliError(
+                f"{field} size must be omitted when state is absent."
+            )
+        return DatabaseSidecarObservation(False, None)
+    if state != "present":
+        raise _RecoveryAuthorityCliError(
+            f"{field} state must be exactly 'absent' or 'present'."
+        )
+    if size is None or size < 0:
+        raise _RecoveryAuthorityCliError(
+            f"{field} requires a nonnegative size when present."
+        )
+    return DatabaseSidecarObservation(True, size)
 
 
 def _build_authorization_identity(
@@ -228,6 +273,174 @@ def register_catalog_relocate_database_command(
     console: Console,
     target_path_provider: Callable[[], Path],
 ) -> None:
+    @catalog_app.command("recover-database-wal")
+    def catalog_recover_database_wal(
+        source: Path = typer.Argument(..., help="Explicit MOA WAL source database path."),
+        expected_destination: Path = typer.Option(
+            ...,
+            "--expected-destination",
+            help="Absent-only destination scope intended for a later relocation.",
+        ),
+        expected_moa_checkpoint: str = typer.Option(
+            ...,
+            "--expected-moa-checkpoint",
+            help="Exact verified MOA checkout commit for this recovery.",
+        ),
+        authorization_format: str = typer.Option(
+            ...,
+            "--authorization-format",
+            help="Exact typed recovery-authorization format.",
+        ),
+        authorization_version: int = typer.Option(
+            ...,
+            "--authorization-version",
+            help="Exact typed recovery-authorization version.",
+        ),
+        authorization_action: str = typer.Option(
+            ...,
+            "--authorization-action",
+            help="Exact recovery-only semantic action.",
+        ),
+        authorization_id: str = typer.Option(
+            ...,
+            "--authorization-id",
+            help="Explicit caller-supplied one-attempt authorization ID.",
+        ),
+        authorization_sha256: str = typer.Option(
+            ...,
+            "--authorization-sha256",
+            help="SHA-256 binding over the canonical recovery authority.",
+        ),
+        max_attempts: int = typer.Option(
+            ...,
+            "--max-attempts",
+            help="Exact bounded attempt count; recovery requires 1.",
+        ),
+        expected_main_sha256: str = typer.Option(
+            ...,
+            "--expected-main-sha256",
+            help="Exact pre-recovery source main-file SHA-256.",
+        ),
+        expected_main_size: int = typer.Option(
+            ...,
+            "--expected-main-size",
+            help="Exact pre-recovery source main-file size in bytes.",
+        ),
+        expected_wal_state: str = typer.Option(
+            ...,
+            "--expected-wal-state",
+            help="Exact pre-recovery -wal state: absent or present.",
+        ),
+        expected_wal_size: int | None = typer.Option(
+            None,
+            "--expected-wal-size",
+            help="Exact pre-recovery -wal size when present.",
+        ),
+        expected_wal_sha256: str | None = typer.Option(
+            None,
+            "--expected-wal-sha256",
+            help="Exact pre-recovery -wal SHA-256 when present.",
+        ),
+        expected_shm_state: str = typer.Option(
+            ...,
+            "--expected-shm-state",
+            help="Exact pre-recovery -shm state: absent or present.",
+        ),
+        expected_shm_size: int | None = typer.Option(
+            None,
+            "--expected-shm-size",
+            help="Exact pre-recovery -shm size when present; SHM is never hashed.",
+        ),
+        expected_journal_mode: str = typer.Option(
+            ...,
+            "--expected-journal-mode",
+            help="Exact pre-recovery journal mode; recovery requires wal.",
+        ),
+        listener_known_writers_stopped: bool = typer.Option(
+            False,
+            "--listener-known-writers-stopped",
+            help="Attest that the listener and known source writers are stopped.",
+        ),
+        apply: bool = typer.Option(
+            False,
+            "--apply",
+            help="Execute only the explicitly bound WAL recovery attempt.",
+        ),
+    ) -> None:
+        """Normalize one authorized WAL source without relocating or retiring it."""
+        destination = Path(target_path_provider()).resolve(strict=False)
+        supplied_destination = expected_destination.expanduser().resolve(strict=False)
+        resolved_source = source.expanduser().resolve(strict=False)
+        if supplied_destination != destination:
+            console.print(
+                "[red]DATABASE_WAL_RECOVERY_DESTINATION_MISMATCH: expected destination "
+                "does not match MOA's current relocation destination.[/red]"
+            )
+            raise typer.Exit(1)
+        if not apply:
+            console.print(f"Source: {resolved_source}")
+            console.print(f"Absent-only intended destination: {destination}")
+            console.print(
+                "[yellow]No changes made. Rerun with --apply only for this exact bound "
+                "recovery authority after stopping known readers and writers.[/yellow]"
+            )
+            return
+        try:
+            if expected_main_size < 0:
+                raise _RecoveryAuthorityCliError(
+                    "--expected-main-size must be nonnegative."
+                )
+            if not _is_sha256(expected_main_sha256):
+                raise _RecoveryAuthorityCliError(
+                    "--expected-main-sha256 must be exactly 64 lowercase hexadecimal "
+                    "characters."
+                )
+            if not _is_sha256(authorization_sha256):
+                raise _RecoveryAuthorityCliError(
+                    "--authorization-sha256 must be exactly 64 lowercase hexadecimal "
+                    "characters."
+                )
+            wal = _build_recovery_file_observation(
+                state=expected_wal_state,
+                size=expected_wal_size,
+                sha256=expected_wal_sha256,
+                field="--expected-wal",
+            )
+            shm = _build_recovery_sidecar_observation(
+                state=expected_shm_state,
+                size=expected_shm_size,
+                field="--expected-shm",
+            )
+            evidence = recover_database_wal(
+                DatabaseWalRecoveryAuthority(
+                    authorization_format=authorization_format,
+                    authorization_version=authorization_version,
+                    action=authorization_action,
+                    authorization_id=authorization_id,
+                    source=resolved_source,
+                    intended_destination=destination,
+                    expected_moa_checkpoint=expected_moa_checkpoint,
+                    expected_main=DatabaseFileObservation(
+                        True, expected_main_size, expected_main_sha256
+                    ),
+                    expected_wal=wal,
+                    expected_shm=shm,
+                    expected_journal_mode=expected_journal_mode,
+                    listener_known_writers_stopped_attested=(
+                        listener_known_writers_stopped
+                    ),
+                    max_attempts=max_attempts,
+                    authorization_record_sha256=authorization_sha256,
+                )
+            )
+        except _RecoveryAuthorityCliError as error:
+            console.print(f"[red]Invalid recovery authority: {error}[/red]")
+            raise typer.Exit(1) from None
+        except DatabaseRelocationError as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
+        typer.echo(evidence.to_json())
+
     @catalog_app.command("prepare-relocation-journal-mode")
     def catalog_prepare_relocation_journal_mode(
         source: Path = typer.Argument(..., help="Explicit MOA source database path."),
