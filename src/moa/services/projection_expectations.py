@@ -25,6 +25,24 @@ class Expectedness(Enum):
     UNKNOWN = "unknown"
 
 
+class DurableRollBaseEvidenceState(Enum):
+    """Bounded explanations for the durable Roll base-observation branch."""
+
+    ABSENT = "absent"
+    COHERENT = "coherent"
+    INCOHERENT = "incoherent"
+    MULTIPLE = "multiple"
+
+
+class DurableRollKeyEvidenceState(Enum):
+    """Bounded explanations for the durable Roll key-observation branch."""
+
+    ABSENT = "absent"
+    COHERENT_MATCH = "coherent_match"
+    MISMATCHED = "mismatched"
+    MULTIPLE = "multiple"
+
+
 @dataclass(frozen=True, slots=True)
 class ExpectedProjectionIdentity:
     """One canonical durable projection-link identity."""
@@ -67,8 +85,7 @@ class ExpectedProjectionSet:
         return tuple(
             assessment.identity
             for assessment in self.assessments
-            if assessment.expectedness is Expectedness.EXPECTED
-            and assessment.identity is not None
+            if assessment.expectedness is Expectedness.EXPECTED and assessment.identity is not None
         )
 
     def expectedness_for(self, observed: ExpectedProjectionIdentity) -> Expectedness:
@@ -103,6 +120,20 @@ class ProjectionExpectationFacts:
     roll_key_type: str | None = None
     roll_rank_present: bool | None = False
     roll_kakera_value_present: bool | None = False
+
+
+@dataclass(frozen=True, slots=True)
+class DurableRollProjectionExpectationEvidence:
+    """Privacy-safe evidence behind the canonical durable Roll facts."""
+
+    facts: ProjectionExpectationFacts
+    base_roll_row_count: int
+    base_roll_coherence: DurableRollBaseEvidenceState
+    matching_key_row_count: int
+    nonmatching_or_ambiguous_key_row_count: int
+    key_evidence_state: DurableRollKeyEvidenceState
+    claim_rank_present: bool | None
+    kakera_value_present: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,9 +203,7 @@ def server_account_projection_slot(server: str, account: str) -> str:
 def claim_projection_slot(server: str, account: str, character: str) -> str:
     """Build the canonical normalized Claim projection slot."""
 
-    return _serialize_slot(
-        {"account": account, "character_name": character, "server": server}
-    )
+    return _serialize_slot({"account": account, "character_name": character, "server": server})
 
 
 def roll_projection_slot(
@@ -373,9 +402,7 @@ def _resolve_antidisable(facts: ProjectionExpectationFacts) -> ExpectedProjectio
 
 
 _POLICIES: Final[tuple[ProjectionExpectationPolicy, ...]] = (
-    ProjectionExpectationPolicy(
-        "antidisable", ("catalog.antidisable_page",), _resolve_antidisable
-    ),
+    ProjectionExpectationPolicy("antidisable", ("catalog.antidisable_page",), _resolve_antidisable),
     ProjectionExpectationPolicy("claim", ("catalog.claim",), _resolve_claim),
     ProjectionExpectationPolicy(
         "disablelist", ("catalog.disablelist",), _account_singleton("catalog.disablelist")
@@ -488,13 +515,15 @@ def _normalized_attribution_facts(
     return server, account
 
 
-def load_durable_projection_expectation_facts(
+def _source_expectation_context(
     connection: sqlite3.Connection,
     source_event_id: int,
-) -> ProjectionExpectationFacts:
-    """Load normalized expectedness facts using caller-owned, read-only SQL."""
-
-    if isinstance(source_event_id, bool) or not isinstance(source_event_id, int) or source_event_id <= 0:
+) -> tuple[int, str, str | None, str | None]:
+    if (
+        isinstance(source_event_id, bool)
+        or not isinstance(source_event_id, int)
+        or source_event_id <= 0
+    ):
         raise ValueError("source_event_id must be a positive integer")
     source = connection.execute(
         "SELECT legacy_import_event_id FROM discord_source_events WHERE id = ?",
@@ -518,6 +547,170 @@ def load_durable_projection_expectation_facts(
             f"source event {source_event_id} has unsupported import kind {source_family!r}"
         )
     server, account = _normalized_attribution_facts(connection, source_event_id)
+    return import_event_id, source_family, server, account
+
+
+def _load_durable_roll_projection_expectation_evidence(
+    connection: sqlite3.Connection,
+    *,
+    import_event_id: int,
+    server: str | None,
+    account: str | None,
+) -> DurableRollProjectionExpectationEvidence:
+    rows = connection.execute(
+        """
+        SELECT ro.claim_rank, ro.kakera_value, ro.account_context_id,
+               ac.normalized_name AS account, sc.normalized_name AS server,
+               c.normalized_name AS character, c.normalized_series AS series
+        FROM roll_observations AS ro
+        JOIN account_contexts AS ac ON ac.id = ro.account_context_id
+        JOIN server_contexts AS sc ON sc.id = ac.server_context_id
+        JOIN characters AS c ON c.id = ro.character_id
+        WHERE ro.import_event_id = ?
+        """,
+        (import_event_id,),
+    ).fetchall()
+    base_row_count = len(rows)
+    if base_row_count != 1:
+        state = (
+            DurableRollBaseEvidenceState.ABSENT
+            if base_row_count == 0
+            else DurableRollBaseEvidenceState.MULTIPLE
+        )
+        facts = ProjectionExpectationFacts(
+            "roll",
+            server,
+            account,
+            roll_key_present=None,
+            roll_rank_present=None,
+            roll_kakera_value_present=None,
+        )
+        return DurableRollProjectionExpectationEvidence(
+            facts,
+            base_row_count,
+            state,
+            0,
+            0,
+            DurableRollKeyEvidenceState.ABSENT,
+            None,
+            None,
+        )
+
+    row = rows[0]
+    durable_server = str(row["server"])
+    durable_account = str(row["account"])
+    character = str(row["character"])
+    series = str(row["series"])
+    if server != durable_server or account != durable_account or not character or not series:
+        facts = ProjectionExpectationFacts(
+            "roll",
+            server,
+            account,
+            roll_key_present=None,
+            roll_rank_present=None,
+            roll_kakera_value_present=None,
+        )
+        return DurableRollProjectionExpectationEvidence(
+            facts,
+            1,
+            DurableRollBaseEvidenceState.INCOHERENT,
+            0,
+            0,
+            DurableRollKeyEvidenceState.ABSENT,
+            None,
+            None,
+        )
+
+    key_rows = connection.execute(
+        """
+        SELECT hko.key_type, hko.account_context_id,
+               c.normalized_name AS character, c.normalized_series AS series
+        FROM harem_key_observations AS hko
+        LEFT JOIN characters AS c ON c.id = hko.character_id
+        WHERE hko.import_event_id = ?
+        """,
+        (import_event_id,),
+    ).fetchall()
+    matching_key_types: list[str] = []
+    for key_row in key_rows:
+        candidate = CatalogRepository._normalize(str(key_row["key_type"]))
+        if (
+            int(key_row["account_context_id"]) == int(row["account_context_id"])
+            and key_row["character"] is not None
+            and str(key_row["character"]) == character
+            and key_row["series"] is not None
+            and str(key_row["series"]) == series
+            and candidate
+        ):
+            matching_key_types.append(candidate)
+    matching_count = len(matching_key_types)
+    nonmatching_count = len(key_rows) - matching_count
+    if not key_rows:
+        key_state = DurableRollKeyEvidenceState.ABSENT
+    elif len(key_rows) > 1:
+        key_state = DurableRollKeyEvidenceState.MULTIPLE
+    elif matching_count == 1:
+        key_state = DurableRollKeyEvidenceState.COHERENT_MATCH
+    else:
+        key_state = DurableRollKeyEvidenceState.MISMATCHED
+    key_type = (
+        matching_key_types[0] if key_state is DurableRollKeyEvidenceState.COHERENT_MATCH else None
+    )
+    facts = ProjectionExpectationFacts(
+        "roll",
+        server,
+        account,
+        character,
+        series,
+        roll_key_present=(
+            True if key_state is DurableRollKeyEvidenceState.COHERENT_MATCH else None
+        ),
+        roll_key_type=key_type,
+        roll_rank_present=row["claim_rank"] is not None,
+        roll_kakera_value_present=row["kakera_value"] is not None,
+    )
+    return DurableRollProjectionExpectationEvidence(
+        facts,
+        1,
+        DurableRollBaseEvidenceState.COHERENT,
+        matching_count,
+        nonmatching_count,
+        key_state,
+        facts.roll_rank_present,
+        facts.roll_kakera_value_present,
+    )
+
+
+def load_durable_roll_projection_expectation_evidence(
+    connection: sqlite3.Connection,
+    source_event_id: int,
+) -> DurableRollProjectionExpectationEvidence:
+    """Load bounded evidence used by the canonical durable Roll expectedness rule."""
+
+    import_event_id, source_family, server, account = _source_expectation_context(
+        connection, source_event_id
+    )
+    if source_family != "roll":
+        raise DurableProjectionExpectationFactsError(
+            f"source event {source_event_id} is not a roll source"
+        )
+    return _load_durable_roll_projection_expectation_evidence(
+        connection,
+        import_event_id=import_event_id,
+        server=server,
+        account=account,
+    )
+
+
+def load_durable_projection_expectation_facts(
+    connection: sqlite3.Connection,
+    source_event_id: int,
+) -> ProjectionExpectationFacts:
+    """Load normalized expectedness facts using caller-owned, read-only SQL."""
+
+    import_event_id, source_family, server, account = _source_expectation_context(
+        connection, source_event_id
+    )
 
     if source_family == "claim":
         rows = connection.execute(
@@ -543,83 +736,12 @@ def load_durable_projection_expectation_facts(
         return ProjectionExpectationFacts(source_family, server, account)
 
     if source_family == "roll":
-        rows = connection.execute(
-            """
-            SELECT ro.claim_rank, ro.kakera_value, ro.account_context_id,
-                   ac.normalized_name AS account, sc.normalized_name AS server,
-                   c.normalized_name AS character, c.normalized_series AS series
-            FROM roll_observations AS ro
-            JOIN account_contexts AS ac ON ac.id = ro.account_context_id
-            JOIN server_contexts AS sc ON sc.id = ac.server_context_id
-            JOIN characters AS c ON c.id = ro.character_id
-            WHERE ro.import_event_id = ?
-            """,
-            (import_event_id,),
-        ).fetchall()
-        if len(rows) != 1:
-            return ProjectionExpectationFacts(
-                source_family,
-                server,
-                account,
-                roll_key_present=None,
-                roll_rank_present=None,
-                roll_kakera_value_present=None,
-            )
-        row = rows[0]
-        durable_server = str(row["server"])
-        durable_account = str(row["account"])
-        character = str(row["character"])
-        series = str(row["series"])
-        if (
-            server != durable_server
-            or account != durable_account
-            or not character
-            or not series
-        ):
-            return ProjectionExpectationFacts(
-                source_family,
-                server,
-                account,
-                roll_key_present=None,
-                roll_rank_present=None,
-                roll_kakera_value_present=None,
-            )
-        key_rows = connection.execute(
-            """
-            SELECT hko.key_type, hko.account_context_id,
-                   c.normalized_name AS character, c.normalized_series AS series
-            FROM harem_key_observations AS hko
-            LEFT JOIN characters AS c ON c.id = hko.character_id
-            WHERE hko.import_event_id = ?
-            """,
-            (import_event_id,),
-        ).fetchall()
-        key_expectedness = Expectedness.UNKNOWN
-        key_type: str | None = None
-        if len(key_rows) == 1:
-            key_row = key_rows[0]
-            candidate = CatalogRepository._normalize(str(key_row["key_type"]))
-            if (
-                int(key_row["account_context_id"]) == int(row["account_context_id"])
-                and key_row["character"] is not None
-                and str(key_row["character"]) == character
-                and key_row["series"] is not None
-                and str(key_row["series"]) == series
-                and candidate
-            ):
-                key_expectedness = Expectedness.EXPECTED
-                key_type = candidate
-        return ProjectionExpectationFacts(
-            source_family,
-            server,
-            account,
-            character,
-            series,
-            roll_key_present=(True if key_expectedness is Expectedness.EXPECTED else None),
-            roll_key_type=key_type,
-            roll_rank_present=row["claim_rank"] is not None,
-            roll_kakera_value_present=row["kakera_value"] is not None,
-        )
+        return _load_durable_roll_projection_expectation_evidence(
+            connection,
+            import_event_id=import_event_id,
+            server=server,
+            account=account,
+        ).facts
 
     if source_family == "antidisable":
         rows = connection.execute(
@@ -667,8 +789,7 @@ _owned_kind_sequence = tuple(
     for policy in PROJECTION_EXPECTATION_POLICIES.values()
     for kind in policy.possible_projection_kinds
 )
-if (
-    len(_owned_kind_sequence) != len(set(_owned_kind_sequence))
-    or set(_owned_kind_sequence) != set(PROJECTION_AUTHORITY_BY_KIND)
+if len(_owned_kind_sequence) != len(set(_owned_kind_sequence)) or set(_owned_kind_sequence) != set(
+    PROJECTION_AUTHORITY_BY_KIND
 ):
     raise RuntimeError("projection expectation registry must own all projection kinds exactly")

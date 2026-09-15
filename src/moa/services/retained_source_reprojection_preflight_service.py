@@ -9,9 +9,17 @@ from dataclasses import dataclass
 from enum import Enum
 
 from moa.database.migrations import MigrationError, validate_current_catalog_schema
+from moa.parser.mudae import MudaeParseError, MudaeTextParser
 from moa.repositories.projection_link_repository import (
     ProjectionLinkIntegrityError,
     ProjectionLinkRepository,
+)
+from moa.services.projection_expectations import (
+    DurableRollBaseEvidenceState,
+    DurableRollKeyEvidenceState,
+    Expectedness,
+    load_durable_roll_projection_expectation_evidence,
+    resolve_expected_projections,
 )
 from moa.services.retained_source_reprojection_admission_service import (
     ReprojectionAdmissionRejection,
@@ -25,6 +33,40 @@ class ReprojectionPreflightEligibility(Enum):
 
     ELIGIBLE = "eligible"
     INELIGIBLE = "ineligible"
+    UNKNOWN = "unknown"
+
+
+class RetainedRollRawEvidenceState(Enum):
+    """Bounded lifecycle states for retained source text."""
+
+    RETAINED = "retained"
+    EXPIRED = "expired"
+    ABSENT = "absent"
+    INCOHERENT = "incoherent"
+
+
+class RetainedRollParserProbeFailure(Enum):
+    """Privacy-safe reasons that a parser result is unavailable."""
+
+    NOT_REQUESTED = "not_requested"
+    RAW_EVIDENCE_UNAVAILABLE = "raw_evidence_unavailable"
+    PARSE_FAILED = "parse_failed"
+
+
+class RetainedRollParserDurableRelationship(Enum):
+    """Bounded relationship between parser key display and durable key evidence."""
+
+    NOT_AVAILABLE = "not_available"
+    DURABLE_EXPECTED_PARSER_DISPLAYED = "durable_expected_parser_displayed"
+    DURABLE_EXPECTED_PARSER_ABSENT = "durable_expected_parser_absent"
+    DURABLE_UNKNOWN_PARSER_DISPLAYED = "durable_unknown_parser_displayed"
+    DURABLE_UNKNOWN_PARSER_ABSENT = "durable_unknown_parser_absent"
+
+
+class RetainedRollDurableExpectednessState(Enum):
+    """Whether every durable Roll projection assessment is known."""
+
+    FULLY_KNOWN = "fully_known"
     UNKNOWN = "unknown"
 
 
@@ -46,6 +88,27 @@ class RetainedSourceReprojectionPreflightError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RetainedRollExpectednessDiagnostic:
+    """Fixed-field, privacy-safe explanation of retained Roll expectedness."""
+
+    base_roll_row_count: int
+    base_roll_coherence: DurableRollBaseEvidenceState
+    matching_key_row_count: int
+    nonmatching_or_ambiguous_key_row_count: int
+    key_evidence_state: DurableRollKeyEvidenceState
+    claim_rank_present: bool | None
+    kakera_value_present: bool | None
+    raw_evidence_state: RetainedRollRawEvidenceState
+    parser_attempted: bool
+    parser_succeeded: bool
+    parsed_displayed_key_count: bool | None
+    parser_failure_reason: RetainedRollParserProbeFailure | None
+    parser_durable_expectedness_relationship: RetainedRollParserDurableRelationship
+    durable_expectedness_state: RetainedRollDurableExpectednessState
+    durable_expected_link_count: int | None
+
+
+@dataclass(frozen=True, slots=True)
 class RetainedSourceReprojectionPreflightRecord:
     """Privacy-safe result for one durable source."""
 
@@ -54,6 +117,7 @@ class RetainedSourceReprojectionPreflightRecord:
     eligibility: ReprojectionPreflightEligibility
     rejection_code: str | None
     expected_link_count: int | None
+    roll_expectedness_diagnostic: RetainedRollExpectednessDiagnostic | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +185,12 @@ class RetainedSourceReprojectionPreflightService:
     ) -> None:
         self._admission_service = admission_service or RetainedSourceReprojectionAdmissionService()
 
-    def preflight(self, connection: sqlite3.Connection) -> RetainedSourceReprojectionPreflight:
+    def preflight(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        probe_roll_parser: bool = False,
+    ) -> RetainedSourceReprojectionPreflight:
         if not connection.in_transaction:
             raise RetainedSourceReprojectionPreflightError(
                 ReprojectionPreflightFailure.TRANSACTION_REQUIRED
@@ -177,6 +246,7 @@ class RetainedSourceReprojectionPreflightService:
                 source_id=int(row["id"]),
                 source_family=self._safe_family(row["kind"]),
                 hypothetical_generation_id=hypothetical_generation_id,
+                probe_roll_parser=probe_roll_parser,
             )
             for row in source_rows
         )
@@ -205,7 +275,17 @@ class RetainedSourceReprojectionPreflightService:
         source_id: int,
         source_family: str,
         hypothetical_generation_id: int,
+        probe_roll_parser: bool,
     ) -> RetainedSourceReprojectionPreflightRecord:
+        roll_diagnostic = (
+            self._diagnose_roll(
+                connection,
+                source_id=source_id,
+                probe_parser=probe_roll_parser,
+            )
+            if source_family == "roll"
+            else None
+        )
         try:
             admission = self._admission_service.admit(
                 connection,
@@ -219,7 +299,12 @@ class RetainedSourceReprojectionPreflightService:
                 else ReprojectionPreflightEligibility.INELIGIBLE
             )
             return RetainedSourceReprojectionPreflightRecord(
-                source_id, source_family, eligibility, error.reason.value, None
+                source_id,
+                source_family,
+                eligibility,
+                error.reason.value,
+                None,
+                roll_diagnostic,
             )
         return RetainedSourceReprojectionPreflightRecord(
             source_id,
@@ -227,6 +312,98 @@ class RetainedSourceReprojectionPreflightService:
             ReprojectionPreflightEligibility.ELIGIBLE,
             None,
             len(admission.expected_identities),
+            roll_diagnostic,
+        )
+
+    @staticmethod
+    def _diagnose_roll(
+        connection: sqlite3.Connection,
+        *,
+        source_id: int,
+        probe_parser: bool,
+    ) -> RetainedRollExpectednessDiagnostic:
+        evidence = load_durable_roll_projection_expectation_evidence(connection, source_id)
+        expected = resolve_expected_projections(evidence.facts)
+        durable_unknown = any(
+            assessment.expectedness is Expectedness.UNKNOWN for assessment in expected.assessments
+        )
+        source = connection.execute(
+            "SELECT raw_text, raw_evidence_expired_at FROM discord_source_events WHERE id = ?",
+            (source_id,),
+        ).fetchone()
+        raw_text = source["raw_text"] if source is not None else None
+        if source is None:
+            raw_state = RetainedRollRawEvidenceState.INCOHERENT
+        elif source["raw_evidence_expired_at"] is not None:
+            raw_state = RetainedRollRawEvidenceState.EXPIRED
+        elif raw_text is None:
+            raw_state = RetainedRollRawEvidenceState.ABSENT
+        elif not isinstance(raw_text, str):
+            raw_state = RetainedRollRawEvidenceState.INCOHERENT
+        else:
+            raw_state = RetainedRollRawEvidenceState.RETAINED
+
+        parser_attempted = False
+        parser_succeeded = False
+        parsed_displayed_key_count: bool | None = None
+        if not probe_parser:
+            parser_failure = RetainedRollParserProbeFailure.NOT_REQUESTED
+        elif raw_state is not RetainedRollRawEvidenceState.RETAINED:
+            parser_failure = RetainedRollParserProbeFailure.RAW_EVIDENCE_UNAVAILABLE
+        else:
+            assert isinstance(raw_text, str)
+            parser_attempted = True
+            try:
+                parsed = MudaeTextParser().parse_roll(raw_text)
+            except (MudaeParseError, TypeError, UnicodeError):
+                parser_failure = RetainedRollParserProbeFailure.PARSE_FAILED
+            else:
+                parser_succeeded = True
+                parsed_displayed_key_count = parsed.displayed_key_count is not None
+                parser_failure = None
+
+        relationship = RetainedRollParserDurableRelationship.NOT_AVAILABLE
+        if parser_succeeded:
+            durable_key_expected = (
+                evidence.key_evidence_state is DurableRollKeyEvidenceState.COHERENT_MATCH
+            )
+            if durable_key_expected and parsed_displayed_key_count:
+                relationship = (
+                    RetainedRollParserDurableRelationship.DURABLE_EXPECTED_PARSER_DISPLAYED
+                )
+            elif durable_key_expected:
+                relationship = RetainedRollParserDurableRelationship.DURABLE_EXPECTED_PARSER_ABSENT
+            elif parsed_displayed_key_count:
+                relationship = (
+                    RetainedRollParserDurableRelationship.DURABLE_UNKNOWN_PARSER_DISPLAYED
+                )
+            else:
+                relationship = RetainedRollParserDurableRelationship.DURABLE_UNKNOWN_PARSER_ABSENT
+
+        return RetainedRollExpectednessDiagnostic(
+            base_roll_row_count=evidence.base_roll_row_count,
+            base_roll_coherence=evidence.base_roll_coherence,
+            matching_key_row_count=evidence.matching_key_row_count,
+            nonmatching_or_ambiguous_key_row_count=(
+                evidence.nonmatching_or_ambiguous_key_row_count
+            ),
+            key_evidence_state=evidence.key_evidence_state,
+            claim_rank_present=evidence.claim_rank_present,
+            kakera_value_present=evidence.kakera_value_present,
+            raw_evidence_state=raw_state,
+            parser_attempted=parser_attempted,
+            parser_succeeded=parser_succeeded,
+            parsed_displayed_key_count=parsed_displayed_key_count,
+            parser_failure_reason=parser_failure,
+            parser_durable_expectedness_relationship=relationship,
+            durable_expectedness_state=(
+                RetainedRollDurableExpectednessState.UNKNOWN
+                if durable_unknown
+                else RetainedRollDurableExpectednessState.FULLY_KNOWN
+            ),
+            durable_expected_link_count=(
+                None if durable_unknown else len(expected.known_expected_identities)
+            ),
         )
 
     @staticmethod

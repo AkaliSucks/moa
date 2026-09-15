@@ -83,8 +83,12 @@ def test_registration_requires_only_an_explicit_database_path() -> None:
     command = (
         get_command(main.app).commands["catalog"].commands["retained-source-reprojection-preflight"]
     )
-    assert [parameter.name for parameter in command.params] == ["database_path"]
+    assert [parameter.name for parameter in command.params] == [
+        "database_path",
+        "probe_roll_parser",
+    ]
     assert command.params[0].required
+    assert command.params[1].default is False
 
     result = CliRunner().invoke(main.app, ["catalog", "retained-source-reprojection-preflight"])
 
@@ -108,8 +112,9 @@ def test_preflight_renders_deterministic_safe_fields_and_cleans_up_snapshot(
         return wrapped_connection
 
     class FakeService:
-        def preflight(self, connection):
+        def preflight(self, connection, *, probe_roll_parser=False):
             assert connection.in_transaction
+            assert probe_roll_parser is False
             return _report()
 
     monkeypatch.setattr(command_module, "connect_read_only", open_read_only)
@@ -181,7 +186,7 @@ def test_bounded_preflight_failures_are_safe_and_fail_closed(
         connection.execute("CREATE TABLE marker (value TEXT)")
 
     class FakeService:
-        def preflight(self, connection):
+        def preflight(self, connection, *, probe_roll_parser=False):
             raise RetainedSourceReprojectionPreflightError(failure)
 
     monkeypatch.setattr(command_module, "RetainedSourceReprojectionPreflightService", FakeService)
@@ -205,7 +210,7 @@ def test_private_failure_detail_is_not_rendered_and_database_bytes_are_unchanged
     private_detail = "PRIVATE RAW MESSAGE account=private server=private"
 
     class FakeService:
-        def preflight(self, connection):
+        def preflight(self, connection, *, probe_roll_parser=False):
             raise RuntimeError(private_detail)
 
     monkeypatch.setattr(command_module, "RetainedSourceReprojectionPreflightService", FakeService)
