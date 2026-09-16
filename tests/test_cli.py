@@ -1808,6 +1808,7 @@ def test_catalog_towerstate_preserves_missing_zero_and_empty_perks(monkeypatch) 
         "CatalogService",
         lambda: SimpleNamespace(tower_state=lambda *_: next(snapshots)),
     )
+    monkeypatch.setattr(main, "_resolve_account_context", lambda *_: ("Lake", "Account"))
 
     runner = CliRunner()
     zero_result = runner.invoke(main.app, ["catalog", "towerstate"])
