@@ -19,6 +19,7 @@ from moa.models.character import (
     ProfileSnapshot,
     RankedHaremEntry,
     RankedHaremPage,
+    RollObservation,
     TowerStateSnapshot,
 )
 from moa.repositories.catalog_repository import CatalogRepository
@@ -151,6 +152,7 @@ def _make_baseline_database(database_path):
         connection.execute("DELETE FROM schema_migrations WHERE version = 13")
         connection.execute("DELETE FROM schema_migrations WHERE version = 14")
         connection.execute("DELETE FROM schema_migrations WHERE version = 15")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 16")
 
 
 def _make_version_5_database(database_path):
@@ -578,6 +580,7 @@ def test_fresh_catalog_database_records_migrations_and_ingestion_schema(tmp_path
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
         (15, "antidisable-reconstructibility-foundation"),
+        (16, "roll-key-display-presence"),
     ]
     with _open_database(database_path) as connection:
         assert connection.execute(
@@ -856,6 +859,7 @@ def test_failed_legacy_schema_script_rolls_back_and_same_database_retry_succeeds
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
         (15, "antidisable-reconstructibility-foundation"),
+        (16, "roll-key-display-presence"),
     ]
 
 
@@ -955,7 +959,7 @@ def test_competing_legacy_schema_bootstraps_serialize_their_mutation_boundary(
         }
         assert CATALOG_TABLES <= tables
         assert not any(name.endswith("_legacy") for name in tables)
-    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 16))
+    assert [row[0] for row in _migration_rows(database_path)] == list(range(1, 17))
 
 
 def test_antidisable_workflow_schema_has_required_keys_and_nullability(tmp_path) -> None:
@@ -1107,8 +1111,8 @@ def test_upgrade_from_version_5_preserves_catalog_and_discord_rows(tmp_path) -> 
             "SELECT COUNT(*) FROM discord_antidisable_response_bindings"
         ).fetchone()[0] == 0
         assert _migration_rows(database_path)[-1] == (
-            15,
-            "antidisable-reconstructibility-foundation",
+            16,
+            "roll-key-display-presence",
         )
 
 
@@ -1315,6 +1319,7 @@ def test_upgrade_from_baseline_preserves_catalog_data_and_records_version_once(t
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
         (15, "antidisable-reconstructibility-foundation"),
+        (16, "roll-key-display-presence"),
     ]
 
 
@@ -1772,8 +1777,8 @@ def test_projection_generation_upgrade_backfills_and_preserves_source_and_link_r
             (link_id,),
         ).fetchone() == (1,)
         assert _migration_rows(database_path)[-1] == (
-            15,
-            "antidisable-reconstructibility-foundation",
+            16,
+            "roll-key-display-presence",
         )
 
 
@@ -1908,8 +1913,8 @@ def test_projection_generation_switchover_migration_retains_generation_one_histo
             (generation_two_link_id, 2, None),
         ]
         assert _migration_rows(database_path)[-1] == (
-            15,
-            "antidisable-reconstructibility-foundation",
+            16,
+            "roll-key-display-presence",
         )
 
 
@@ -2327,6 +2332,7 @@ def test_catalog_initialization_is_idempotent_and_preserves_data(tmp_path) -> No
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
         (15, "antidisable-reconstructibility-foundation"),
+        (16, "roll-key-display-presence"),
     ]
 
 
@@ -2362,6 +2368,7 @@ def test_existing_current_schema_without_metadata_is_baselined(tmp_path) -> None
         (13, "projection-generation-foundation"),
         (14, "projection-generation-switchover"),
         (15, "antidisable-reconstructibility-foundation"),
+        (16, "roll-key-display-presence"),
     ]
 
 
@@ -3580,6 +3587,8 @@ def test_antidisable_reconstructibility_migration_preserves_legacy_unknowns(
     with _open_database(database_path) as connection:
         connection.execute("ALTER TABLE harem_scan_pages DROP COLUMN slots_used")
         connection.execute("ALTER TABLE harem_scan_pages DROP COLUMN slots_capacity")
+        connection.execute("ALTER TABLE roll_observations DROP COLUMN displayed_key_count_present")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 16")
         connection.execute("DELETE FROM schema_migrations WHERE version = 15")
         before_page = connection.execute(
             "SELECT harem_scan_id, page_number, import_event_id FROM harem_scan_pages"
@@ -3627,6 +3636,47 @@ def test_antidisable_reconstructibility_migration_preserves_legacy_unknowns(
         ).fetchall() == [(None, None)]
 
 
+def test_roll_key_display_presence_migration_preserves_legacy_unknown(tmp_path) -> None:
+    database_path = tmp_path / "legacy-roll.db"
+    catalog = CatalogRepository(database_path)
+    imported = catalog.import_roll(
+        RollObservation(name="Character", series="Series", claim_rank=1, kakera_value=100),
+        "Server",
+        "Account",
+        "Character\nSeries\nClaims: #1\n100:kakera:",
+        "test",
+    )
+    with _open_database(database_path) as connection:
+        before = connection.execute(
+            "SELECT account_context_id, character_id, claim_rank, kakera_value, "
+            "observed_at, import_event_id FROM roll_observations"
+        ).fetchall()
+        key_count = connection.execute("SELECT COUNT(*) FROM harem_key_observations").fetchone()[0]
+        connection.execute("ALTER TABLE roll_observations DROP COLUMN displayed_key_count_present")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 16")
+        connection.commit()
+        run_migrations(connection, CATALOG_MIGRATIONS)
+        columns = {
+            row[1]: tuple(row[1:5])
+            for row in connection.execute("PRAGMA table_info(roll_observations)")
+        }
+        assert columns["displayed_key_count_present"] == (
+            "displayed_key_count_present", "INTEGER", 0, None
+        )
+        assert connection.execute(
+            "SELECT account_context_id, character_id, claim_rank, kakera_value, "
+            "observed_at, import_event_id FROM roll_observations"
+        ).fetchall() == before
+        assert connection.execute(
+            "SELECT displayed_key_count_present FROM roll_observations"
+        ).fetchall() == [(None,)]
+        assert connection.execute("SELECT COUNT(*) FROM harem_key_observations").fetchone()[0] == key_count
+        assert connection.execute(
+            "SELECT version, name FROM schema_migrations WHERE version = 16"
+        ).fetchall() == [(16, "roll-key-display-presence")]
+    assert imported.import_event_id > 0
+
+
 def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
     database_path = tmp_path / "newer.db"
     with sqlite3.connect(database_path) as connection:
@@ -3635,11 +3685,11 @@ def test_unknown_newer_database_version_fails_safely(tmp_path) -> None:
             "(version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (16, 'future', 'now')"
+            "INSERT INTO schema_migrations VALUES (17, 'future', 'now')"
         )
 
     with pytest.raises(MigrationError, match="unknown newer"):
         CatalogRepository(database_path)
 
     with sqlite3.connect(database_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(16,)]
+        assert connection.execute("SELECT version FROM schema_migrations").fetchall() == [(17,)]

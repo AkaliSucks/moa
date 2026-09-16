@@ -897,6 +897,7 @@ class CatalogRepository:
         raw: str,
         source: str,
         observed_at: datetime,
+        displayed_key_count_present: bool | None = None,
     ) -> _RollImportConnectionResult:
         """Store one roll without taking ownership of the surrounding transaction."""
         cursor = connection.execute(
@@ -920,14 +921,20 @@ class CatalogRepository:
             connection.execute(
                 """
                 INSERT INTO roll_observations (
-                    account_context_id, character_id, claim_rank, kakera_value, observed_at, import_event_id
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    account_context_id, character_id, claim_rank, kakera_value,
+                    displayed_key_count_present, observed_at, import_event_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
                     character_id,
                     roll.claim_rank,
                     roll.kakera_value,
+                    int(
+                        displayed_key_count_present
+                        if displayed_key_count_present is not None
+                        else roll.displayed_key_count is not None
+                    ),
                     observed_at.isoformat(),
                     import_event_id,
                 ),
@@ -1313,6 +1320,11 @@ class CatalogRepository:
                 ),
                 claim_rank=row["claim_rank"],
                 kakera_value=row["kakera_value"],
+                displayed_key_count_present=(
+                    bool(row["displayed_key_count_present"])
+                    if row["displayed_key_count_present"] is not None
+                    else None
+                ),
                 observed_at=datetime.fromisoformat(row["observed_at"]),
             )
             for row in rows

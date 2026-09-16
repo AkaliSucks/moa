@@ -165,6 +165,7 @@ CATALOG_CURRENT_REQUIRED_COLUMNS = {
     "projection_generations": frozenset({"id", "is_current"}),
     "discord_projection_links": frozenset({"generation_id"}),
     "harem_scan_pages": frozenset({"slots_used", "slots_capacity"}),
+    "roll_observations": frozenset({"displayed_key_count_present"}),
 }
 
 
@@ -1062,6 +1063,20 @@ def _apply_antidisable_reconstructibility_foundation(
             )
 
 
+def _apply_roll_key_display_presence(connection: sqlite3.Connection) -> None:
+    """Add nullable parser-observed roll evidence without inferring legacy values."""
+    columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(roll_observations)")
+    }
+    if "displayed_key_count_present" in columns:
+        return
+    connection.execute(
+        "ALTER TABLE roll_observations ADD COLUMN "
+        "displayed_key_count_present INTEGER NULL "
+        "CHECK (displayed_key_count_present IN (0, 1))"
+    )
+
+
 CATALOG_MIGRATIONS = (
     Migration(
         version=1,
@@ -1137,5 +1152,10 @@ CATALOG_MIGRATIONS = (
         version=15,
         name="antidisable-reconstructibility-foundation",
         apply=_apply_antidisable_reconstructibility_foundation,
+    ),
+    Migration(
+        version=16,
+        name="roll-key-display-presence",
+        apply=_apply_roll_key_display_presence,
     ),
 )

@@ -52,6 +52,7 @@ _REQUIRED_FIELDS = {
             "character_id",
             "claim_rank",
             "kakera_value",
+            "displayed_key_count_present",
             "observed_at",
             "import_event_id",
             "character",

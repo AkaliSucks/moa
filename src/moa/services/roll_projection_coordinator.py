@@ -203,6 +203,7 @@ class RollProjectionCoordinator:
             imported = self._catalog._import_roll_with_connection(
                 connection,
                 roll=persistence_roll,
+                displayed_key_count_present=roll.displayed_key_count is not None,
                 server=server,
                 account=account,
                 raw=raw,

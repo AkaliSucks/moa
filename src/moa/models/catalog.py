@@ -630,6 +630,7 @@ class StoredRollObservation(MOAModel):
     character: CatalogCharacter
     claim_rank: int | None
     kakera_value: int | None
+    displayed_key_count_present: bool | None
     observed_at: datetime
 
 

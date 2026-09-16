@@ -382,6 +382,9 @@ def test_first_processing_key_persistence_is_governed_by_shared_authority(
     assert "harem_key_observations" not in dict(result.projection_targets)
     with connect(database_path) as connection:
         assert connection.execute(
+            "SELECT displayed_key_count_present FROM roll_observations"
+        ).fetchone()[0] == 1
+        assert connection.execute(
             "SELECT COUNT(*) FROM harem_key_observations"
         ).fetchone()[0] == 0
         assert connection.execute(
@@ -438,6 +441,9 @@ def test_roll_without_optional_projections_only_creates_roll_projection(tmp_path
         assert counts["import_events"] == 1
         assert counts["roll_observations"] == 1
         assert counts["harem_key_observations"] == 0
+        assert connection.execute(
+            "SELECT displayed_key_count_present FROM roll_observations"
+        ).fetchone()[0] == 0
         assert counts["rank_snapshots"] == 0
         assert counts["server_character_observations"] == 0
         assert counts["discord_projection_links"] == 1
