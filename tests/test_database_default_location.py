@@ -8,6 +8,9 @@ from moa.database.legacy_database_relocation import (
     LegacyDatabaseRelocationRequiredError,
 )
 from moa.repositories.catalog_repository import CatalogRepository
+from moa.services.automatic_import_service import AutomaticImportService
+from moa.services.catalog_service import CatalogService
+from moa.services.data_health_service import DataHealthService
 
 
 def _disable_checkout_detection(monkeypatch, tmp_path: Path) -> None:
@@ -156,3 +159,55 @@ def test_invalid_platform_data_root_does_not_fall_back_to_checkout(
 
     assert structural_blocker.read_text(encoding="utf-8") == "file"
     assert not (tmp_path / "data" / "database" / "moa.db").exists()
+
+
+def test_database_path_override_is_late_bound_and_returns_disposable_path(
+    monkeypatch, tmp_path
+) -> None:
+    override = tmp_path / "disposable" / "smoke.db"
+    monkeypatch.setenv("MOA_DATABASE_PATH", str(override))
+
+    assert sqlite.effective_default_database_path() == override
+    assert sqlite.DEFAULT_DATABASE_PATH.__fspath__() == str(override)
+
+
+def test_database_path_override_preserves_default_when_absent(monkeypatch, tmp_path) -> None:
+    platform_root = tmp_path / "user-data" / "moa"
+    _disable_checkout_detection(monkeypatch, tmp_path)
+    monkeypatch.delenv("MOA_DATABASE_PATH", raising=False)
+    monkeypatch.setattr(sqlite, "user_data_path", lambda **_kwargs: platform_root)
+
+    assert sqlite.effective_default_database_path() == platform_root / "moa.db"
+
+
+@pytest.mark.parametrize("configured_path", ["", "relative/moa.db"])
+def test_database_path_override_rejects_invalid_paths(monkeypatch, configured_path) -> None:
+    monkeypatch.setenv("MOA_DATABASE_PATH", configured_path)
+
+    with pytest.raises(ValueError, match="MOA_DATABASE_PATH must be an absolute SQLite"):
+        sqlite.connect()
+
+
+def test_database_path_override_converges_across_import_catalog_and_data_health_paths(
+    monkeypatch, tmp_path
+) -> None:
+    override = tmp_path / "disposable" / "smoke.db"
+    monkeypatch.setenv("MOA_DATABASE_PATH", str(override))
+
+    def unexpected_default_path(**_kwargs):
+        raise AssertionError("the canonical/default database resolver was used")
+
+    monkeypatch.setattr(sqlite, "default_database_path", unexpected_default_path)
+    catalog = CatalogService()
+    import_result = AutomaticImportService(catalog_service=catalog).import_message(
+        "TOP 1000\n#1 - Hatsune Miku - VOCALOID\nPage 1 / 67",
+        "disposable-fixture",
+    )
+    catalog_result = CatalogService().recent_imports(1)
+    health_result = DataHealthService().find_orphans()
+
+    assert import_result.imported_count == 1
+    assert len(catalog_result) == 1
+    assert health_result == ()
+    assert override.is_file()
+    assert catalog.database_path == override

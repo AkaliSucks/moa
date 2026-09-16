@@ -1,5 +1,6 @@
 """Small SQLite connection factory for MOA's local state database."""
 
+import os
 import sqlite3
 import threading
 from collections.abc import Callable
@@ -11,14 +12,40 @@ from platformdirs import user_data_path
 
 from moa.database.writer_lease import shared_database_writer_lease
 
+_DATABASE_PATH_OVERRIDE_ENV = "MOA_DATABASE_PATH"
+
 
 def default_database_path() -> Path:
     """Return MOA's per-user, platform-native live database path."""
     return user_data_path(appname="moa", appauthor=False, roaming=False) / "moa.db"
 
 
+def _database_path_override() -> Path | None:
+    configured_path = os.environ.get(_DATABASE_PATH_OVERRIDE_ENV)
+    if configured_path is None:
+        return None
+
+    configured_path = configured_path.strip()
+    if not configured_path:
+        raise ValueError(
+            f"{_DATABASE_PATH_OVERRIDE_ENV} must be an absolute SQLite database path."
+        )
+
+    path = Path(configured_path).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"{_DATABASE_PATH_OVERRIDE_ENV} must be an absolute SQLite database path; "
+            f"got {configured_path!r}."
+        )
+    return path.resolve(strict=False)
+
+
 def effective_default_database_path() -> Path:
     """Resolve the implicit database path after checking legacy authority."""
+    override = _database_path_override()
+    if override is not None:
+        return override
+
     from moa.database.legacy_database_relocation import ensure_default_database_authority
 
     path = default_database_path()
