@@ -575,7 +575,7 @@ def test_global_writer_lease_precedes_open_and_outlives_commit_and_close(
             events.append("close")
 
     @contextmanager
-    def observed_lease():
+    def observed_lease(_root: Path):
         events.append("lease-enter")
         yield object()
         events.append("lease-exit")
@@ -626,7 +626,7 @@ def test_global_writer_lease_outlives_rollback_and_connection_close(
             events.append("close")
 
     @contextmanager
-    def observed_lease():
+    def observed_lease(_root: Path):
         events.append("lease-enter")
         try:
             yield object()
@@ -658,7 +658,7 @@ def test_writer_lease_failure_prevents_write_capable_connection_open(
     connection_opened = False
 
     @contextmanager
-    def rejected_lease():
+    def rejected_lease(_root: Path):
         raise DatabaseWriterLeaseContendedError("exclusive observer active")
         yield object()
 

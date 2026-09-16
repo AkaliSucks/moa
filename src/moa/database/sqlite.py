@@ -150,7 +150,7 @@ def run_write_transaction(
         raise RuntimeError("nested write transactions are not supported")
 
     lock = _writer_lock(canonical_path)
-    with shared_database_writer_lease():
+    with shared_database_writer_lease(canonical_path.parent):
         _write_transaction_state.active = True
         try:
             with lock:

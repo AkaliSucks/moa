@@ -3003,7 +3003,7 @@ class CatalogRepository:
         return False
 
     def _initialize(self) -> None:
-        with shared_database_writer_lease():
+        with shared_database_writer_lease(self.database_path.parent):
             with self._write_connection() as connection:
                 has_catalog_tables = connection.execute(
                     """
