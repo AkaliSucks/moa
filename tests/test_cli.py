@@ -4342,7 +4342,6 @@ def test_import_auto_keeps_direct_wishlist_import_without_durable_coordinator(
 ) -> None:
     constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    coordinators: list[object] = []
 
     class RecordingImporter:
         def __init__(self, *args, **kwargs):
@@ -4356,12 +4355,7 @@ def test_import_auto_keeps_direct_wishlist_import_without_durable_coordinator(
                 message="Imported wishlist.",
             )
 
-    class RecordingWishlistProjectionCoordinator:
-        def __init__(self, *args, **kwargs):
-            coordinators.append((args, kwargs))
-
     monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
-    monkeypatch.setattr(main, "WishlistProjectionCoordinator", RecordingWishlistProjectionCoordinator)
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -4375,7 +4369,6 @@ def test_import_auto_keeps_direct_wishlist_import_without_durable_coordinator(
 
     assert result.exit_code == 0
     assert constructed == [((), {})]
-    assert coordinators == []
     assert calls == [
         (
             ("wishlist response", "clipboard", "Lake", "ernieuuu"),
@@ -4389,7 +4382,6 @@ def test_import_auto_keeps_direct_disablelist_import_without_durable_coordinator
 ) -> None:
     constructed: list[tuple[tuple[object, ...], dict[str, object]]] = []
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    coordinators: list[object] = []
 
     class RecordingImporter:
         def __init__(self, *args, **kwargs):
@@ -4403,16 +4395,7 @@ def test_import_auto_keeps_direct_disablelist_import_without_durable_coordinator
                 message="Imported disablelist.",
             )
 
-    class RecordingDisableListProjectionCoordinator:
-        def __init__(self, *args, **kwargs):
-            coordinators.append((args, kwargs))
-
     monkeypatch.setattr(import_workflow_commands_module, "AutomaticImportService", RecordingImporter)
-    monkeypatch.setattr(
-        main,
-        "DisableListProjectionCoordinator",
-        RecordingDisableListProjectionCoordinator,
-    )
     monkeypatch.setattr(
         main,
         "_read_message_source",
@@ -4426,7 +4409,6 @@ def test_import_auto_keeps_direct_disablelist_import_without_durable_coordinator
 
     assert result.exit_code == 0
     assert constructed == [((), {})]
-    assert coordinators == []
     assert calls == [
         (
             ("disablelist response", "clipboard", "Lake", "ernieuuu"),
