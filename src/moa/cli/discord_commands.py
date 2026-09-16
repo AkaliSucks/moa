@@ -19,6 +19,7 @@ from moa.services.discord_listener_service import (
     DiscordEventCaptureError,
     DiscordEventCaptureService,
     DiscordListenerService,
+    normalize_listener_token,
 )
 from moa.services.infokl_projection_coordinator import InfoklProjectionCoordinator
 from moa.services.kakera_state_projection_coordinator import KakeraStateProjectionCoordinator
@@ -27,6 +28,7 @@ from moa.services.kakeraloot_state_projection_coordinator import (
 )
 from moa.services.listener_process_guard import (
     ListenerAlreadyRunningError,
+    ListenerProcessGuard,
     ListenerProcessGuardResourceError,
 )
 from moa.services.player_bonus_projection_coordinator import PlayerBonusProjectionCoordinator
@@ -190,91 +192,94 @@ def build_discord_app(
         )
         logging.getLogger("moa.discord").setLevel(logging.INFO)
         try:
+            normalized_token = normalize_listener_token(token)
             database_path = Path(database_path_provider())
-            catalog_repository = CatalogRepository(database_path)
-            catalog_service = CatalogService(catalog_repository)
-            discord_message_repository = DiscordMessageRepository(database_path)
-            roll_projection_coordinator = RollProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            profile_projection_coordinator = ProfileProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            claim_projection_coordinator = ClaimProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            settings_projection_coordinator = SettingsProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            infokl_projection_coordinator = InfoklProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            timer_projection_coordinator = TimerProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            kakera_state_projection_coordinator = KakeraStateProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            kakeraloot_state_projection_coordinator = KakeralootStateProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            tower_state_projection_coordinator = TowerStateProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            sphere_result_projection_coordinator = SphereResultProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            player_bonus_projection_coordinator = PlayerBonusProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            disablelist_projection_coordinator = DisableListProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            wishlist_projection_coordinator = WishlistProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            antidisable_page_projection_coordinator = AntidisablePageProjectionCoordinator(
-                catalog_repository,
-                discord_message_repository,
-            )
-            importer = AutomaticImportService(
-                catalog_service,
-                roll_projection_coordinator=roll_projection_coordinator,
-                profile_projection_coordinator=profile_projection_coordinator,
-                claim_projection_coordinator=claim_projection_coordinator,
-                settings_projection_coordinator=settings_projection_coordinator,
-                infokl_projection_coordinator=infokl_projection_coordinator,
-                timer_projection_coordinator=timer_projection_coordinator,
-                kakera_state_projection_coordinator=kakera_state_projection_coordinator,
-                kakeraloot_state_projection_coordinator=kakeraloot_state_projection_coordinator,
-                tower_state_projection_coordinator=tower_state_projection_coordinator,
-                sphere_result_projection_coordinator=sphere_result_projection_coordinator,
-                player_bonus_projection_coordinator=player_bonus_projection_coordinator,
-                disablelist_projection_coordinator=disablelist_projection_coordinator,
-                wishlist_projection_coordinator=wishlist_projection_coordinator,
-                antidisable_page_projection_coordinator=antidisable_page_projection_coordinator,
-            )
-            DiscordListenerService(
-                catalog_service=catalog_service,
-                importer=importer,
-                database_path=database_path,
-                profile_name=profile,
-                status_text=status,
-                discord_message_repository=discord_message_repository,
-            ).run(token, parsed_mudae_user_id)
+            with ListenerProcessGuard(database_path) as listener_guard:
+                catalog_repository = CatalogRepository(database_path)
+                catalog_service = CatalogService(catalog_repository)
+                discord_message_repository = DiscordMessageRepository(database_path)
+                roll_projection_coordinator = RollProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                profile_projection_coordinator = ProfileProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                claim_projection_coordinator = ClaimProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                settings_projection_coordinator = SettingsProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                infokl_projection_coordinator = InfoklProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                timer_projection_coordinator = TimerProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                kakera_state_projection_coordinator = KakeraStateProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                kakeraloot_state_projection_coordinator = KakeralootStateProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                tower_state_projection_coordinator = TowerStateProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                sphere_result_projection_coordinator = SphereResultProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                player_bonus_projection_coordinator = PlayerBonusProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                disablelist_projection_coordinator = DisableListProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                wishlist_projection_coordinator = WishlistProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                antidisable_page_projection_coordinator = AntidisablePageProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
+                importer = AutomaticImportService(
+                    catalog_service,
+                    roll_projection_coordinator=roll_projection_coordinator,
+                    profile_projection_coordinator=profile_projection_coordinator,
+                    claim_projection_coordinator=claim_projection_coordinator,
+                    settings_projection_coordinator=settings_projection_coordinator,
+                    infokl_projection_coordinator=infokl_projection_coordinator,
+                    timer_projection_coordinator=timer_projection_coordinator,
+                    kakera_state_projection_coordinator=kakera_state_projection_coordinator,
+                    kakeraloot_state_projection_coordinator=kakeraloot_state_projection_coordinator,
+                    tower_state_projection_coordinator=tower_state_projection_coordinator,
+                    sphere_result_projection_coordinator=sphere_result_projection_coordinator,
+                    player_bonus_projection_coordinator=player_bonus_projection_coordinator,
+                    disablelist_projection_coordinator=disablelist_projection_coordinator,
+                    wishlist_projection_coordinator=wishlist_projection_coordinator,
+                    antidisable_page_projection_coordinator=antidisable_page_projection_coordinator,
+                )
+                DiscordListenerService(
+                    catalog_service=catalog_service,
+                    importer=importer,
+                    database_path=database_path,
+                    profile_name=profile,
+                    status_text=status,
+                    discord_message_repository=discord_message_repository,
+                    listener_guard=listener_guard,
+                ).run(normalized_token, parsed_mudae_user_id)
         except ListenerAlreadyRunningError as error:
             console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error

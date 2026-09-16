@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import moa.cli.discord_commands as discord_commands_module
+import moa.services.discord_listener_service as listener_service_module
 from moa.cli import main
 from moa.services.listener_process_guard import (
     ListenerAlreadyRunningError,
@@ -273,12 +275,107 @@ def test_cli_surfaces_listener_conflict_without_token_or_traceback(monkeypatch, 
     assert "Traceback" not in result.stdout
 
 
+def test_contended_cli_stops_before_listener_composition(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "database" / "moa.db"
+    config_path = tmp_path / "config.json"
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MOA_DATABASE_PATH", str(database_path))
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("contended listener reached repository or Gateway composition")
+
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", unexpected)
+    monkeypatch.setattr(listener_service_module, "_MOADiscordClient", unexpected)
+
+    with ListenerProcessGuard(database_path):
+        result = CliRunner().invoke(
+            main.app, ["discord", "listen", "--token", "test-token"]
+        )
+
+    assert result.exit_code == 1
+    assert "Another MOA listener already owns database" in result.stdout
+    assert not database_path.exists()
+    assert not database_path.with_name("moa.db-wal").exists()
+    assert not database_path.with_name("moa.db-shm").exists()
+    assert not database_path.parent.joinpath("database-writer.lease").exists()
+    assert not config_path.exists()
+
+
+def test_cli_uses_one_guard_for_composition_and_run(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "database" / "moa.db"
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("MOA_DATABASE_PATH", str(database_path))
+    acquired = 0
+    released = 0
+    client_runs = 0
+    original_acquire = ListenerProcessGuard.acquire
+    original_release = ListenerProcessGuard.release
+
+    def acquire(guard):
+        nonlocal acquired
+        original_acquire(guard)
+        acquired += 1
+
+    def release(guard):
+        nonlocal released
+        released += 1
+        original_release(guard)
+
+    class FakeClient:
+        def __init__(self, _listener, **_kwargs):
+            assert acquired == 1
+            assert released == 0
+
+        def run(self, _token):
+            nonlocal client_runs
+            client_runs += 1
+            with pytest.raises(ListenerAlreadyRunningError):
+                ListenerProcessGuard(database_path).acquire()
+
+    monkeypatch.setattr(ListenerProcessGuard, "acquire", acquire)
+    monkeypatch.setattr(ListenerProcessGuard, "release", release)
+    monkeypatch.setattr(listener_service_module, "_MOADiscordClient", FakeClient)
+
+    result = CliRunner().invoke(main.app, ["discord", "listen", "--token", "test-token"])
+
+    assert result.exit_code == 0, result.exception
+    assert database_path.exists()
+    assert (acquired, released, client_runs) == (1, 1, 1)
+    with ListenerProcessGuard(database_path) as recovered:
+        assert recovered.is_acquired
+
+
+def test_cli_releases_guard_after_repository_composition_failure(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "database" / "moa.db"
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(tmp_path / "config.json"))
+    monkeypatch.setenv("MOA_DATABASE_PATH", str(database_path))
+
+    def fail_catalog(_database_path):
+        with pytest.raises(ListenerAlreadyRunningError):
+            ListenerProcessGuard(database_path).acquire()
+        raise RuntimeError("repository composition failed")
+
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", fail_catalog)
+
+    result = CliRunner().invoke(main.app, ["discord", "listen", "--token", "test-token"])
+
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "repository composition failed"
+    assert not database_path.exists()
+    with ListenerProcessGuard(database_path) as recovered:
+        assert recovered.is_acquired
+
+
 def test_cli_listener_guard_follows_runtime_platform_database(monkeypatch, tmp_path) -> None:
     from moa.database import legacy_database_relocation, sqlite
 
     platform_root = tmp_path / "user-data" / "moa"
     target = platform_root / "moa.db"
     captured: dict[str, object] = {}
+    # Exercise the patched disposable platform provider rather than the test runner override.
+    monkeypatch.delenv("MOA_DATABASE_PATH", raising=False)
     monkeypatch.setattr(sqlite, "user_data_path", lambda **_kwargs: platform_root)
     monkeypatch.setattr(
         legacy_database_relocation,
@@ -296,7 +393,7 @@ def test_cli_listener_guard_follows_runtime_platform_database(monkeypatch, tmp_p
         def run(self, _token, _mudae_user_id) -> None:
             return None
 
-    monkeypatch.setattr(main, "DiscordListenerService", RecordingListener)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", RecordingListener)
 
     result = CliRunner().invoke(
         main.app,
@@ -325,7 +422,7 @@ def test_cli_distinguishes_listener_resource_failure(monkeypatch, tmp_path) -> N
                 f"Could not lock the listener resource for database {database_path.resolve()}."
             )
 
-    monkeypatch.setattr(main, "DiscordListenerService", ResourceFailureListener)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", ResourceFailureListener)
     result = CliRunner().invoke(
         main.app,
         ["discord", "listen", "--token", "test-token"],

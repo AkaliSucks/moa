@@ -3618,7 +3618,8 @@ def test_discord_listener_requires_a_bot_token(monkeypatch) -> None:
 
 
 def test_discord_listener_rejects_example_bot_token(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", tmp_path / "moa.db")
+    database_path = tmp_path / "moa.db"
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
 
     result = CliRunner().invoke(
         main.app,
@@ -3627,6 +3628,8 @@ def test_discord_listener_rejects_example_bot_token(monkeypatch, tmp_path) -> No
 
     assert result.exit_code == 1
     assert "Replace YOUR_DISCORD_BOT_TOKEN" in result.stdout
+    assert not database_path.exists()
+    assert not database_path.with_name("moa.db.listener.lock").exists()
 
 
 def _capture_only_arguments(output_path: str) -> list[str]:

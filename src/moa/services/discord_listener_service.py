@@ -68,7 +68,10 @@ from moa.services.discord_component_board_adapter import (
     DiscordComponentBoardAdapter,
     DiscordComponentBoardProjectionError,
 )
-from moa.services.listener_process_guard import ListenerProcessGuard
+from moa.services.listener_process_guard import (
+    ListenerProcessGuard,
+    ListenerProcessGuardResourceError,
+)
 from moa.services.ourochest_transition_service import OurochestTransitionService
 from moa.services.ourochest_workflow_coordinator import OurochestWorkflowCoordinator
 from moa.services.ourochest_workflow_service import (
@@ -113,6 +116,22 @@ class _AccountAttributionDecision:
 
 class ListenerDatabaseIdentityError(ValueError):
     """Raised when one listener is composed with conflicting database identities."""
+
+
+def normalize_listener_token(token: str) -> str:
+    """Validate the normal listener token before database-backed composition."""
+    normalized_token = token.strip()
+    if not normalized_token:
+        raise ValueError("A Discord bot token is required.")
+    if normalized_token.casefold() in {
+        "your_discord_bot_token",
+        "your-bot-token",
+        "your bot token",
+    }:
+        raise ValueError(
+            "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
+        )
+    return normalized_token
 
 
 @dataclass(frozen=True, slots=True)
@@ -766,6 +785,7 @@ class DiscordListenerService:
         ourochest_component_adapter: DiscordComponentBoardAdapter | None = None,
         ourochest_transition_service: OurochestTransitionService | None = None,
         ourochest_workflow_coordinator: OurochestWorkflowCoordinator | None = None,
+        listener_guard: ListenerProcessGuard | None = None,
     ) -> None:
         self._config = config_service or ConfigService()
         self._catalog = catalog_service or CatalogService()
@@ -781,6 +801,7 @@ class DiscordListenerService:
                     inferred_database_path
                 )
         self._configured_database_path = database_path
+        self._listener_guard = listener_guard
         self._listener_database_path: Path | None = None
         self._parser = MudaeTextParser()
         self._router = MudaeMessageRouter(self._parser)
@@ -816,18 +837,19 @@ class DiscordListenerService:
 
     def run(self, token: str, mudae_user_id: int | None = None) -> None:
         """Run the blocking Discord gateway client until interrupted."""
-        normalized_token = token.strip()
-        if not normalized_token:
-            raise ValueError("A Discord bot token is required.")
-        if normalized_token.casefold() in {
-            "your_discord_bot_token",
-            "your-bot-token",
-            "your bot token",
-        }:
-            raise ValueError(
-                "Replace YOUR_DISCORD_BOT_TOKEN with the real token from the Discord Developer Portal."
-            )
+        normalized_token = normalize_listener_token(token)
         self._listener_database_path = self._resolve_listener_database_path()
+        guard = self._listener_guard or ListenerProcessGuard(self._listener_database_path)
+        owns_guard = self._listener_guard is None
+        if not owns_guard:
+            if guard.database_path != self._listener_database_path:
+                raise ListenerDatabaseIdentityError(
+                    "The listener guard must own the listener database."
+                )
+            if not guard.is_acquired:
+                raise ListenerProcessGuardResourceError(
+                    "The listener guard must be acquired before listener startup."
+                )
         self._configure_logging()
         self._mudae_user_id = mudae_user_id
         intents = discord.Intents.none()
@@ -835,8 +857,8 @@ class DiscordListenerService:
         intents.messages = True
         intents.message_content = True
         intents.reactions = True
-        guard = ListenerProcessGuard(self._listener_database_path)
-        guard.acquire()
+        if owns_guard:
+            guard.acquire()
         try:
             client = _MOADiscordClient(self, intents=intents)
             try:
@@ -847,16 +869,18 @@ class DiscordListenerService:
                     "bot token from the Discord Developer Portal, then try again."
                 ) from error
         except BaseException as error:
-            try:
-                guard.release()
-            except BaseException as cleanup_error:
-                error.add_note(
-                    "Listener guard release also failed: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
-                )
+            if owns_guard:
+                try:
+                    guard.release()
+                except BaseException as cleanup_error:
+                    error.add_note(
+                        "Listener guard release also failed: "
+                        f"{type(cleanup_error).__name__}: {cleanup_error}"
+                    )
             raise
         else:
-            guard.release()
+            if owns_guard:
+                guard.release()
 
     def _resolve_listener_database_path(self) -> Path:
         candidates: list[Path] = []
