@@ -67,10 +67,10 @@ def _sqlite3_connect_sites() -> tuple[tuple[str, str], ...]:
     return tuple(found)
 
 
-def test_all_57_central_transaction_callers_inherit_global_writer_lease() -> None:
+def test_all_58_central_transaction_callers_inherit_global_writer_lease() -> None:
     call_sites = _call_sites("run_write_transaction")
 
-    assert len(call_sites) == 57
+    assert len(call_sites) == 58
     assert ("repositories/catalog_repository.py", "import_command_observation") in call_sites
     assert (
         "services/discord_listener_service.py",
