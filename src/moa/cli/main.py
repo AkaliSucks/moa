@@ -25,6 +25,9 @@ from moa.cli.data_health_commands import build_data_health_app
 from moa.cli.retained_source_reprojection_preflight_commands import (
     register_retained_source_reprojection_preflight_command,
 )
+from moa.cli.catalog_roll_key_display_candidate_commands import (
+    register_catalog_roll_key_display_candidate_command,
+)
 from moa.cli.discord_commands import build_discord_app
 from moa.cli.analyze_roll_commands import register_analyze_roll_command
 from moa.cli.detect_commands import register_detect_command
@@ -241,6 +244,7 @@ register_catalog_repair_bugged_data_command(
     lambda: DEFAULT_DATABASE_PATH,
 )
 register_retained_source_reprojection_preflight_command(catalog_app, console)
+register_catalog_roll_key_display_candidate_command(catalog_app, console)
 
 
 if __name__ == "__main__":
