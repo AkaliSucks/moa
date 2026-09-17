@@ -5,6 +5,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from moa.core.config import ConfigService
 from moa.repositories.catalog_repository import CatalogRepository
 from moa.repositories.discord_message_repository import DiscordMessageRepository
 from moa.services.antidisable_page_projection_coordinator import (
@@ -193,6 +194,8 @@ def build_discord_app(
         logging.getLogger("moa.discord").setLevel(logging.INFO)
         try:
             normalized_token = normalize_listener_token(token)
+            config_service = ConfigService()
+            config_service.profile(profile)
             database_path = Path(database_path_provider())
             with ListenerProcessGuard(database_path) as listener_guard:
                 catalog_repository = CatalogRepository(database_path)
@@ -272,6 +275,7 @@ def build_discord_app(
                     antidisable_page_projection_coordinator=antidisable_page_projection_coordinator,
                 )
                 DiscordListenerService(
+                    config_service=config_service,
                     catalog_service=catalog_service,
                     importer=importer,
                     database_path=database_path,

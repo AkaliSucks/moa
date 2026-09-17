@@ -35,6 +35,7 @@ import moa.services.retention_expiry_service as retention_expiry_service_module
 import moa.services.roll_analysis_service as roll_analysis_service_module
 import moa.services.server_comparison_service as server_comparison_module
 from moa.cli import main
+from moa.core.config import ConfigService
 from moa.database.legacy_database_relocation import DatabaseRelocationError
 from moa.models.catalog import CatalogCharacter, CatalogTopSearchEntry
 from moa.models.data_health import DataHealthFinding
@@ -3632,6 +3633,87 @@ def test_discord_listener_rejects_example_bot_token(monkeypatch, tmp_path) -> No
     assert not database_path.with_name("moa.db.listener.lock").exists()
 
 
+def test_discord_listener_rejects_unknown_profile_before_startup(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"profiles": [{"name": "default"}]}', encoding="utf-8")
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+    side_effects = {
+        "guard": False,
+        "catalog_repository": False,
+        "discord_repository": False,
+        "listener": False,
+    }
+
+    class UnexpectedGuard:
+        def __init__(self, *_args, **_kwargs):
+            side_effects["guard"] = True
+            raise AssertionError("unknown profiles must fail before listener guard acquisition")
+
+    def unexpected_catalog(*_args, **_kwargs):
+        side_effects["catalog_repository"] = True
+        raise AssertionError("unknown profiles must fail before repository construction")
+
+    def unexpected_discord(*_args, **_kwargs):
+        side_effects["discord_repository"] = True
+        raise AssertionError("unknown profiles must fail before repository construction")
+
+    class UnexpectedListener:
+        def __init__(self, *_args, **_kwargs):
+            side_effects["listener"] = True
+            raise AssertionError("unknown profiles must fail before listener construction")
+
+    monkeypatch.setattr(discord_commands_module, "ListenerProcessGuard", UnexpectedGuard)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected_catalog)
+    monkeypatch.setattr(
+        discord_commands_module, "DiscordMessageRepository", unexpected_discord
+    )
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", UnexpectedListener)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--profile", "missing"],
+    )
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.stdout
+    assert side_effects == {
+        "guard": False,
+        "catalog_repository": False,
+        "discord_repository": False,
+        "listener": False,
+    }
+    assert not database_path.exists()
+    assert not database_path.with_name("moa.db.listener.lock").exists()
+
+
+def test_discord_listener_rejects_malformed_profile_before_startup(monkeypatch, tmp_path) -> None:
+    database_path = tmp_path / "moa.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"profiles": [{"name": 7}]}', encoding="utf-8")
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("malformed profiles must fail before durable startup")
+
+    monkeypatch.setattr(discord_commands_module, "ListenerProcessGuard", unexpected)
+    monkeypatch.setattr(discord_commands_module, "CatalogRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", unexpected)
+    monkeypatch.setattr(discord_commands_module, "DiscordListenerService", unexpected)
+
+    result = CliRunner().invoke(
+        main.app,
+        ["discord", "listen", "--token", "test-token", "--profile", "default"],
+    )
+
+    assert result.exit_code == 1
+    assert "Could not read MOA config" in result.stdout
+    assert not database_path.exists()
+    assert not database_path.with_name("moa.db.listener.lock").exists()
+
+
 def _capture_only_arguments(output_path: str) -> list[str]:
     return [
         "discord",
@@ -3934,8 +4016,12 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     monkeypatch, tmp_path
 ) -> None:
     database_path = tmp_path / "moa.db"
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"profiles": [{"name": "default"}]}', encoding="utf-8")
+    monkeypatch.setenv("MOA_CONFIG_PATH", str(config_path))
     monkeypatch.setattr(main, "DEFAULT_DATABASE_PATH", database_path)
     captured: dict[str, object] = {}
+    config_services: list[ConfigService] = []
     catalog_repositories: list[CatalogRepository] = []
     discord_repositories: list[DiscordMessageRepository] = []
     importers: list[AutomaticImportService] = []
@@ -3964,6 +4050,11 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             importers.append(self)
+
+    class RecordingConfigService(ConfigService):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            config_services.append(self)
 
     class RecordingKakeraStateProjectionCoordinator(KakeraStateProjectionCoordinator):
         def __init__(self, *repositories):
@@ -4025,6 +4116,7 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
             captured["mudae_user_id"] = mudae_user_id
 
     monkeypatch.setattr(discord_commands_module, "DiscordListenerService", FakeListener)
+    monkeypatch.setattr(discord_commands_module, "ConfigService", RecordingConfigService)
     monkeypatch.setattr(discord_commands_module, "CatalogRepository", RecordingCatalogRepository)
     monkeypatch.setattr(discord_commands_module, "DiscordMessageRepository", RecordingDiscordMessageRepository)
     monkeypatch.setattr(discord_commands_module, "AutomaticImportService", RecordingAutomaticImportService)
@@ -4072,7 +4164,16 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
 
     result = CliRunner().invoke(
         main.app,
-        ["discord", "listen", "--token", "test-token", "--mudae-user-id", "999"],
+        [
+            "discord",
+            "listen",
+            "--token",
+            "test-token",
+            "--profile",
+            "default",
+            "--mudae-user-id",
+            "999",
+        ],
     )
 
     assert result.exit_code == 0
@@ -4094,6 +4195,8 @@ def test_discord_listener_wires_shared_database_and_roll_coordinator(
     wishlist_coordinator = importer._wishlist_projection_coordinator
     antidisable_coordinator = importer._antidisable_page_projection_coordinator
     assert isinstance(catalog_service, CatalogService)
+    assert isinstance(captured["config_service"], ConfigService)
+    assert config_services == [captured["config_service"]]
     assert isinstance(catalog_service._repository, CatalogRepository)
     assert isinstance(discord_repository, DiscordMessageRepository)
     assert isinstance(importer, AutomaticImportService)
