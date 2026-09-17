@@ -25,6 +25,9 @@ from moa.cli.data_health_commands import build_data_health_app
 from moa.cli.retained_source_reprojection_preflight_commands import (
     register_retained_source_reprojection_preflight_command,
 )
+from moa.cli.retained_source_reprojection_commands import (
+    register_retained_source_reprojection_command,
+)
 from moa.cli.catalog_roll_key_display_candidate_commands import (
     register_catalog_roll_key_display_candidate_command,
 )
@@ -244,6 +247,7 @@ register_catalog_repair_bugged_data_command(
     lambda: DEFAULT_DATABASE_PATH,
 )
 register_retained_source_reprojection_preflight_command(catalog_app, console)
+register_retained_source_reprojection_command(catalog_app, console)
 register_catalog_roll_key_display_candidate_command(catalog_app, console)
 
 
