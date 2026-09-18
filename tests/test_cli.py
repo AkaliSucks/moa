@@ -694,7 +694,7 @@ def test_analyze_roll_cli_registration_schema_and_help_are_lazy(monkeypatch) -> 
         (server_parameter, ("--server", "-s")),
         (account_parameter, ("--account", "-a")),
     ):
-        assert parameter.type.name == "str"
+        assert parameter.type.name == "text"
         assert parameter.default is None
         assert parameter.required is False
         assert tuple(parameter.opts) == options
@@ -4686,9 +4686,9 @@ def test_import_mm_family_is_exact_flat_and_schema_stable() -> None:
     assert "scan" not in import_commands
 
     expected_parameters = [
-        ("server", ("--server", "-s"), None, True, "str"),
-        ("account", ("--account", "-a"), None, True, "str"),
-        ("scan", ("--scan",), None, False, "int"),
+        ("server", ("--server", "-s"), None, True, "text"),
+        ("account", ("--account", "-a"), None, True, "text"),
+        ("scan", ("--scan",), None, False, "integer"),
         ("path", ("path",), None, False, "path"),
         ("clipboard", ("--clipboard", "-c"), False, False, "boolean"),
     ]
@@ -7381,8 +7381,8 @@ def test_adl_cli_registration_schema_and_help_are_lazy(monkeypatch) -> None:
     assert begin_help.exit_code == status_help.exit_code == complete_help.exit_code == 0
     assert "--server" in begin_help.stdout and "-s" in begin_help.stdout
     assert "--account" in begin_help.stdout and "-a" in begin_help.stdout
-    assert "Usage: root adl status [OPTIONS] {scan_id}" in status_help.stdout
-    assert "Usage: root adl complete [OPTIONS] {scan_id}" in complete_help.stdout
+    assert "Usage: root adl status [OPTIONS] SCAN_ID" in status_help.stdout
+    assert "Usage: root adl complete [OPTIONS] SCAN_ID" in complete_help.stdout
     assert events == []
 
 

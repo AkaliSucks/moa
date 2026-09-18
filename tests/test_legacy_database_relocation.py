@@ -24,7 +24,6 @@ from moa.database.legacy_database_relocation import (
     DatabaseRelocationError,
     DatabaseRelocationJournalModePreparationAuthority,
     DatabaseRelocationJournalModePreparationError,
-    DatabaseSidecarObservation,
     DatabaseWalRecoveryAuthority,
     LegacyDatabaseAuthorityConflictError,
     LegacyDatabaseRelocationRequiredError,

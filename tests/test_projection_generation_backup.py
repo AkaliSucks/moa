@@ -71,8 +71,8 @@ def test_backup_records_identity_and_proves_exact_restore_without_changing_sourc
     assert result.hypothetical_generation_id == 2
     assert len(result.preflight_fingerprint) == 64
     assert result.migration_identity[-1] == (
-        15,
-        "antidisable-reconstructibility-foundation",
+        16,
+        "roll-key-display-presence",
     )
     assert backup.read_bytes() == restore.read_bytes()
     assert source.read_bytes() == source_before
