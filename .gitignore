@@ -19,6 +19,7 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+.vs/
 
 # OS
 .DS_Store
@@ -30,6 +31,11 @@ Thumbs.db
 # Local database/cache
 data/cache/*
 data/database/*.db
+data/database/.vs/
+data/database/*.db-*
+data/database/*.db.*
+data/database/moa.db.bak-*
+data/database/moa.db.bak-full-reset-*
 
 # Build
 dist/
