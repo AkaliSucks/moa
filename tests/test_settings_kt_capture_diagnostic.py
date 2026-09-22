@@ -239,6 +239,10 @@ def test_interaction_and_embeds_use_only_bounded_fields(tmp_path: Path) -> None:
     assert command["source_kind"] == "interaction"
     assert response["source_shape"] == "embed"
     assert response["context_source"] == "interaction"
+    assert {
+        boundary["source"]
+        for boundary in response["parser_input_structure"]["flattening_boundaries"]
+    } == {"embed_description"}
     serialized = path.read_text(encoding="utf-8")
     scalar_values = {
         str(value) for record in (command, response) for value in _walk_scalar_values(record)
@@ -275,6 +279,163 @@ def test_sanitized_record_reaches_writer_and_aliases_are_stable(
     assert records[0]["command_alias"] == records[1]["command_alias"]
 
 
+def test_v2_structure_uses_the_exact_production_parser_input_seam(
+    tmp_path: Path, monkeypatch
+) -> None:
+    capture, path = _capture(tmp_path, "settings")
+    assert capture.capture_gateway_payload(_command("400", "$settings", "500"))
+    parser_inputs: list[str] = []
+    parser = capture._diagnostic._parser
+    original_parse = parser.parse_server_settings
+
+    def observed_parse(text: str):
+        parser_inputs.append(text)
+        return original_parse(text)
+
+    monkeypatch.setattr(parser, "parse_server_settings", observed_parse)
+    body = (
+        "PrivateGuild **Server Settings**\r\n"
+        "(Server not premium)\n"
+        "\u00b7\u00a0Prefix: $ ($prefix)\n"
+        "\u00b7 Lang: en ($lang)\n"
+        "\u00b7\u200b Claim reset: every **180** min. ($setclaim)\r\n"
+        "\u00b7 Exact minute of the reset: xx:14 ($setinterval)\n"
+        "\u00b7 Reset shifted: by +0 min. ($shifthour)\n"
+        "\u00b7 Rolls per hour: 10 ($setrolls)\n"
+        "\u00b7 Time before the claim reaction expires: 45 sec. ($settimer)\n"
+        "\u00b7 Spawn rarity multiplier for already claimed characters: 4 ($setrare)\n"
+        "\u00b7 % kakera bonus: +0 ($setkakerabonus)\n"
+        "\u00b7 % sphere bonus: +0 ($setspherebonus)\n"
+        "\u00b7 Game mode: 1 ($gamemode)\n"
+        "\u00b7 This channel instance: 1 ($channelinstance)\n"
+        "Private toggle prose must not persist: 987654321012345678"
+    )
+    assert capture.capture_gateway_payload(
+        _response(
+            "600",
+            body,
+            message_reference={"message_id": "500"},
+            guild_name="PrivateGuild",
+            channel_name="PrivateChannel",
+        )
+    )
+
+    response = _records(capture, path)[1]
+    assert parser_inputs == [body]
+    assert response["capture_schema_version"] == "moa.settings-kt-capture-diagnostic.v2"
+    structure = response["parser_input_structure"]
+    assert structure["source"] == "DiscordListenerService.extract_message_text"
+    assert structure["status"] == "COMPLETE"
+    lines = {line["line_kind"]: line for line in structure["retained_lines"]}
+    assert "**<NUMBER>**" in lines["claim_reset"]["sanitized_text"]
+    assert lines["claim_reset"]["line_ending_codepoints"] == ["U+000D", "U+000A"]
+    assert {item["codepoint"] for item in lines["prefix"]["non_ascii_codepoints"]} >= {
+        "U+00B7",
+        "U+00A0",
+    }
+    assert "U+200B" in {
+        item["codepoint"] for item in lines["claim_reset"]["non_ascii_codepoints"]
+    }
+    serialized = path.read_text(encoding="utf-8")
+    for forbidden in (
+        "PrivateGuild",
+        "PrivateChannel",
+        "private-profile",
+        "Private toggle prose",
+        "987654321012345678",
+        "180",
+    ):
+        assert forbidden not in serialized
+
+
+def test_plain_and_bold_numeric_settings_remain_structurally_distinct(tmp_path: Path) -> None:
+    outputs: list[str] = []
+    for index, value in enumerate(("180", "**180**")):
+        case_path = tmp_path / str(index)
+        case_path.mkdir()
+        capture, path = _capture(case_path, "settings")
+        assert capture.capture_gateway_payload(_command("400", "$settings", "500"))
+        body = SETTINGS.replace("180", value)
+        assert capture.capture_gateway_payload(
+            _response("600", body, message_reference={"message_id": "500"})
+        )
+        structure = _records(capture, path)[1]["parser_input_structure"]
+        claim_line = next(
+            line
+            for line in structure["retained_lines"]
+            if line["line_kind"] == "claim_reset"
+        )
+        outputs.append(claim_line["sanitized_text"])
+
+    assert "<NUMBER>" in outputs[0]
+    assert "**<NUMBER>**" in outputs[1]
+    assert outputs[0] != outputs[1]
+
+
+def test_kt_custom_emoji_transforms_preserve_shape_without_ids_or_perk_prose(
+    tmp_path: Path,
+) -> None:
+    capture, path = _capture(tmp_path, "kt")
+    assert capture.capture_gateway_payload(_command("400", "$kt", "500"))
+    tower_id = "469835869059153940"
+    kakera_id = "469835869059153941"
+    body = (
+        f"Your current level is:<:tow2:{tower_id}> (+ 1 tower)\n"
+        f"The next level costs **75,000**<a:kakera:{kakera_id}>\n"
+        f"You have 7,673<:kakera:{tower_id}>\n"
+        "List of perks\n"
+        "\u2611\ufe0f [5] Private perk prose 999"
+    )
+    assert capture.capture_gateway_payload(
+        _response("600", body, message_reference={"message_id": "500"})
+    )
+
+    response = _records(capture, path)[1]
+    structure = response["parser_input_structure"]
+    lines = {line["line_kind"]: line["sanitized_text"] for line in structure["retained_lines"]}
+    assert ":tow2:" in lines["current_tower_level"]
+    assert "**<NUMBER>**:kakera:" in lines["next_level_cost"]
+    assert "Private perk prose" not in json.dumps(structure)
+    transforms = structure["custom_emoji_transforms"]
+    assert {item["sanitized_source"] for item in transforms} == {
+        "<:tow2:<ID>>",
+        "<a:kakera:<ID>>",
+        "<:kakera:<ID>>",
+    }
+    serialized = path.read_text(encoding="utf-8")
+    assert tower_id not in serialized
+    assert kakera_id not in serialized
+    assert "75,000" not in serialized
+    assert "7,673" not in serialized
+
+
+def test_structural_sanitizer_failure_records_only_a_closed_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    capture, path = _capture(tmp_path, "settings")
+    assert capture.capture_gateway_payload(_command("400", "$settings", "500"))
+    diagnostic = capture._diagnostic
+
+    def unsafe_failure(*_args, **_kwargs):
+        raise RuntimeError(f"unsafe raw fallback: {SETTINGS}")
+
+    monkeypatch.setattr(diagnostic, "_sanitize_parser_input", unsafe_failure)
+    assert capture.capture_gateway_payload(
+        _response("600", SETTINGS, message_reference={"message_id": "500"})
+    )
+
+    response = _records(capture, path)[1]
+    assert response["parser_input_structure"] == {
+        "status": "SANITIZATION_UNREPRESENTABLE",
+        "source": "DiscordListenerService.extract_message_text",
+        "retained_lines": [],
+        "characterization_sufficient": False,
+    }
+    serialized = path.read_text(encoding="utf-8")
+    assert "unsafe raw fallback" not in serialized
+    assert "180" not in serialized
+
+
 def test_response_shape_and_input_limits_are_explicit(tmp_path: Path) -> None:
     capture, path = _capture(tmp_path, "settings")
     assert capture.capture_gateway_payload(_command("400", "$settings", "500"))
@@ -291,9 +452,17 @@ def test_response_shape_and_input_limits_are_explicit(tmp_path: Path) -> None:
     assert response["input_truncated"] is True
     assert response["parser_result"] == "not_evaluated_truncated"
     assert "PARSER_REJECTED" not in response["stages"]
+    assert response["parser_input_structure"]["status"] == "TRUNCATED"
+    assert response["parser_input_structure"]["characterization_sufficient"] is False
     assert response["limits"] == {
         "maximum_records": 128,
         "maximum_evaluated_text_characters": 32768,
+        "maximum_structural_lines": 16,
+        "maximum_structural_line_characters": 512,
+        "maximum_structural_characters": 4096,
+        "maximum_codepoints_per_line": 64,
+        "maximum_flattening_boundaries": 32,
+        "maximum_custom_emoji_transforms": 32,
     }
 
 
