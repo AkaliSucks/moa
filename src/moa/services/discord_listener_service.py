@@ -72,6 +72,7 @@ from moa.services.listener_process_guard import (
     ListenerProcessGuard,
     ListenerProcessGuardResourceError,
 )
+from moa.services.settings_kt_capture_diagnostic import SettingsKtCaptureDiagnostic
 from moa.services.ourochest_transition_service import OurochestTransitionService
 from moa.services.ourochest_workflow_coordinator import OurochestWorkflowCoordinator
 from moa.services.ourochest_workflow_service import (
@@ -145,6 +146,7 @@ class DiscordEventCaptureConfig:
     user_ids: frozenset[str]
     enabled: bool = False
     include_message_text: bool = False
+    diagnostic_family: str | None = None
 
 
 class DiscordEventCaptureError(RuntimeError):
@@ -193,11 +195,26 @@ class DiscordEventCaptureService:
         self._shutdown_task: asyncio.Task[None] | None = None
         self._close_attempted = False
         self._mudae_text_message_ids: set[str] = set()
+        self._diagnostic = (
+            SettingsKtCaptureDiagnostic(
+                family=config.diagnostic_family,
+                guild_id=config.guild_id,
+                channel_id=config.channel_id,
+                mudae_user_id=config.mudae_user_id,
+                user_ids=config.user_ids,
+            )
+            if config.diagnostic_family is not None
+            else None
+        )
 
     @staticmethod
     def _validate_config(config: DiscordEventCaptureConfig) -> None:
         if not config.enabled:
             raise ValueError("Diagnostic capture must be explicitly enabled.")
+        if config.diagnostic_family not in (None, "settings", "kt"):
+            raise ValueError("Diagnostic family must be settings or kt.")
+        if config.diagnostic_family is not None and config.include_message_text:
+            raise ValueError("Diagnostic capture cannot include message text.")
         if not isinstance(config.output_path, Path):
             raise ValueError("Diagnostic capture output path is required.")
         path = config.output_path.expanduser()
@@ -272,6 +289,19 @@ class DiscordEventCaptureService:
             return False
         if not self._matches_location(data):
             return False
+        if self._diagnostic is not None:
+            if self._sequence >= SettingsKtCaptureDiagnostic.MAX_RECORDS:
+                return False
+            try:
+                record = self._diagnostic.project(event_type, data)
+                if record is None:
+                    return False
+                self._write(record)
+            except DiscordEventCaptureError:
+                raise
+            except Exception as error:
+                self._fail(error)
+            return True
         if event_type == "MESSAGE_CREATE" and not self._matches_message_create(data):
             return False
         if event_type == "MESSAGE_UPDATE" and not self._matches_message_update(data):

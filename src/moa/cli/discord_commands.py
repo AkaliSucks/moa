@@ -90,6 +90,11 @@ def build_discord_app(
             "--capture-only",
             help="Run diagnostic Gateway capture only; do not initialize MOA imports or its database.",
         ),
+        capture_diagnostic: str | None = typer.Option(
+            None,
+            "--capture-diagnostic",
+            help="Capture bounded settings or kt ingestion diagnostics (requires --capture-only).",
+        ),
         capture_include_message_text: bool = typer.Option(
             False,
             "--capture-include-message-text",
@@ -113,12 +118,19 @@ def build_discord_app(
                 capture_channel_id is not None,
                 bool(capture_user_id),
                 capture_include_message_text,
+                capture_diagnostic is not None,
             )
         )
         if capture_requested and not capture_only:
             console.print("[red]Diagnostic capture options require --capture-only.[/red]")
             raise typer.Exit(1)
         if capture_only:
+            if capture_diagnostic not in (None, "settings", "kt"):
+                console.print("[red]--capture-diagnostic supports only settings or kt.[/red]")
+                raise typer.Exit(1)
+            if capture_diagnostic is not None and capture_include_message_text:
+                console.print("[red]--capture-diagnostic cannot include message text.[/red]")
+                raise typer.Exit(1)
             missing_filters = [
                 name
                 for name, value in (
@@ -174,6 +186,7 @@ def build_discord_app(
                         user_ids=frozenset(str(value) for value in capture_user_id),
                         enabled=True,
                         include_message_text=capture_include_message_text,
+                        diagnostic_family=capture_diagnostic,
                     )
                 ).run(token)
             except (DiscordEventCaptureError, ValueError) as error:
