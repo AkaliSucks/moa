@@ -11,74 +11,79 @@ refactor the repository unless explicitly requested.
 
 Model routing is advisory. Do not claim to have changed the active model.
 
-Before making changes, classify the task:
+Before making changes, classify the task and route it as follows.
 
-### Tier 1 — Luna Medium
-
-Use for:
-
-- Renaming
-- Formatting and spacing
-- Comments and documentation
-- Commit preparation
-- Tiny UI text or layout adjustments
-- Mechanical edits with an obvious implementation
-
-### Tier 2 — Luna High
+### GPT-6 Luna Medium
 
 Use for:
 
-- Clearly scoped bug fixes
-- Clearly scoped features
-- Changes primarily limited to one to three modules
-- Adding tests for established behavior
-- Ordinary Discord command parsing and UI work
+- Documentation
+- Comments
+- Mechanical refactors
+- Low-risk test cleanup
+- Formatting
+- Metadata work
 
-This is the default tier for MOA development.
+### GPT-6 Luna High
 
-### Tier 3 — Luna XHigh or Terra Medium
+Use for:
 
-Use Luna XHigh when the task is difficult but still narrowly scoped.
+- Normal scoped implementation
+- Parser repairs
+- CLI changes
+- Ordinary listener wiring
+- Service or repository features with already-characterized behavior
+- Focused test additions
 
-Recommend Terra Medium before editing when the task requires:
+This is the default tier for MOA implementation.
 
-- Exploring several unfamiliar parts of the repository
-- Tracing data through multiple layers
-- Diagnosing unclear state or concurrency behavior
-- Understanding an undocumented subsystem
-- Coordinating parser, database, bot, and UI changes
+### GPT-6 Sol High
 
-### Tier 4 — Terra High
+Use for:
 
-Recommend Terra High before editing when the task requires:
+- Independent read-only characterization
+- Independent review and closeout
+- Privacy-sensitive capture or tooling
+- Security-sensitive implementation
+- Correctness-sensitive data semantics
+- Subtle listener or parser investigations
+- Database or data-model work where a wrong assumption could corrupt meaning
+- Complex migration behavior
+- Source-authority or publication verification
 
-- A broad refactor
-- A new subsystem
-- Significant schema or API changes
-- Multiple interacting failures
-- Careful compatibility work across many modules
+For privacy-, data-, durability-, or security-sensitive implementation, use
+GPT-6 Sol High and use GPT-6 Sol High in a fresh session for independent
+closeout.
 
-### Tier 5 — Sol Medium
+### GPT-6 Sol Medium
 
-Recommend Sol Medium before editing only for:
+Use only for bounded runtime or operational source tasks after
+characterization has resolved the design. Privacy- or security-sensitive
+implementation routes to GPT-6 Sol High.
 
-- Architecture decisions with long-term consequences
-- Authentication or authorization
-- Security-sensitive code
-- Database migrations or possible data loss
-- Payment systems
-- Complex concurrency or distributed-state correctness
-- A difficult task that Terra attempted unsuccessfully with useful evidence
+### GPT-6 Astra
 
-### Sol High, XHigh, or Max
+Use only when work is genuinely cross-cutting, architecture-heavy, cannot be
+safely decomposed, and requires high reasoning across several subsystems. Do
+not use Astra for routine implementation.
 
-Never recommend these automatically.
+### Default workflow
 
-Only use them after explicit user approval and only when:
+- Characterization: GPT-6 Sol High, start a new session.
+- Implementation: GPT-6 Luna High, start a new session.
+- Independent closeout: GPT-6 Sol High, start a new session.
+- For privacy-, data-, durability-, or security-sensitive implementation:
+  use GPT-6 Sol High for implementation and GPT-6 Sol High in a new session
+  for independent closeout.
 
-- Lower tiers failed with documented evidence
-- The failure could cause security, data-loss, or major architectural damage
-- A genuinely difficult root-cause analysis remains unresolved
+Review independence comes from a fresh session and independent evidence and
+revalidation; it does not require a different model.
+
+An explicit user authorization may cross a model-routing recommendation
+where existing policy permits it. This exception applies only to model
+routing; it does not bypass source-authority gates, production safety,
+privacy controls, credential controls, destructive-operation safeguards,
+Git mutation authorization, or orchestrator authorization.
 
 ## Escalation behavior
 
