@@ -11,6 +11,8 @@ class ServerSettingsParser:
 
     _SERVER_PREMIUM = re.compile(r"Server\s+(?P<status>not\s+premium|premium)", re.IGNORECASE)
 
+    _BOLD_VALUE = re.compile(r"\*\*([^*\r\n]+)\*\*")
+
     _SETTING_LINE = re.compile(
         r"^\s*[^\w\s]*\s*(?P<label>.+?):\s*(?P<value>.+?)\s*\(\$[^)]*\)\s*$"
     )
@@ -35,6 +37,38 @@ class ServerSettingsParser:
 
     _SETTING_CHANNEL_INSTANCE = re.compile(r"This channel instance:\s*(?P<value>\d+)", re.IGNORECASE)
 
+    _SETTING_LABELS = frozenset(
+        {
+            "prefix",
+            "lang",
+            "claim reset",
+            "exact minute of the reset",
+            "reset shifted",
+            "rolls per hour",
+            "time before the claim reaction expires",
+            "spawn rarity multiplier for already claimed characters",
+            "kakera bonus",
+            "% kakera bonus",
+            "sphere bonus",
+            "% sphere bonus",
+            "game mode",
+            "this channel instance",
+        }
+    )
+
+    _CORE_SETTING_LABELS = {
+        _SETTING_CLAIM_RESET: frozenset({"claim reset"}),
+        _SETTING_RESET_MINUTE: frozenset({"exact minute of the reset"}),
+        _SETTING_RESET_SHIFT: frozenset({"reset shifted"}),
+        _SETTING_ROLLS: frozenset({"rolls per hour"}),
+        _SETTING_TIMER: frozenset({"time before the claim reaction expires"}),
+        _SETTING_RARE: frozenset({"spawn rarity multiplier for already claimed characters"}),
+        _SETTING_KAKERA_BONUS: frozenset({"kakera bonus", "% kakera bonus"}),
+        _SETTING_SPHERE_BONUS: frozenset({"sphere bonus", "% sphere bonus"}),
+        _SETTING_GAMEMODE: frozenset({"game mode"}),
+        _SETTING_CHANNEL_INSTANCE: frozenset({"this channel instance"}),
+    }
+
     def __init__(
         self,
         error_type: type[ValueError],
@@ -45,10 +79,19 @@ class ServerSettingsParser:
 
     def parse(self, text: str) -> ServerSettingsSnapshot:
         """Parse one copied Mudae ``$settings`` response."""
-        lines = self._lines(text)
+        lines = [self._normalize_setting_value(line) for line in self._lines(text)]
 
         def first(pattern: re.Pattern[str]) -> re.Match[str] | None:
-            return next((pattern.search(line) for line in lines if pattern.search(line)), None)
+            labels = self._CORE_SETTING_LABELS.get(pattern)
+            for line in lines:
+                if labels is not None:
+                    setting = self._SETTING_LINE.match(line)
+                    if setting is None or setting.group("label").strip().casefold() not in labels:
+                        continue
+                match = pattern.search(line)
+                if match is not None:
+                    return match
+            return None
 
         premium = first(self._SERVER_PREMIUM)
         claim_reset = first(self._SETTING_CLAIM_RESET)
@@ -81,6 +124,17 @@ class ServerSettingsParser:
                 "Expected a complete Mudae $settings response with core server rules; "
                 f"missing: {missing}."
             )
+        assert premium is not None
+        assert claim_reset is not None
+        assert reset_minute is not None
+        assert reset_shift is not None
+        assert rolls is not None
+        assert timer is not None
+        assert rare is not None
+        assert kakera_bonus is not None
+        assert sphere_bonus is not None
+        assert game_mode is not None
+        assert channel_instance is not None
 
         metrics: list[ServerSettingMetric] = []
         for line in lines:
@@ -112,3 +166,14 @@ class ServerSettingsParser:
             channel_instance=int(channel_instance.group("value")),
             metrics=tuple(metrics),
         )
+
+    @classmethod
+    def _normalize_setting_value(cls, line: str) -> str:
+        """Remove bold delimiters only from values on recognized settings rows."""
+        setting = cls._SETTING_LINE.match(line)
+        if setting is None or setting.group("label").strip().casefold() not in cls._SETTING_LABELS:
+            return line
+        value_start, value_end = setting.span("value")
+        value = line[value_start:value_end]
+        normalized_value = cls._BOLD_VALUE.sub(r"\1", value)
+        return line[:value_start] + normalized_value + line[value_end:]
