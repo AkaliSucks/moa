@@ -13,10 +13,10 @@ class TopParser:
     _TOP_ENTRY = re.compile(
         r"^(?:"
         r"\*\*#(?P<markdown_rank>[\d,]+)\*\*\s+-\s+"
-        r"\*\*(?P<markdown_name>.+?)\*\*"
+        r"\*\*(?P<markdown_name>(?:(?!\*\*).)+?)\*\*"
         r"|"
         r"#(?P<plain_rank>[\d,]+)\s+-\s+"
-        r"(?!\*\*)(?P<plain_name>.+?)(?<!\*\*)"
+        r"(?!\*\*)(?P<plain_name>(?:(?!\*\*).)+?)(?<!\*\*)"
         r")"
         r"(?:\s*(?:\U0001f49e|:heart:))?"
         r"(?:\s*=>\s*(?P<owner>.+?))?\s+-\s+(?P<series>.+)$"
