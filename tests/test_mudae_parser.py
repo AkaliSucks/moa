@@ -58,6 +58,22 @@ Image
 Page 1 / 67
 """
 
+CURRENT_MARKDOWN_TOP_PAGE = """🏆 TOP 1,000
+\u200b
+**#1** - **Synthetic Character**  💞 - Synthetic Series
+**#12** - **Another Character** - Another Series
+Image
+Page 1 / 2
+"""
+
+CURRENT_MARKDOWN_TOPO_PAGE = """🏆 TOP 1,000
+\u200b
+**#1** - **Synthetic Character**  💞 => synthetic_owner - Synthetic Series
+**#12** - **Another Character**  💞 - Another Series
+Image
+Page 1 / 2
+"""
+
 
 CHARACTER_DETAILS = """$im mai sakurajima
 Mudae
@@ -142,6 +158,70 @@ def test_parse_topo_page_preserves_claimed_owner_names() -> None:
     assert page.characters[0].name == "Hatsune Miku"
     assert page.characters[0].owner_name == "xuppii"
     assert page.characters[1].owner_name == "ernieuuu"
+
+
+def test_parse_current_markdown_top_page_preserves_row_semantics() -> None:
+    page = TopParser(MudaeParseError).parse(CURRENT_MARKDOWN_TOP_PAGE)
+    legacy = TopParser(MudaeParseError).parse(
+        "#1 - Synthetic Character 💞 - Synthetic Series\n"
+        "#12 - Another Character - Another Series"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 1
+    assert page.page_count == 2
+    assert [(character.claim_rank, character.name, character.series) for character in page.characters] == [
+        (1, "Synthetic Character", "Synthetic Series"),
+        (12, "Another Character", "Another Series"),
+    ]
+    assert page.characters == legacy.characters
+
+
+def test_parse_current_markdown_topo_keeps_owner_optional_and_server_scoped_name() -> None:
+    page = TopParser(MudaeParseError).parse(CURRENT_MARKDOWN_TOPO_PAGE)
+    legacy = TopParser(MudaeParseError).parse(
+        "#1 - Synthetic Character 💞 => synthetic_owner - Synthetic Series\n"
+        "#12 - Another Character 💞 - Another Series"
+    )
+
+    assert [(character.claim_rank, character.name, character.series) for character in page.characters] == [
+        (1, "Synthetic Character", "Synthetic Series"),
+        (12, "Another Character", "Another Series"),
+    ]
+    assert [character.owner_name for character in page.characters] == ["synthetic_owner", None]
+    assert page.characters == legacy.characters
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "**#1 - **Synthetic Character** - Synthetic Series",
+        "#1** - **Synthetic Character** - Synthetic Series",
+        "**#1** - Synthetic Character - Synthetic Series",
+        "#1 - **Synthetic Character - Synthetic Series",
+        "#1 - Synthetic Character** - Synthetic Series",
+        "#x - Synthetic Character - Synthetic Series",
+        "#1 - Synthetic Character -",
+        "#1=>synthetic_owner - Synthetic Character - Synthetic Series",
+        "**Announcement** is not a ranked row",
+        "**#1** - **Synthetic Character**",
+    ],
+)
+def test_top_parser_rejects_malformed_or_incomplete_rows(row: str) -> None:
+    with pytest.raises(MudaeParseError, match="No ranked characters"):
+        TopParser(MudaeParseError).parse(f"🏆 TOP 1000\n{row}\nPage 1 / 2")
+
+
+def test_top_parser_does_not_read_malformed_header_or_page_as_metadata() -> None:
+    page = TopParser(MudaeParseError).parse(
+        "🏆 TOP **1,000**\n"
+        "#1 - Synthetic Character - Synthetic Series\n"
+        "Page 1 of 2"
+    )
+
+    assert page.limit is None
+    assert page.page_number is None
+    assert page.page_count is None
 
 
 def test_parse_top_page_facade_matches_dedicated_parser() -> None:

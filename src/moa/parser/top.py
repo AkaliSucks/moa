@@ -11,7 +11,14 @@ class TopParser:
 
     _TOP_HEADER = re.compile(r"\bTOP\s+(?P<limit>[\d,]+)\b", re.IGNORECASE)
     _TOP_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+(?P<name>.+?)"
+        r"^(?:"
+        r"\*\*#(?P<markdown_rank>[\d,]+)\*\*\s+-\s+"
+        r"\*\*(?P<markdown_name>.+?)\*\*"
+        r"|"
+        r"#(?P<plain_rank>[\d,]+)\s+-\s+"
+        r"(?!\*\*)(?P<plain_name>.+?)(?<!\*\*)"
+        r")"
+        r"(?:\s*(?:\U0001f49e|:heart:))?"
         r"(?:\s*=>\s*(?P<owner>.+?))?\s+-\s+(?P<series>.+)$"
     )
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
@@ -47,11 +54,13 @@ class TopParser:
             entry = self._TOP_ENTRY.match(line)
             if entry is None:
                 continue
+            rank = entry.group("markdown_rank") or entry.group("plain_rank")
+            name = entry.group("markdown_name") or entry.group("plain_name")
             characters.append(
                 RankedCharacter(
-                    name=self._HEART.sub("", entry.group("name")).strip(),
+                    name=self._HEART.sub("", name).strip(),
                     series=entry.group("series").strip(),
-                    claim_rank=self._number(entry.group("rank")),
+                    claim_rank=self._number(rank),
                     owner_name=entry.group("owner").strip() if entry.group("owner") else None,
                 )
             )
