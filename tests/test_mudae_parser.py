@@ -2035,6 +2035,35 @@ def test_parse_tower_state_accepts_current_markdown_for_registered_aliases(
     assert state.kakera_balance == 1
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("(+ **1** tower)", "(+ 1 tower)"),
+        ("(+ **2** towers)", "(+ 2 towers)"),
+        ("next level costs **1**:kakera:", "next level costs 1:kakera:"),
+        ("You have **1**:kakera:", "You have 1:kakera:"),
+    ),
+)
+def test_tower_markdown_normalizer_accepts_only_characterized_pairings(
+    text: str, expected: str
+) -> None:
+    assert TowerStateParser._normalize_markdown_numbers(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "You have **1** towers)",
+        "next level costs **2** towers)",
+        "(+ **3**:kakera:)",
+    ),
+)
+def test_tower_markdown_normalizer_leaves_mismatched_pairings_untouched(
+    text: str,
+) -> None:
+    assert TowerStateParser._normalize_markdown_numbers(text) == text
+
+
 def test_parse_tower_state_accepts_normalized_custom_emoji_markdown() -> None:
     state = MudaeTextParser().parse_tower_state(
         "Your current level is :tow2: (+ **2** towers)\n"

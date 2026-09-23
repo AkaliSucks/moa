@@ -16,11 +16,22 @@ class TowerStateParser:
     _TOWER_NEXT_COST = re.compile(
         r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
     )
-    _TOWER_MARKDOWN_NUMBER = re.compile(
-        r"(?P<prefix>\(\+\s+|next level costs\s+|You have\s+)"
-        r"\*\*(?P<value>[\d,]+)\*\*"
-        r"(?P<suffix>\s+towers?\)|:kakera:)",
-        re.IGNORECASE,
+    _TOWER_MARKDOWN_NUMBERS = (
+        re.compile(
+            r"(?P<prefix>\(\+\s+)\*\*(?P<value>[\d,]+)\*\*"
+            r"(?P<suffix>\s+towers?\))",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?P<prefix>next level costs\s+)\*\*(?P<value>[\d,]+)\*\*"
+            r"(?P<suffix>:kakera:)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?P<prefix>You have\s+)\*\*(?P<value>[\d,]+)\*\*"
+            r"(?P<suffix>:kakera:)",
+            re.IGNORECASE,
+        ),
     )
     _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
     _ERROR_MESSAGE = (
@@ -42,9 +53,7 @@ class TowerStateParser:
     def parse(self, text: str) -> TowerStateSnapshot:
         """Parse one copied Mudae ``$kt`` response."""
         lines = [
-            self._TOWER_MARKDOWN_NUMBER.sub(
-                r"\g<prefix>\g<value>\g<suffix>", line
-            )
+            self._normalize_markdown_numbers(line)
             for line in self._lines(text)
         ]
 
@@ -82,3 +91,9 @@ class TowerStateParser:
             kakera_balance=self._number(balance.group("value")),
             built_perk_ids=tuple(built_perks),
         )
+
+    @classmethod
+    def _normalize_markdown_numbers(cls, line: str) -> str:
+        for pattern in cls._TOWER_MARKDOWN_NUMBERS:
+            line = pattern.sub(r"\g<prefix>\g<value>\g<suffix>", line)
+        return line
