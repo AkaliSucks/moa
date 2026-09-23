@@ -16,6 +16,12 @@ class TowerStateParser:
     _TOWER_NEXT_COST = re.compile(
         r"next level costs\s+(?P<value>[\d,]+):kakera:", re.IGNORECASE
     )
+    _TOWER_MARKDOWN_NUMBER = re.compile(
+        r"(?P<prefix>\(\+\s+|next level costs\s+|You have\s+)"
+        r"\*\*(?P<value>[\d,]+)\*\*"
+        r"(?P<suffix>\s+towers?\)|:kakera:)",
+        re.IGNORECASE,
+    )
     _TOWER_PERK = re.compile(r"^.*?\[(?P<id>\d+)\]")
     _ERROR_MESSAGE = (
         "Expected a Mudae $kt response with current level, next cost, and balance."
@@ -35,7 +41,12 @@ class TowerStateParser:
 
     def parse(self, text: str) -> TowerStateSnapshot:
         """Parse one copied Mudae ``$kt`` response."""
-        lines = self._lines(text)
+        lines = [
+            self._TOWER_MARKDOWN_NUMBER.sub(
+                r"\g<prefix>\g<value>\g<suffix>", line
+            )
+            for line in self._lines(text)
+        ]
 
         level = next(
             (match for line in lines if (match := self._TOWER_LEVEL.search(line))),

@@ -2014,6 +2014,59 @@ def test_parse_tower_state_preserves_textual_zero_completed_tower_count() -> Non
     assert state.completed_towers == 0
 
 
+@pytest.mark.parametrize("token", ("$kt", "$tower"))
+def test_parse_tower_state_accepts_current_markdown_for_registered_aliases(
+    token: str,
+) -> None:
+    match = COMMAND_REGISTRY.lookup(token)
+    assert match is not None
+    assert match.expected_response == "towerstate"
+
+    state = MudaeTextParser().parse_tower_state(
+        "Your current level is:tow1: (+ **1** tower)\n"
+        "The next level costs **1**:kakera:\n"
+        "You have **1**:kakera:\n"
+        "List of perks X X X X:"
+    )
+
+    assert state.current_level == 1
+    assert state.completed_towers == 1
+    assert state.next_level_cost == 1
+    assert state.kakera_balance == 1
+
+
+def test_parse_tower_state_accepts_normalized_custom_emoji_markdown() -> None:
+    state = MudaeTextParser().parse_tower_state(
+        "Your current level is :tow2: (+ **2** towers)\n"
+        "The next level costs **2,500**:kakera:\n"
+        "You have **7,500**:kakera:"
+    )
+
+    assert state.current_level == 2
+    assert state.completed_towers == 2
+    assert state.next_level_cost == 2500
+    assert state.kakera_balance == 7500
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("cost", "balance"),
+)
+def test_parse_tower_state_markdown_does_not_fill_missing_required_fields(
+    missing_field: str,
+) -> None:
+    cost = "" if missing_field == "cost" else "The next level costs **2**:kakera:\n"
+    balance = "" if missing_field == "balance" else "You have **3**:kakera:\n"
+    text = (
+        "Your current level is:tow1: (+ **1** tower)\n"
+        "Unrelated Markdown **2**:kakera:\n"
+        f"{cost}{balance}"
+    )
+
+    with pytest.raises(MudaeParseError):
+        MudaeTextParser().parse_tower_state(text)
+
+
 def test_tower_state_parser_preserves_first_matches_and_checked_perk_order() -> None:
     text = (
         "Your current level is:tow0: (+ 0 tower)\n"
