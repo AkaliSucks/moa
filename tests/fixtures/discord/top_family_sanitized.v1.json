@@ -1,0 +1,6 @@
+{
+  "provenance": "Sanitized Mudae response shapes retained in test_mudae_parser.py; topx uses the observed Discord unavailable marker from test_discord_listener_service.py.",
+  "top": "🏆 TOP 1000\n#1 - Hatsune Miku - VOCALOID\n#2 - Zero Two - DARLING in the FRANXX\nPage 1 / 67",
+  "topo": "🏆 TOP 1000\n#1 - Hatsune Miku 💞 => owner_a - VOCALOID\n#2 - Zero Two 💞 => owner_b - DARLING in the FRANXX\nPage 1 / 67",
+  "topx": "🏆 TOP 1000\n#10 - 2B - NieR: Automata 🚫\n#88 - Venom - Marvel 🚫 ($togglewestern)\nPage 1 / 67"
+}

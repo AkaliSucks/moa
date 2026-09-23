@@ -56,6 +56,8 @@ TIMER_STATE_PROJECTION: Final = ProjectionKindAuthority(
 TOWER_STATE_PROJECTION: Final = ProjectionKindAuthority(
     "catalog.tower_state", "tower_state_observations"
 )
+TOP_PAGE_PROJECTION: Final = ProjectionKindAuthority("catalog.top_page", "import_events")
+TOPX_PAGE_PROJECTION: Final = ProjectionKindAuthority("catalog.topx_page", "import_events")
 WISHLIST_PROJECTION: Final = ProjectionKindAuthority("catalog.wishlist", "wishlist_observations")
 
 PROJECTION_AUTHORITIES: Final[tuple[ProjectionKindAuthority, ...]] = (
@@ -76,6 +78,8 @@ PROJECTION_AUTHORITIES: Final[tuple[ProjectionKindAuthority, ...]] = (
     SPHERE_RESULT_PROJECTION,
     TIMER_STATE_PROJECTION,
     TOWER_STATE_PROJECTION,
+    TOP_PAGE_PROJECTION,
+    TOPX_PAGE_PROJECTION,
     WISHLIST_PROJECTION,
 )
 

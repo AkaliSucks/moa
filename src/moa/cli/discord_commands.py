@@ -38,6 +38,7 @@ from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.top_page_projection_coordinator import TopPageProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
@@ -270,6 +271,10 @@ def build_discord_app(
                     catalog_repository,
                     discord_message_repository,
                 )
+                top_page_projection_coordinator = TopPageProjectionCoordinator(
+                    catalog_repository,
+                    discord_message_repository,
+                )
                 importer = AutomaticImportService(
                     catalog_service,
                     roll_projection_coordinator=roll_projection_coordinator,
@@ -286,6 +291,7 @@ def build_discord_app(
                     disablelist_projection_coordinator=disablelist_projection_coordinator,
                     wishlist_projection_coordinator=wishlist_projection_coordinator,
                     antidisable_page_projection_coordinator=antidisable_page_projection_coordinator,
+                    top_page_projection_coordinator=top_page_projection_coordinator,
                 )
                 DiscordListenerService(
                     config_service=config_service,

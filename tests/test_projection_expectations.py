@@ -37,12 +37,14 @@ EXPECTED_FAMILY_KINDS = {
     "server_settings": ("catalog.server_settings",),
     "sphere_result": ("catalog.sphere_result",),
     "timer_state": ("catalog.timer_state",),
+    "top_page": ("catalog.top_page",),
+    "topx_page": ("catalog.topx_page",),
     "tower_state": ("catalog.tower_state",),
     "wishlist": ("catalog.wishlist",),
 }
 
 
-def test_policy_registry_has_exact_fifteen_family_eighteen_kind_inventory() -> None:
+def test_policy_registry_has_exact_seventeen_family_twenty_kind_inventory() -> None:
     assert {
         family: policy.possible_projection_kinds
         for family, policy in PROJECTION_EXPECTATION_POLICIES.items()
@@ -52,8 +54,8 @@ def test_policy_registry_has_exact_fifteen_family_eighteen_kind_inventory() -> N
         for policy in PROJECTION_EXPECTATION_POLICIES.values()
         for kind in policy.possible_projection_kinds
     )
-    assert len(PROJECTION_EXPECTATION_POLICIES) == 15
-    assert len(owned_kind_sequence) == len(set(owned_kind_sequence)) == 18
+    assert len(PROJECTION_EXPECTATION_POLICIES) == 17
+    assert len(owned_kind_sequence) == len(set(owned_kind_sequence)) == 20
     assert set(owned_kind_sequence) == set(PROJECTION_AUTHORITY_BY_KIND)
     with pytest.raises(TypeError):
         PROJECTION_EXPECTATION_POLICIES["other"] = next(
@@ -90,6 +92,20 @@ def test_policy_registry_has_exact_fifteen_family_eighteen_kind_inventory() -> N
             " Server ",
             " Account ",
             "catalog.disablelist",
+            '{"account":"account","server":"server"}',
+        ),
+        (
+            "top_page",
+            " Server ",
+            None,
+            "catalog.top_page",
+            '{"server":"server"}',
+        ),
+        (
+            "topx_page",
+            " Server ",
+            " Account ",
+            "catalog.topx_page",
             '{"account":"account","server":"server"}',
         ),
     ),

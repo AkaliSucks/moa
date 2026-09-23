@@ -30,8 +30,23 @@ from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.top_page_projection_coordinator import TopPageProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
+
+
+@dataclass(frozen=True, slots=True)
+class DurableTopPageImportContext:
+    """Durable lifecycle and source scope for one top-family page."""
+
+    source_event_id: int
+    attempt_id: int | None
+    server: str
+    account: str | None
+    raw: str
+    source: str
+    observed_at: datetime
+    finished_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +257,7 @@ class AutomaticImportService:
         wishlist_projection_coordinator: WishlistProjectionCoordinator | None = None,
         disablelist_projection_coordinator: DisableListProjectionCoordinator | None = None,
         antidisable_page_projection_coordinator: AntidisablePageProjectionCoordinator | None = None,
+        top_page_projection_coordinator: TopPageProjectionCoordinator | None = None,
     ) -> None:
         self._catalog = catalog_service or CatalogService()
         self._parser = parser or MudaeTextParser()
@@ -261,6 +277,7 @@ class AutomaticImportService:
         self._wishlist_projection_coordinator = wishlist_projection_coordinator
         self._disablelist_projection_coordinator = disablelist_projection_coordinator
         self._antidisable_page_projection_coordinator = antidisable_page_projection_coordinator
+        self._top_page_projection_coordinator = top_page_projection_coordinator
 
     @property
     def durable_database_paths(self) -> frozenset[Path]:
@@ -282,6 +299,7 @@ class AutomaticImportService:
             self._wishlist_projection_coordinator,
             self._disablelist_projection_coordinator,
             self._antidisable_page_projection_coordinator,
+            self._top_page_projection_coordinator,
         )
         for coordinator in coordinators:
             if coordinator is not None:
@@ -313,6 +331,7 @@ class AutomaticImportService:
         durable_wishlist_context: DurableWishlistImportContext | None = None,
         durable_disablelist_context: DurableDisableListImportContext | None = None,
         durable_antidisable_page_context: DurableAntidisablePageImportContext | None = None,
+        durable_top_page_context: DurableTopPageImportContext | None = None,
     ) -> AutomaticImportResult:
         """Detect and import one supported message, or explain why it cannot be routed."""
         kind = detected_kind or self._router.detect(raw_message).kind
@@ -326,16 +345,38 @@ class AutomaticImportService:
                 message=f"Observed Mudae {label}; no catalog data imported.",
             )
         if kind == "top":
-            result = self._catalog.import_top_page(
-                self._parser.parse_top_page(raw_message),
-                raw_message,
-                source,
-                server_name,
-            )
+            top_page = self._parser.parse_top_page(raw_message)
+            if durable_top_page_context is None:
+                top_result = self._catalog.import_top_page(top_page, raw_message, source, server_name)
+                top_imported_count = top_result.characters_imported
+                top_import_event_id = top_result.import_event_id
+                top_replay_skipped = False
+                top_success_recorded = False
+            else:
+                top_coordinator = self._top_page_projection_coordinator
+                if top_coordinator is None:
+                    raise RuntimeError("A TopPageProjectionCoordinator is required for a durable top import.")
+                top_coordinated = top_coordinator.coordinate_top_page(
+                    source_event_id=durable_top_page_context.source_event_id,
+                    attempt_id=durable_top_page_context.attempt_id,
+                    page=top_page,
+                    server=durable_top_page_context.server,
+                    raw=durable_top_page_context.raw,
+                    source=durable_top_page_context.source,
+                    observed_at=durable_top_page_context.observed_at,
+                    finished_at=durable_top_page_context.finished_at,
+                )
+                top_imported_count = top_coordinated.imported_count
+                top_import_event_id = top_coordinated.import_event_id
+                top_replay_skipped = top_coordinated.replay_skipped
+                top_success_recorded = top_coordinated.durable_success_recorded
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=result.characters_imported,
-                message=f"Imported {result.characters_imported} ranked characters.",
+                imported_count=top_imported_count,
+                message=f"Imported {top_imported_count} ranked characters.",
+                import_event_id=top_import_event_id,
+                replay_skipped=top_replay_skipped,
+                durable_success_recorded=top_success_recorded,
             )
 
         if kind == "antidisable" and durable_antidisable_page_context is not None:
@@ -926,12 +967,43 @@ class AutomaticImportService:
                 durable_success_recorded=durable_success_recorded,
             )
         if kind == "topx":
-            page = self._parser.parse_unavailable_characters(raw_message)
-            result = self._catalog.import_unavailable_characters(page, server, account, raw_message, source)
+            topx_page = self._parser.parse_unavailable_characters(raw_message)
+            if durable_top_page_context is None:
+                topx_result = self._catalog.import_unavailable_characters(
+                    topx_page, server, account, raw_message, source
+                )
+                topx_imported_count = topx_result.characters_imported
+                topx_import_event_id = topx_result.import_event_id
+                topx_replay_skipped = False
+                topx_success_recorded = False
+            else:
+                topx_coordinator = self._top_page_projection_coordinator
+                if topx_coordinator is None:
+                    raise RuntimeError("A TopPageProjectionCoordinator is required for a durable topx import.")
+                if durable_top_page_context.account is None:
+                    raise ValueError("A durable topx import requires an account.")
+                topx_coordinated = topx_coordinator.coordinate_topx_page(
+                    source_event_id=durable_top_page_context.source_event_id,
+                    attempt_id=durable_top_page_context.attempt_id,
+                    page=topx_page,
+                    server=durable_top_page_context.server,
+                    account=durable_top_page_context.account,
+                    raw=durable_top_page_context.raw,
+                    source=durable_top_page_context.source,
+                    observed_at=durable_top_page_context.observed_at,
+                    finished_at=durable_top_page_context.finished_at,
+                )
+                topx_imported_count = topx_coordinated.imported_count
+                topx_import_event_id = topx_coordinated.import_event_id
+                topx_replay_skipped = topx_coordinated.replay_skipped
+                topx_success_recorded = topx_coordinated.durable_success_recorded
             return AutomaticImportResult(
                 kind=kind,
-                imported_count=result.characters_imported,
+                imported_count=topx_imported_count,
                 message="Imported unavailable-character observations.",
+                import_event_id=topx_import_event_id,
+                replay_skipped=topx_replay_skipped,
+                durable_success_recorded=topx_success_recorded,
             )
         if kind == "kakera":
             state = self._parser.parse_kakera_state(raw_message)

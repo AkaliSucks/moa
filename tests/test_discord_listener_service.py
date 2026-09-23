@@ -64,6 +64,7 @@ from moa.services.roll_projection_coordinator import RollProjectionCoordinator
 from moa.services.settings_projection_coordinator import SettingsProjectionCoordinator
 from moa.services.sphere_result_projection_coordinator import SphereResultProjectionCoordinator
 from moa.services.timer_projection_coordinator import TimerProjectionCoordinator
+from moa.services.top_page_projection_coordinator import TopPageProjectionCoordinator
 from moa.services.tower_state_projection_coordinator import TowerStateProjectionCoordinator
 from moa.services.wishlist_projection_coordinator import WishlistProjectionCoordinator
 
@@ -2756,6 +2757,10 @@ def _listener_with_two_configured_users(tmp_path):
             catalog_repository,
             discord_repository,
         ),
+        top_page_projection_coordinator=TopPageProjectionCoordinator(
+            catalog_repository,
+            discord_repository,
+        ),
         kakeraloot_state_projection_coordinator=KakeralootStateProjectionCoordinator(
             catalog_repository,
             discord_repository,
@@ -3304,6 +3309,76 @@ def test_listener_classifies_actual_topx_marker_for_topx_context(tmp_path) -> No
     raw_message = "🏆 TOP 1000\n#10 - 2B - NieR: Automata 🚫\nPage 1 / 67"
 
     assert listener._resolve_message_kind("topx", raw_message) == "topx"
+
+
+def _sanitized_top_family_message(fixture: str, command: str, message_id: int, user_id: int = 456):
+    captures = json.loads(
+        (Path(__file__).parent / "fixtures" / "discord" / "top_family_sanitized.v1.json")
+        .read_text(encoding="utf-8")
+    )
+    return SimpleNamespace(
+        id=message_id,
+        guild=SimpleNamespace(id=123),
+        channel=SimpleNamespace(id=900),
+        author=SimpleNamespace(bot=True, id=999),
+        interaction_metadata=SimpleNamespace(name=command, user=SimpleNamespace(id=user_id)),
+        content=captures[fixture],
+        embeds=(),
+        edited_at=None,
+    )
+
+
+@pytest.mark.parametrize(("fixture", "command", "import_kind"), [
+    ("top", "top", "top_page"),
+    ("topo", "topo", "top_page"),
+    ("topx", "topx", "topx_page"),
+])
+def test_listener_top_family_durable_replay_after_restart(
+    tmp_path, fixture: str, command: str, import_kind: str
+) -> None:
+    listener, _catalog, database_path = _durable_listener(tmp_path)
+    message = _sanitized_top_family_message(fixture, command, 1601)
+    asyncio.run(listener.handle_bot_response(message))
+    with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT kind FROM import_events"
+        ).fetchone()[0] == import_kind
+        assert connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchone()[0] == "succeeded"
+        first_counts = tuple(connection.execute(
+            f"SELECT COUNT(*) FROM {table}"
+        ).fetchone()[0] for table in (
+            "import_events", "rank_snapshots", "top_owner_observations",
+            "unavailable_character_observations", "discord_projection_links",
+        ))
+    restarted, _catalog, _ = _durable_listener(tmp_path)
+    asyncio.run(restarted.handle_bot_response(message))
+    with connect(database_path) as connection:
+        assert first_counts == tuple(connection.execute(
+            f"SELECT COUNT(*) FROM {table}"
+        ).fetchone()[0] for table in (
+            "import_events", "rank_snapshots", "top_owner_observations",
+            "unavailable_character_observations", "discord_projection_links",
+        ))
+    assert first_counts[0] == first_counts[4] == 1
+    assert first_counts[1] == 2
+
+
+def test_listener_topx_two_users_in_one_channel_keep_separate_source_events(tmp_path) -> None:
+    listener, catalog = _listener_with_two_configured_users(tmp_path)
+    first = _sanitized_top_family_message("topx", "topx", 1602, 456)
+    second = _sanitized_top_family_message("topx", "topx", 1603, 789)
+    asyncio.run(listener.handle_bot_response(first))
+    asyncio.run(listener.handle_bot_response(second))
+    assert len(catalog.unavailable_characters("Test Server", "user_a")) == 2
+    assert len(catalog.unavailable_characters("Test Server", "user_b")) == 2
+    with connect(tmp_path / "catalog.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 2
+        assert connection.execute("SELECT COUNT(*) FROM rank_snapshots").fetchone()[0] == 4
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_events WHERE status = 'succeeded'"
+        ).fetchone()[0] == 2
 
 
 def test_extract_message_text_normalizes_discord_custom_emojis() -> None:
@@ -3913,6 +3988,10 @@ def _durable_listener(tmp_path, *, importer=None):
                 repository,
             ),
             antidisable_page_projection_coordinator=AntidisablePageProjectionCoordinator(
+                catalog_repository,
+                repository,
+            ),
+            top_page_projection_coordinator=TopPageProjectionCoordinator(
                 catalog_repository,
                 repository,
             ),

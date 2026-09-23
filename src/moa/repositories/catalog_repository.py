@@ -683,7 +683,28 @@ class CatalogRepository:
             raise ValueError("A `$topo` import with owner claims requires --server.")
 
         observed_at = datetime.now(timezone.utc)
-        def import_with_connection(connection: sqlite3.Connection) -> TopImportResult:
+        return run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_top_page_with_connection(
+                connection, page, raw_message, source, server_name, observed_at
+            ),
+        )
+
+    def _import_top_page_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        page: TopPage,
+        raw_message: str,
+        source: str,
+        server_name: str | None,
+        observed_at: datetime,
+    ) -> TopImportResult:
+        """Import a top page within a caller-owned transaction."""
+        if any(character.owner_name for character in page.characters) and (
+            not server_name or not server_name.strip()
+        ):
+            raise ValueError("A `$topo` import with owner claims requires --server.")
+        def import_with_connection() -> TopImportResult:
             cursor = connection.execute(
                 """
                 INSERT INTO import_events (kind, source, observed_at, raw_message)
@@ -743,7 +764,7 @@ class CatalogRepository:
                 observed_at=observed_at,
             )
 
-        return run_write_transaction(self._database_path, import_with_connection)
+        return import_with_connection()
 
     def import_character_details(
         self,
@@ -2016,8 +2037,25 @@ class CatalogRepository:
     ) -> RollabilityImportResult:
         """Store direct Mudae evidence that characters cannot currently roll."""
         observed_at = datetime.now(timezone.utc)
+        return run_write_transaction(
+            self._database_path,
+            lambda connection: self._import_unavailable_characters_with_connection(
+                connection, page, server_name, account_name, raw_message, source, observed_at
+            ),
+        )
 
-        def import_with_connection(connection: sqlite3.Connection) -> RollabilityImportResult:
+    def _import_unavailable_characters_with_connection(
+        self,
+        connection: sqlite3.Connection,
+        page: UnavailableCharacterPage,
+        server_name: str,
+        account_name: str,
+        raw_message: str,
+        source: str,
+        observed_at: datetime,
+    ) -> RollabilityImportResult:
+        """Import an unavailable page within a caller-owned transaction."""
+        def import_with_connection() -> RollabilityImportResult:
             cursor = connection.execute(
                 "INSERT INTO import_events (kind, source, observed_at, raw_message) VALUES (?, ?, ?, ?)",
                 ("topx_page", source, observed_at.isoformat(), raw_message),
@@ -2058,7 +2096,7 @@ class CatalogRepository:
                 observed_at=observed_at,
             )
 
-        return run_write_transaction(self._database_path, import_with_connection)
+        return import_with_connection()
 
     def unavailable_characters(
         self, server_name: str, account_name: str

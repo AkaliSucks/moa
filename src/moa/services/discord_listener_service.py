@@ -55,6 +55,7 @@ from moa.services.automatic_import_service import (
     DurableSettingsImportContext,
     DurableSphereResultImportContext,
     DurableTimerImportContext,
+    DurableTopPageImportContext,
     DurableTowerStateImportContext,
     DurableWishlistImportContext,
 )
@@ -780,6 +781,8 @@ class DiscordListenerService:
         "settings",
         "sphere_result",
         "timers",
+        "top",
+        "topx",
         "towerstate",
         "lootstate",
         "wishlist",
@@ -794,6 +797,7 @@ class DiscordListenerService:
         "sphere_result",
         "roll",
         "timers",
+        "topx",
         "towerstate",
         "lootstate",
         "wishlist",
@@ -1854,6 +1858,22 @@ class DiscordListenerService:
                         ),
                         server=import_identity.server,
                         account=import_identity.account,
+                        raw=raw_message,
+                        source=source,
+                        observed_at=observed_at,
+                        finished_at=finished_at,
+                    )
+                elif kind in {"top", "topx"}:
+                    assert import_identity is not None
+                    import_kwargs["durable_top_page_context"] = DurableTopPageImportContext(
+                        source_event_id=received_event.source_event_id,
+                        attempt_id=(
+                            processing_attempt.attempt_id
+                            if processing_attempt is not None
+                            else None
+                        ),
+                        server=import_identity.server,
+                        account=import_identity.account if kind == "topx" else None,
                         raw=raw_message,
                         source=source,
                         observed_at=observed_at,

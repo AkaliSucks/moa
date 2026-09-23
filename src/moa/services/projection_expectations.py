@@ -454,6 +454,12 @@ _POLICIES: Final[tuple[ProjectionExpectationPolicy, ...]] = (
         "tower_state", ("catalog.tower_state",), _account_singleton("catalog.tower_state")
     ),
     ProjectionExpectationPolicy(
+        "top_page", ("catalog.top_page",), _server_singleton("catalog.top_page")
+    ),
+    ProjectionExpectationPolicy(
+        "topx_page", ("catalog.topx_page",), _account_singleton("catalog.topx_page")
+    ),
+    ProjectionExpectationPolicy(
         "wishlist", ("catalog.wishlist",), _account_singleton("catalog.wishlist")
     ),
 )
@@ -782,8 +788,8 @@ def load_durable_projection_expectation_facts(
     return ProjectionExpectationFacts(source_family, server, account)
 
 
-if len(PROJECTION_EXPECTATION_POLICIES) != 15:
-    raise RuntimeError("projection expectation registry must own exactly 15 families")
+if len(PROJECTION_EXPECTATION_POLICIES) != 17:
+    raise RuntimeError("projection expectation registry must own exactly 17 families")
 _owned_kind_sequence = tuple(
     kind
     for policy in PROJECTION_EXPECTATION_POLICIES.values()

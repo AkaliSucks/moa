@@ -27,14 +27,16 @@ EXPECTED_KIND_TARGETS = {
     "catalog.server_settings": "server_settings_observations",
     "catalog.sphere_result": "sphere_result_observations",
     "catalog.timer_state": "timer_state_observations",
+    "catalog.top_page": "import_events",
+    "catalog.topx_page": "import_events",
     "catalog.tower_state": "tower_state_observations",
     "catalog.wishlist": "wishlist_observations",
 }
 
 
-def test_projection_authority_has_exact_eighteen_kind_target_pairs() -> None:
-    assert len(PROJECTION_AUTHORITIES) == 18
-    assert len({authority.projection_kind for authority in PROJECTION_AUTHORITIES}) == 18
+def test_projection_authority_has_exact_twenty_kind_target_pairs() -> None:
+    assert len(PROJECTION_AUTHORITIES) == 20
+    assert len({authority.projection_kind for authority in PROJECTION_AUTHORITIES}) == 20
     assert {
         authority.projection_kind: authority.target_table for authority in PROJECTION_AUTHORITIES
     } == EXPECTED_KIND_TARGETS
