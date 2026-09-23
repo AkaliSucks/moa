@@ -1331,6 +1331,23 @@ class DiscordListenerService:
         received_event = self._receive_message(message, raw_message)
         if self._discord_message_repository is not None and received_event is None:
             return
+        if received_event is not None and received_event.status == "succeeded":
+            metadata = getattr(message, "interaction_metadata", None)
+            command_name = getattr(metadata, "name", None)
+            if command_name is None:
+                command_name = getattr(getattr(metadata, "command", None), "name", None)
+            if command_name is not None:
+                command_match = self._listener_command_match(
+                    command_name, InvocationSource.INTERACTION_NAME
+                )
+                replay_kind = self._expected_response_for_command_match(command_match)
+                if replay_kind in {"top", "topx"}:
+                    self._logger.info(
+                        "Skipped completed durable %s source event %s before import",
+                        replay_kind,
+                        received_event.source_event_id,
+                    )
+                    return
         persisted_attribution = None
         if received_event is not None:
             try:
@@ -1390,6 +1407,17 @@ class DiscordListenerService:
             if context is None:
                 context = self._context_from_parsed_account(message, raw_message)
             expected_kind = context.expected_kind if context is not None else None
+            if (
+                received_event is not None
+                and received_event.status == "succeeded"
+                and expected_kind in {"top", "topx"}
+            ):
+                self._logger.info(
+                    "Skipped completed durable %s source event %s before import",
+                    expected_kind,
+                    received_event.source_event_id,
+                )
+                return
             kind = self._resolve_message_kind(expected_kind, raw_message)
         attribution = self._resolve_and_record_server_attribution(
             message,

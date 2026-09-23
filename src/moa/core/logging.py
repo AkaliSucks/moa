@@ -93,6 +93,8 @@ _PROJECTION_KINDS = frozenset(
         "settings",
         "sphere_result",
         "timers",
+        "top",
+        "topx",
         "towerstate",
         "lootstate",
         "wishlist",

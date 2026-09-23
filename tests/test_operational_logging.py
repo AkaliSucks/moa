@@ -42,6 +42,27 @@ def test_bounded_fields_are_accepted(caplog: pytest.LogCaptureFixture) -> None:
     assert "replayed=true" in caplog.records[-1].message
 
 
+@pytest.mark.parametrize("projection_kind", ("top", "topx"))
+def test_top_family_uses_existing_projection_event_contract(
+    caplog: pytest.LogCaptureFixture, projection_kind: str
+) -> None:
+    caplog.set_level(logging.INFO, logger="test.operational.top")
+
+    emit_operational_event(
+        logging.getLogger("test.operational.top"),
+        "projection.completed",
+        source_event_id=2,
+        processing_attempt_id=3,
+        projection_kind=projection_kind,
+        outcome="succeeded",
+    )
+
+    assert caplog.records[-1].message == (
+        "event=projection.completed component=discord_listener outcome=succeeded "
+        f"source_event_id=2 processing_attempt_id=3 projection_kind={projection_kind}"
+    )
+
+
 def test_unknown_event_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unknown operational event"):
         emit_operational_event(logging.getLogger("test.operational"), "unknown.event")  # type: ignore[arg-type]
@@ -66,6 +87,11 @@ def test_unknown_field_is_rejected() -> None:
         (
             "projection.completed",
             {"source_event_id": 1, "projection_kind": "unknown", "outcome": "succeeded"},
+            "projection kind",
+        ),
+        (
+            "projection.completed",
+            {"source_event_id": 1, "projection_kind": "topo", "outcome": "succeeded"},
             "projection kind",
         ),
         (

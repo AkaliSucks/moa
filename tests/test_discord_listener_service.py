@@ -3334,11 +3334,27 @@ def _sanitized_top_family_message(fixture: str, command: str, message_id: int, u
     ("topx", "topx", "topx_page"),
 ])
 def test_listener_top_family_durable_replay_after_restart(
-    tmp_path, fixture: str, command: str, import_kind: str
+    tmp_path, caplog, fixture: str, command: str, import_kind: str
 ) -> None:
-    listener, _catalog, database_path = _durable_listener(tmp_path)
+    listener, repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+    record_failure = Mock(wraps=listener._record_processing_failure)
+    listener._record_processing_failure = record_failure
+    mark_failure = Mock(wraps=repository.mark_processing_failure)
+    repository.mark_processing_failure = mark_failure
     message = _sanitized_top_family_message(fixture, command, 1601)
+    caplog.set_level(logging.INFO, logger="moa.discord")
     asyncio.run(listener.handle_bot_response(message))
+    assert importer.import_message.call_count == 1
+    record_failure.assert_not_called()
+    mark_failure.assert_not_called()
+    projection_kind = "topx" if fixture == "topx" else "top"
+    assert (
+        "event=projection.completed component=discord_listener outcome=succeeded "
+        f"source_event_id=1 processing_attempt_id=1 projection_kind={projection_kind}"
+    ) in caplog.text
+    assert "event=processing.failed" not in caplog.text
     with connect(database_path) as connection:
         assert connection.execute(
             "SELECT kind FROM import_events"
@@ -3352,9 +3368,33 @@ def test_listener_top_family_durable_replay_after_restart(
             "import_events", "rank_snapshots", "top_owner_observations",
             "unavailable_character_observations", "discord_projection_links",
         ))
-    restarted, _catalog, _ = _durable_listener(tmp_path)
+        first_attempt_count = connection.execute(
+            "SELECT COUNT(*) FROM discord_processing_attempts"
+        ).fetchone()[0]
+    restarted, replay_repository, _ = _durable_listener(tmp_path)
+    replay_importer = Mock(wraps=restarted._importer)
+    restarted._importer = replay_importer
+    resolve_kind = Mock(wraps=restarted._resolve_message_kind)
+    restarted._resolve_message_kind = resolve_kind
+    replay_failure = Mock(wraps=restarted._record_processing_failure)
+    restarted._record_processing_failure = replay_failure
+    replay_mark_failure = Mock(wraps=replay_repository.mark_processing_failure)
+    replay_repository.mark_processing_failure = replay_mark_failure
+    caplog.clear()
     asyncio.run(restarted.handle_bot_response(message))
+    replay_importer.import_message.assert_not_called()
+    resolve_kind.assert_not_called()
+    replay_failure.assert_not_called()
+    replay_mark_failure.assert_not_called()
+    assert "event=projection.replayed" not in caplog.text
+    assert "event=processing.failed" not in caplog.text
     with connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT status FROM discord_source_events"
+        ).fetchone()[0] == "succeeded"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_processing_attempts"
+        ).fetchone()[0] == first_attempt_count
         assert first_counts == tuple(connection.execute(
             f"SELECT COUNT(*) FROM {table}"
         ).fetchone()[0] for table in (
@@ -3363,6 +3403,66 @@ def test_listener_top_family_durable_replay_after_restart(
         ))
     assert first_counts[0] == first_counts[4] == 1
     assert first_counts[1] == 2
+
+
+@pytest.mark.parametrize(("fixture", "command"), [
+    ("top", "top"),
+    ("topo", "topo"),
+    ("topx", "topx"),
+])
+def test_listener_top_family_identical_content_with_new_source_imports(
+    tmp_path, fixture: str, command: str
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    importer = Mock(wraps=listener._importer)
+    listener._importer = importer
+
+    asyncio.run(listener.handle_bot_response(
+        _sanitized_top_family_message(fixture, command, 1601)
+    ))
+    asyncio.run(listener.handle_bot_response(
+        _sanitized_top_family_message(fixture, command, 1602)
+    ))
+
+    assert importer.import_message.call_count == 2
+    with connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM import_events").fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM discord_source_events WHERE status = 'succeeded'"
+        ).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(("fixture", "command"), [
+    ("top", "top"),
+    ("topo", "topo"),
+    ("topx", "topx"),
+])
+def test_listener_top_family_retryable_failure_reaches_importer_on_retry(
+    tmp_path, fixture: str, command: str
+) -> None:
+    listener, _repository, database_path = _durable_listener(tmp_path)
+    coordinator = listener._importer._top_page_projection_coordinator
+    method = "coordinate_topx_page" if fixture == "topx" else "coordinate_top_page"
+    setattr(coordinator, method, Mock(side_effect=RuntimeError("temporary top failure")))
+    message = _sanitized_top_family_message(fixture, command, 1601)
+
+    asyncio.run(listener.handle_bot_response(message))
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["status"], row["retryable"]) for row in attempts] == [("failed", 1)]
+    assert _receipt_rows(database_path, "import_events") == []
+
+    restarted, _repository, _ = _durable_listener(tmp_path)
+    importer = Mock(wraps=restarted._importer)
+    restarted._importer = importer
+    asyncio.run(restarted.handle_bot_response(message))
+
+    assert importer.import_message.call_count == 1
+    attempts = _receipt_rows(database_path, "discord_processing_attempts")
+    assert [(row["status"], row["retryable"]) for row in attempts] == [
+        ("failed", 1),
+        ("succeeded", 0),
+    ]
+    assert len(_receipt_rows(database_path, "import_events")) == 1
 
 
 def test_listener_topx_two_users_in_one_channel_keep_separate_source_events(tmp_path) -> None:
