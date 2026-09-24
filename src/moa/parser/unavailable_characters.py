@@ -66,9 +66,14 @@ class UnavailableCharacterPageParser:
                 or entry.group("legacy_markdown_series")
             )
             assert rank is not None and name is not None and series is not None
+            normalized_name = name.removesuffix(" 💞").strip()
+            if not normalized_name:
+                continue
+            if entry.group("markdown_series") is not None and series.count("**") % 2:
+                continue
             characters.append(
                 UnavailableCharacter(
-                    name=name.removesuffix(" 💞").strip(),
+                    name=normalized_name,
                     series=series.strip(),
                     claim_rank=self._number(rank),
                     reason=entry.group("reason"),

@@ -1894,6 +1894,7 @@ def test_unavailable_character_parser_accepts_current_markdown_topx_rows() -> No
         "\u200b\n"
         "**#1,002** - **Character Name** - Series Name 🚫\n"
         "**#88** - **Heart Character 💞** - Heart Series\u202f\u202f🚫\n"
+        "**#120** - **2B: Café!** - Series: Extra 🚫\n"
         "**#119** - **Reason Character** - Reason Series 🚫 ($toggleirl)\n"
         "Page 2 / 67"
     )
@@ -1907,6 +1908,7 @@ def test_unavailable_character_parser_accepts_current_markdown_topx_rows() -> No
     ] == [
         (1002, "Character Name", "Series Name", None),
         (88, "Heart Character", "Heart Series", None),
+        (120, "2B: Café!", "Series: Extra", None),
         (119, "Reason Character", "Reason Series", "$toggleirl"),
     ]
 
@@ -1937,6 +1939,12 @@ def test_unavailable_character_parser_keeps_legacy_plain_topx_rows() -> None:
         "**#1** - **Char**acter** - Series 🚫",
         "**#1 - **Character** - Series 🚫",
         "#1** - **Character** - Series 🚫",
+        "**#1** - **** - Series 🚫",
+        "**#1** - **   ** - Series 🚫",
+        "#1 - - Series 🚫",
+        "#1 -   - Series 🚫",
+        "**#1** - **Character** - Series** 🚫",
+        "**#1** - **Character** - **Series 🚫",
         "**#1** - Character - Series 🚫",
         "#1 - **Character** - Series 🚫",
         "**#1** - **Character - Series 🚫",
