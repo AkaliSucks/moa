@@ -1888,6 +1888,85 @@ def test_unavailable_character_parser_preserves_normalization_and_markdown_text(
     assert page.characters[0].reason == "$togglewestern"
 
 
+def test_unavailable_character_parser_accepts_current_markdown_topx_rows() -> None:
+    page = MudaeTextParser().parse_unavailable_characters(
+        "🏆 TOP 1,000\n"
+        "\u200b\n"
+        "**#1,002** - **Character Name** - Series Name 🚫\n"
+        "**#88** - **Heart Character 💞** - Heart Series\u202f\u202f🚫\n"
+        "**#119** - **Reason Character** - Reason Series 🚫 ($toggleirl)\n"
+        "Page 2 / 67"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 2
+    assert page.page_count == 67
+    assert [
+        (character.claim_rank, character.name, character.series, character.reason)
+        for character in page.characters
+    ] == [
+        (1002, "Character Name", "Series Name", None),
+        (88, "Heart Character", "Heart Series", None),
+        (119, "Reason Character", "Reason Series", "$toggleirl"),
+    ]
+
+
+def test_unavailable_character_parser_keeps_legacy_plain_topx_rows() -> None:
+    page = MudaeTextParser().parse_unavailable_characters(
+        "🏆 TOP 1000\n"
+        "#1,002 - Legacy Character 💞 - Legacy Series 🚫\n"
+        "#119 - Reason Character - Reason Series 🚫 ($toggleirl)\n"
+        "Page 1 / 67"
+    )
+
+    assert page.limit == 1000
+    assert page.page_number == 1
+    assert page.page_count == 67
+    assert [
+        (character.claim_rank, character.name, character.reason)
+        for character in page.characters
+    ] == [
+        (1002, "Legacy Character", None),
+        (119, "Reason Character", "$toggleirl"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "**#1** - **Char**acter** - Series 🚫",
+        "**#1 - **Character** - Series 🚫",
+        "#1** - **Character** - Series 🚫",
+        "**#1** - Character - Series 🚫",
+        "#1 - **Character** - Series 🚫",
+        "**#1** - **Character - Series 🚫",
+        "#1 - Character** - Series 🚫",
+        "#1 - **Character** - Series 🚫",
+        "#x - Character - Series 🚫",
+        "#1 - Character - Series 🚫 ($toggleirl",
+        "#1 - Character - Series 🚫 ()",
+        "#1 - Character - Series",
+    ],
+)
+def test_unavailable_character_parser_rejects_malformed_or_partial_rows(row: str) -> None:
+    with pytest.raises(MudaeParseError, match="No unavailable characters"):
+        UnavailableCharacterPageParser(
+            MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number
+        ).parse(f"🏆 TOP 1000\n{row}\nPage 1 / 67")
+
+
+def test_unavailable_character_parser_does_not_read_malformed_header_or_page_metadata() -> None:
+    page = MudaeTextParser().parse_unavailable_characters(
+        "🏆 TOP **1,000**\n"
+        "#1 - Legacy Character - Series 🚫\n"
+        "Page 1 of 2"
+    )
+
+    assert page.limit is None
+    assert page.page_number is None
+    assert page.page_count is None
+
+
 def test_unavailable_character_parser_skips_malformed_and_empty_reason_rows() -> None:
     page = UnavailableCharacterPageParser(
         MudaeParseError, MudaeTextParser._lines, MudaeTextParser._number

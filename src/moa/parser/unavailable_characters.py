@@ -12,8 +12,20 @@ class UnavailableCharacterPageParser:
     _TOP_HEADER = re.compile(r"\bTOP\s+(?P<limit>[\d,]+)\b", re.IGNORECASE)
     _PAGE = re.compile(r"^Page\s+(?P<page>\d+)\s*/\s*(?P<pages>\d+)$", re.IGNORECASE)
     _UNAVAILABLE_ENTRY = re.compile(
-        r"^#(?P<rank>[\d,]+)\s+-\s+"
-        r"(?P<name>\S(?:.*?\S)?)\s+-\s+(?P<series>\S(?:.*?\S)?)"
+        r"^(?:"
+        r"\*\*#(?P<markdown_rank>[\d,]+)\*\*\s+-\s+"
+        r"\*\*(?P<markdown_name>(?:(?!\*\*).)+?)\*\*\s+-\s+"
+        r"(?P<markdown_series>\S(?:.*?\S)?)"
+        r"|"
+        r"#(?P<plain_rank>[\d,]+)\s+-\s+"
+        r"(?:"
+        r"(?!\*\*)(?P<plain_name>(?:(?!\*\*).)+?)(?<!\*\*)\s+-\s+"
+        r"(?P<plain_series>\S(?:.*?\S)?)"
+        r"|"
+        r"(?P<legacy_markdown_name>\*\*(?:(?!\*\*).)+?\*\*)\s+-\s+"
+        r"(?P<legacy_markdown_series>\*\*(?:(?!\*\*).)+?\*\*)"
+        r")"
+        r")"
         r"\s*🚫(?:\s*\((?P<reason>\S(?:[^)]*?\S)?)\))?$"
     )
     _ERROR_MESSAGE = "No unavailable characters found in the Mudae $topx output."
@@ -42,11 +54,23 @@ class UnavailableCharacterPageParser:
             entry = self._UNAVAILABLE_ENTRY.match(line)
             if entry is None:
                 continue
+            rank = entry.group("markdown_rank") or entry.group("plain_rank")
+            name = (
+                entry.group("markdown_name")
+                or entry.group("plain_name")
+                or entry.group("legacy_markdown_name")
+            )
+            series = (
+                entry.group("markdown_series")
+                or entry.group("plain_series")
+                or entry.group("legacy_markdown_series")
+            )
+            assert rank is not None and name is not None and series is not None
             characters.append(
                 UnavailableCharacter(
-                    name=entry.group("name").removesuffix(" 💞").strip(),
-                    series=entry.group("series").strip(),
-                    claim_rank=self._number(entry.group("rank")),
+                    name=name.removesuffix(" 💞").strip(),
+                    series=series.strip(),
+                    claim_rank=self._number(rank),
                     reason=entry.group("reason"),
                 )
             )
